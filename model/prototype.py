@@ -1,0 +1,36 @@
+import torch
+import torch.nn as nn
+from layer.prototype import Prototype_Layer
+from layer.align_block import align
+
+class Prototype(nn.Module):
+    def __init__(
+        self, prototype_num, prototype_dim, input_length, 
+        output_dim, prototype_split_num, top_k_activate, split_ratio
+    ):
+        super(Prototype, self).__init__()
+
+        self.prototype_dim = prototype_dim
+        self.output_dim = output_dim
+        self.input_length = input_length
+
+        self.alpha = nn.Parameter(torch.tensor(0.0))
+
+        self.prototype = Prototype_Layer(
+            prototype_dim=self.prototype_dim,
+            init_prototype_num=prototype_num,                                                           
+            input_length=self.input_length,
+            output_dim=self.output_dim,
+            prototype_split_num=prototype_split_num,
+            top_k_activate=top_k_activate,
+            split_ratio=split_ratio,
+        )
+
+        self.align_layer = align()
+
+    def forward(self, embd, x):
+        embd = self.align_layer(x, embd, self.input_length)
+        output, score = self.prototype(embd)
+        output = self.align_layer.backward(x,output, self.input_length)
+
+        return output, score

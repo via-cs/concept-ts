@@ -1,0 +1,638 @@
+"""
+Part A: Data Preprocessing for LLM-Guided Prototype Initialization
+
+This script performs:
+1. Segmentation of multivariate time series into windows
+   (384 lookback + 96 forecast = 480 steps)
+2. Per-segment statistical extraction for each channel
+3. Global statistical extraction across the full training set
+4. JSON serialization for LLM consumption
+
+Output: A JSON file containing:
+  - "metadata": dataset info, channel descriptions, feature types
+  - "global_statistics": per-channel statistics across entire training set
+  - "segment_summaries": list of per-segment statistical summaries (capped for LLM context)
+"""
+
+import os
+import json
+import argparse
+import numpy as np
+import pandas as pd
+
+
+# ============================================================
+# Channel Metadata
+# ============================================================
+
+CHANNEL_META = {
+    # Discrete (categorical) channels
+    "lunar_year":       {"type": "discrete", "description": "Year in Chinese lunar calendar (1-5, cyclical)"},
+    "lunar_month":      {"type": "discrete", "description": "Month in Chinese lunar calendar (1-12)"},
+    "lunar_day":        {"type": "discrete", "description": "Day in Chinese lunar calendar (1-30)"},
+    "solar_year":       {"type": "discrete", "description": "Solar calendar year index (2-5)"},
+    "solar_month":      {"type": "discrete", "description": "Month of year (1-12)"},
+    "solar_day":        {"type": "discrete", "description": "Day of month (1-31)"},
+    "month":            {"type": "discrete", "description": "Hour of day (0-23, despite column name 'month')"},
+    "minute":           {"type": "discrete", "description": "Minute within hour (0, 15, 30, 45)"},
+    "is_special_workday":  {"type": "discrete", "description": "Whether this is a special working day (0 or 1, e.g., weekend rescheduled as workday)"},
+    "is_special_holiday":  {"type": "discrete", "description": "Whether this is a special holiday (0 or 1, e.g., weekday declared as holiday)"},
+    "is_holiday":       {"type": "discrete", "description": "Whether this is a holiday (0 or 1)"},
+    "is_workday":       {"type": "discrete", "description": "Whether this is a workday (0 or 1)"},
+    "day_of_week":      {"type": "discrete", "description": "Day of week (0=Monday to 6=Sunday)"},
+    "pricing":          {"type": "discrete", "description": "Electricity pricing tier (0.1, 0.3, 1.0, 1.7, 2.0)"},
+    # Continuous channels
+    "Skin_temperature":              {"type": "continuous", "description": "Surface skin temperature (°C)"},
+    "Surface_pressure":              {"type": "continuous", "description": "Surface atmospheric pressure (kPa)"},
+    "Surface_sensible_heat_flux":    {"type": "continuous", "description": "Surface sensible heat flux (W/m²)"},
+    "Total_cloud_cover":             {"type": "continuous", "description": "Total cloud cover"},
+    "Surface_net_solar_radiation":   {"type": "continuous", "description": "Net solar radiation at surface (W/m²)"},
+    "Total_precipitation_4h_ahead":  {"type": "continuous", "description": "Forecasted total precipitation 4h ahead (mm)"},
+    "10_metre_wind":                 {"type": "continuous", "description": "Wind speed at 10m height (m/s)"},
+    "Relative_humidity":             {"type": "continuous", "description": "Relative humidity (%)"},
+    # Target
+    "load":             {"type": "continuous", "description": "Electricity load (target variable, MW)"},
+}
+
+
+# ============================================================
+# Statistical Extraction Functions
+# ============================================================
+
+def _skewness(values: np.ndarray) -> float:
+    """Compute skewness without scipy."""
+    n = len(values)
+    if n < 3:
+        return 0.0
+    m = np.mean(values)
+    s = np.std(values, ddof=1)
+    if s < 1e-12:
+        return 0.0
+    return float(np.mean(((values - m) / s) ** 3))
+
+
+def _kurtosis(values: np.ndarray) -> float:
+    """Compute excess kurtosis without scipy."""
+    n = len(values)
+    if n < 4:
+        return 0.0
+    m = np.mean(values)
+    s = np.std(values, ddof=1)
+    if s < 1e-12:
+        return 0.0
+    return float(np.mean(((values - m) / s) ** 4) - 3.0)
+
+
+def _linregress_slope(values: np.ndarray) -> float:
+    """Compute linear regression slope without scipy."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    t = np.arange(n, dtype=np.float64)
+    t_mean = t.mean()
+    v_mean = values.mean()
+    denom = np.sum((t - t_mean) ** 2)
+    if denom < 1e-12:
+        return 0.0
+    return float(np.sum((t - t_mean) * (values - v_mean)) / denom)
+
+
+def extract_continuous_stats(values: np.ndarray) -> dict:
+    """
+    mean, median, std, min, max, range,
+    skewness, kurtosis, slope (linear trend), plus volume (sum of abs changes).
+    Values are rounded to 2 decimal places for compact LLM representation.
+    """
+    n = len(values)
+    if n == 0:
+        return {}
+
+    mean_val = float(np.mean(values))
+    std_val = float(np.std(values, ddof=1)) if n > 1 else 0.0
+    min_val = float(np.min(values))
+    max_val = float(np.max(values))
+    slope = _linregress_slope(values)
+
+    # Volume: sum of absolute differences (measures total variation)
+    volume = float(np.sum(np.abs(np.diff(values)))) if n > 1 else 0.0
+
+    return {
+        "mean": round(mean_val, 2),
+        "median": round(float(np.median(values)), 2),
+        "std": round(std_val, 2),
+        "min": round(min_val, 2),
+        "max": round(max_val, 2),
+        "range": round(max_val - min_val, 2),
+        "skewness": round(_skewness(values), 2),
+        "kurtosis": round(_kurtosis(values), 2),
+        "slope": round(slope, 4),
+        "volume": round(volume, 2),
+    }
+
+
+def extract_discrete_stats(values: np.ndarray) -> dict:
+    """
+    mode, unique count, and value distribution.
+    """
+    n = len(values)
+    if n == 0:
+        return {}
+
+    unique, counts = np.unique(values, return_counts=True)
+    mode_idx = np.argmax(counts)
+
+    # Value distribution (top values by frequency)
+    distribution = {}
+    for val, cnt in sorted(zip(unique, counts), key=lambda x: -x[1]):
+        distribution[str(int(val))] = round(float(cnt) / n, 2)
+
+    return {
+        "mode": int(unique[mode_idx]),
+        "n_unique": int(len(unique)),
+        "distribution": distribution,
+    }
+
+
+def extract_segment_stats(segment_df: pd.DataFrame, channel_meta: dict) -> dict:
+    """Extract statistics for all channels in a single segment."""
+    stats = {}
+    for col in segment_df.columns:
+        if col not in channel_meta:
+            continue
+        values = segment_df[col].values
+        if channel_meta[col]["type"] == "continuous":
+            stats[col] = extract_continuous_stats(values)
+        else:
+            stats[col] = extract_discrete_stats(values)
+    return stats
+
+
+def extract_cross_channel_stats(segment_df: pd.DataFrame) -> dict:
+    """Extract cross-channel statistics that capture variable interactions.
+
+    These capture relationships like "temperature AND weekday" that aren't
+    visible in any single channel's statistics.
+    """
+    cross = {}
+
+    # Correlation between load and key continuous variables
+    if "load" in segment_df.columns:
+        load = segment_df["load"].values
+        for col in ["Skin_temperature", "Relative_humidity", "Surface_net_solar_radiation"]:
+            if col in segment_df.columns:
+                other = segment_df[col].values
+                if np.std(load) > 1e-8 and np.std(other) > 1e-8:
+                    corr = float(np.corrcoef(load, other)[0, 1])
+                    cross[f"load_corr_{col}"] = round(corr, 2)
+
+    # Is the segment entirely within one day type?
+    if "is_workday" in segment_df.columns:
+        workday_vals = segment_df["is_workday"].unique()
+        cross["is_uniform_day_type"] = bool(len(workday_vals) == 1)
+        if len(workday_vals) == 1:
+            cross["uniform_day_type"] = "workday" if workday_vals[0] == 1.0 else "non_workday"
+
+    # Is the segment entirely within one holiday state?
+    if "is_holiday" in segment_df.columns:
+        holiday_vals = segment_df["is_holiday"].unique()
+        cross["contains_holiday"] = bool(1.0 in holiday_vals)
+        cross["is_all_holiday"] = bool(len(holiday_vals) == 1 and holiday_vals[0] == 1.0)
+
+    return cross
+
+
+# ============================================================
+# Global Statistics
+# ============================================================
+
+def compute_global_statistics(df: pd.DataFrame, channel_meta: dict) -> dict:
+    """
+    Compute global statistics across the entire training set.
+    Following ShapeTalk, we cap this at a manageable summary so the LLM
+    can use it for Dynamic Feature Threshold Inference.
+    """
+    global_stats = {}
+    for col in df.columns:
+        if col not in channel_meta:
+            continue
+        values = df[col].values
+        if channel_meta[col]["type"] == "continuous":
+            stats = extract_continuous_stats(values)
+            # Add percentiles for threshold inference
+            for p in [5, 10, 25, 75, 90, 95]:
+                stats[f"p{p}"] = round(float(np.percentile(values, p)), 2)
+            global_stats[col] = stats
+        else:
+            global_stats[col] = extract_discrete_stats(values)
+
+    return global_stats
+
+
+# ============================================================
+# Segmentation
+# ============================================================
+
+def segment_time_series(
+    df: pd.DataFrame,
+    input_length: int = 384,
+    output_length: int = 96,
+    stride: int = 96,
+) -> list:
+    """Segment the time series into non-overlapping (or strided) windows.
+
+    Each segment = 384 (lookback) + 96 (forecast) = 480 time steps.
+
+    Args:
+        df: Full dataframe with all channels + target
+        input_length: Lookback window size (384 = 4 days at 15-min resolution)
+        output_length: Forecast window size (96 = 1 day)
+        stride: Step size between consecutive segments. Default 96 (1 day)
+                to get non-overlapping forecast windows.
+
+    Returns:
+        List of dicts, each containing:
+          - "segment_id": int
+          - "start_idx": int (start row in original df)
+          - "end_idx": int (end row, exclusive)
+          - "lookback_stats": per-channel stats for the lookback window
+          - "forecast_stats": per-channel stats for the forecast window (target only)
+          - "cross_channel_stats": interaction statistics
+          - "time_context": calendar context at segment start/end
+    """
+    total_window = input_length + output_length
+    n_rows = len(df)
+    segments = []
+
+    seg_id = 0
+    for start in range(0, n_rows - total_window + 1, stride):
+        end = start + total_window
+        lookback_end = start + input_length
+
+        window_df = df.iloc[start:end]
+        lookback_df = df.iloc[start:lookback_end]
+        forecast_df = df.iloc[lookback_end:end]
+
+        # Time context: what calendar period does this segment cover
+        time_context = _extract_time_context(lookback_df, forecast_df)
+
+        # Per-channel statistics for lookback window (all channels)
+        lookback_stats = extract_segment_stats(lookback_df, CHANNEL_META)
+
+        # Per-channel statistics for forecast window (target + key covariates)
+        forecast_stats = extract_segment_stats(forecast_df, CHANNEL_META)
+
+        # Cross-channel statistics on full window
+        cross_stats = extract_cross_channel_stats(window_df)
+
+        segments.append({
+            "segment_id": seg_id,
+            "start_idx": int(start),
+            "end_idx": int(end),
+            "lookback_stats": lookback_stats,
+            "forecast_stats": forecast_stats,
+            "cross_channel_stats": cross_stats,
+            "time_context": time_context,
+        })
+
+        seg_id += 1
+
+    return segments
+
+
+def _extract_time_context(lookback_df: pd.DataFrame, forecast_df: pd.DataFrame) -> dict:
+    """Extract human-readable time context for a segment."""
+    context = {}
+
+    # Lookback window time range
+    lb_start = lookback_df.iloc[0]
+    lb_end = lookback_df.iloc[-1]
+    fc_start = forecast_df.iloc[0]
+    fc_end = forecast_df.iloc[-1]
+
+    context["lookback_start"] = {
+        "solar_month": int(lb_start.get("solar_month", 0)),
+        "solar_day": int(lb_start.get("solar_day", 0)),
+        "hour": int(lb_start.get("month", 0)),  # 'month' column is actually hour
+        "minute": int(lb_start.get("minute", 0)),
+    }
+    context["lookback_end"] = {
+        "solar_month": int(lb_end.get("solar_month", 0)),
+        "solar_day": int(lb_end.get("solar_day", 0)),
+        "hour": int(lb_end.get("month", 0)),
+        "minute": int(lb_end.get("minute", 0)),
+    }
+    context["forecast_start"] = {
+        "solar_month": int(fc_start.get("solar_month", 0)),
+        "solar_day": int(fc_start.get("solar_day", 0)),
+        "hour": int(fc_start.get("month", 0)),
+        "minute": int(fc_start.get("minute", 0)),
+    }
+    context["forecast_end"] = {
+        "solar_month": int(fc_end.get("solar_month", 0)),
+        "solar_day": int(fc_end.get("solar_day", 0)),
+        "hour": int(fc_end.get("month", 0)),
+        "minute": int(fc_end.get("minute", 0)),
+    }
+
+    # Derive season from solar month (Northern Hemisphere, China)
+    month = int(fc_start.get("solar_month", 1))
+    if month in [3, 4, 5]:
+        context["season"] = "spring"
+    elif month in [6, 7, 8]:
+        context["season"] = "summer"
+    elif month in [9, 10, 11]:
+        context["season"] = "autumn"
+    else:
+        context["season"] = "winter"
+
+    return context
+
+
+# ============================================================
+# Sampling for LLM Context Budget
+# ============================================================
+
+def sample_segments_for_llm(
+    segments: list,
+    max_segments: int = 300,
+    strategy: str = "stratified",
+) -> list:
+    """Sample a subset of segments to fit within LLM context budget.
+
+    Following ShapeTalk's approach of capping patch counts (300 for local,
+    100 for global) to keep the LLM prompt manageable.
+
+    Args:
+        segments: Full list of segment summaries
+        max_segments: Maximum number to include
+        strategy: "stratified" (sample evenly across seasons/day types) or "uniform"
+
+    Returns:
+        Sampled subset of segments
+    """
+    if len(segments) <= max_segments:
+        return segments
+
+    if strategy == "uniform":
+        indices = np.linspace(0, len(segments) - 1, max_segments, dtype=int)
+        return [segments[i] for i in indices]
+
+    elif strategy == "stratified":
+        # Group by season and day type for balanced representation
+        buckets = {}
+        for seg in segments:
+            season = seg["time_context"].get("season", "unknown")
+            day_type = seg["cross_channel_stats"].get("uniform_day_type", "mixed")
+            key = f"{season}_{day_type}"
+            if key not in buckets:
+                buckets[key] = []
+            buckets[key].append(seg)
+
+        # Sample proportionally from each bucket
+        sampled = []
+        per_bucket = max(1, max_segments // len(buckets))
+        for key, bucket_segs in buckets.items():
+            n_sample = min(per_bucket, len(bucket_segs))
+            indices = np.linspace(0, len(bucket_segs) - 1, n_sample, dtype=int)
+            sampled.extend([bucket_segs[i] for i in indices])
+
+        # Trim to exact budget if oversampled
+        return sampled[:max_segments]
+
+    return segments[:max_segments]
+
+
+# ============================================================
+# Compact Representation for LLM Context Budget
+# ============================================================
+
+# Key channels to keep in the compact LLM representation.
+# Drops redundant calendar columns (keep solar_month, hour, day_of_week).
+COMPACT_CONTINUOUS_CHANNELS = [
+    "Skin_temperature", "Relative_humidity",
+    "Surface_net_solar_radiation", "Total_precipitation_4h_ahead",
+    "10_metre_wind", "load",
+]
+COMPACT_DISCRETE_CHANNELS = [
+    "solar_month", "month", "is_holiday", "is_workday", "day_of_week", "pricing",
+]
+# For continuous channels, keep only mean, std, slope (3 numbers instead of 10)
+# For discrete channels, keep only mode
+
+
+def compact_segment(seg: dict) -> dict:
+    """Reduce a segment summary to minimal representation for LLM context.
+
+    Shrinks each segment from ~2KB to ~300 bytes by keeping only the most
+    informative statistics for the most important channels.
+    """
+    compact = {
+        "id": seg["segment_id"],
+        "ctx": seg["time_context"]["season"],
+        "fc_hr": seg["time_context"]["forecast_start"]["hour"],
+    }
+
+    # Lookback: compact continuous stats
+    lb = {}
+    for ch in COMPACT_CONTINUOUS_CHANNELS:
+        if ch in seg["lookback_stats"]:
+            s = seg["lookback_stats"][ch]
+            lb[ch] = {"m": s["mean"], "s": s["std"], "sl": s["slope"]}
+    # Lookback: compact discrete stats
+    for ch in COMPACT_DISCRETE_CHANNELS:
+        if ch in seg["lookback_stats"]:
+            s = seg["lookback_stats"][ch]
+            lb[ch] = {"mode": s["mode"]}
+    compact["lb"] = lb
+
+    # Forecast: just the target variable
+    if "load" in seg["forecast_stats"]:
+        fs = seg["forecast_stats"]["load"]
+        compact["fc"] = {"m": fs["mean"], "s": fs["std"], "sl": fs["slope"]}
+
+    # Cross-channel: keep as-is (already small)
+    compact["xc"] = seg["cross_channel_stats"]
+
+    return compact
+
+
+# ============================================================
+# Main Pipeline
+# ============================================================
+
+def run_preprocessing(
+    data_path: str,
+    output_dir: str,
+    input_length: int = 384,
+    output_length: int = 96,
+    stride: int = 96,
+    max_segments_for_llm: int = 300,
+):
+    """Run the full Part A preprocessing pipeline.
+
+    Args:
+        data_path: Path to the CSV file (e.g., dataset/LOF/RE.csv)
+        output_dir: Directory to save output JSON files
+        input_length: Lookback window size
+        output_length: Forecast window size
+        stride: Stride between segments
+        max_segments_for_llm: Max segments to include in LLM-facing JSON
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    dataset_name = os.path.splitext(os.path.basename(data_path))[0]
+
+    print(f"Loading dataset from {data_path}...")
+    df = pd.read_csv(data_path)
+    print(f"  Shape: {df.shape}")
+
+    # Use training split only (first 70%)
+    train_end = int(0.7 * len(df))
+    train_df = df.iloc[:train_end].copy()
+    print(f"  Training set: {len(train_df)} rows ({len(train_df)/96:.0f} days)")
+
+    # Step 1: Global statistics
+    print("\nComputing global statistics...")
+    global_stats = compute_global_statistics(train_df, CHANNEL_META)
+    print(f"  Computed for {len(global_stats)} channels")
+
+    # Step 2: Segmentation and per-segment extraction
+    print(f"\nSegmenting (window={input_length}+{output_length}, stride={stride})...")
+    all_segments = segment_time_series(
+        train_df,
+        input_length=input_length,
+        output_length=output_length,
+        stride=stride,
+    )
+    print(f"  Total segments: {len(all_segments)}")
+
+    # Step 3: Sample for LLM context budget
+    print(f"\nSampling {max_segments_for_llm} segments for LLM context...")
+    sampled_segments = sample_segments_for_llm(
+        all_segments, max_segments=max_segments_for_llm, strategy="stratified"
+    )
+    print(f"  Sampled: {len(sampled_segments)} segments")
+
+    # Step 4: Build metadata
+    metadata = {
+        "dataset_name": dataset_name,
+        "data_path": data_path,
+        "total_rows": len(df),
+        "training_rows": len(train_df),
+        "time_resolution": "15 minutes",
+        "input_length": input_length,
+        "output_length": output_length,
+        "stride": stride,
+        "total_segments": len(all_segments),
+        "sampled_segments": len(sampled_segments),
+        "target_variable": "load",
+        "target_description": "Electricity load in MW",
+        "channels": {
+            col: CHANNEL_META[col] for col in df.columns if col in CHANNEL_META
+        },
+    }
+
+    # Step 5: Save outputs
+    # Full output (all segments — for Instance Finding in Part C)
+    full_output = {
+        "metadata": metadata,
+        "global_statistics": global_stats,
+        "segments": all_segments,
+    }
+    full_path = os.path.join(output_dir, f"{dataset_name}_full_segments.json")
+    print(f"\nSaving full segments to {full_path}...")
+    with open(full_path, "w") as f:
+        json.dump(full_output, f, indent=2)
+    file_size_mb = os.path.getsize(full_path) / (1024 * 1024)
+    print(f"  Size: {file_size_mb:.1f} MB")
+
+    # LLM-facing output (sampled segments + global stats — for Part B)
+    llm_output = {
+        "metadata": metadata,
+        "global_statistics": global_stats,
+        "segment_summaries": sampled_segments,
+    }
+    llm_path = os.path.join(output_dir, f"{dataset_name}_llm_context.json")
+    print(f"Saving LLM context to {llm_path}...")
+    with open(llm_path, "w") as f:
+        json.dump(llm_output, f, indent=2)
+    file_size_mb = os.path.getsize(llm_path) / (1024 * 1024)
+    print(f"  Size: {file_size_mb:.1f} MB")
+
+    # Compact LLM output (fits within ~50K tokens for most LLMs)
+    compact_segments = [compact_segment(s) for s in sampled_segments]
+    compact_output = {
+        "metadata": {
+            "dataset_name": dataset_name,
+            "target_variable": "load",
+            "target_description": "Electricity load in MW",
+            "time_resolution": "15 minutes",
+            "input_length": input_length,
+            "output_length": output_length,
+            "total_segments": len(all_segments),
+            "sampled_segments": len(compact_segments),
+            "compact_key": {
+                "lb": "lookback window stats",
+                "fc": "forecast window stats (target only)",
+                "xc": "cross-channel stats",
+                "m": "mean", "s": "std", "sl": "slope",
+                "ctx": "season", "fc_hr": "forecast start hour",
+            },
+            "channels": {
+                col: CHANNEL_META[col]
+                for col in COMPACT_CONTINUOUS_CHANNELS + COMPACT_DISCRETE_CHANNELS
+                if col in CHANNEL_META
+            },
+        },
+        "global_statistics": global_stats,
+        "segments": compact_segments,
+    }
+    compact_path = os.path.join(output_dir, f"{dataset_name}_llm_compact.json")
+    print(f"Saving compact LLM context to {compact_path}...")
+    with open(compact_path, "w") as f:
+        json.dump(compact_output, f, indent=2)
+    file_size_kb = os.path.getsize(compact_path) / 1024
+    est_tokens = os.path.getsize(compact_path) // 4
+    print(f"  Size: {file_size_kb:.0f} KB (~{est_tokens} tokens)")
+
+    # Summary report
+    print("\n" + "=" * 60)
+    print("Preprocessing Complete!")
+    print("=" * 60)
+    print(f"  Dataset:          {dataset_name}")
+    print(f"  Training rows:    {len(train_df)}")
+    print(f"  Total segments:   {len(all_segments)}")
+    print(f"  Sampled for LLM:  {len(sampled_segments)}")
+    print(f"  Full output:      {full_path}")
+    print(f"  LLM context:      {llm_path}")
+
+    return full_output, llm_output
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Part A: Data Preprocessing for LLM-Guided Prototype Init")
+    parser.add_argument("--data_path", type=str, required=True,
+                        help="Path to dataset CSV (e.g., dataset/LOF/RE.csv)")
+    parser.add_argument("--output_dir", type=str, default="./preprocessing/output",
+                        help="Directory to save output JSON files")
+    parser.add_argument("--input_length", type=int, default=384,
+                        help="Lookback window size (default: 384 = 4 days)")
+    parser.add_argument("--output_length", type=int, default=96,
+                        help="Forecast window size (default: 96 = 1 day)")
+    parser.add_argument("--stride", type=int, default=96,
+                        help="Stride between segments (default: 96 = 1 day)")
+    parser.add_argument("--max_segments", type=int, default=300,
+                        help="Max segments for LLM context (default: 300)")
+    args = parser.parse_args()
+
+    run_preprocessing(
+        data_path=args.data_path,
+        output_dir=args.output_dir,
+        input_length=args.input_length,
+        output_length=args.output_length,
+        stride=args.stride,
+        max_segments_for_llm=args.max_segments,
+    )
+
+
+if __name__ == "__main__":
+    main()

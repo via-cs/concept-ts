@@ -1,0 +1,59 @@
+{
+  "prototype_id": 1,
+  "name": "cold_winter_workday",
+  "description": "Cold winter workday with high heating-driven electricity load. This is the dominant high-load regime in the dataset. Sub-zero temperatures drive electric heating demand, creating a characteristic dual-peak pattern: a morning ramp-up as factories and offices open (8-10am), a mild midday dip, and a strong evening peak (17-20pm) as residential heating combines with cooking and lighting. Load stays elevated overnight due to continuous heating.",
+  "reasoning": "Winter workdays consistently produce the highest load in this dataset (5000-5600 MW vs. dataset mean of ~2400 MW). The key drivers are: (1) sub-zero skin temperatures requiring electric heating, (2) industrial/commercial activity on workdays, (3) the combination of heating + industrial load that only occurs on winter workdays. This prototype captures the single most important regime for accurate forecasting.",
+
+  "channel_requirements": {
+    "Skin_temperature": {
+      "operator": "<",
+      "threshold": 0,
+      "unit": "°C",
+      "reasoning": "Sub-zero temperatures are the primary driver of heating demand. Global stats show p25=-0.48°C, so this captures roughly the coldest quarter of the data."
+    },
+    "solar_month": {
+      "operator": "in",
+      "values": [1, 2, 11, 12],
+      "reasoning": "Winter months. Lunar calendar is less reliable for seasonal filtering."
+    },
+    "is_workday": {
+      "operator": "==",
+      "threshold": 1,
+      "reasoning": "Workdays have industrial + commercial + residential load stacked together."
+    },
+    "is_holiday": {
+      "operator": "==",
+      "threshold": 0,
+      "reasoning": "Exclude holidays (including Spring Festival) which drastically reduce industrial load even in winter."
+    },
+    "Relative_humidity": {
+      "operator": null,
+      "reasoning": "No requirement — humidity has weak correlation with load in winter."
+    },
+    "Total_precipitation_4h_ahead": {
+      "operator": null,
+      "reasoning": "No requirement — precipitation has minimal impact on heating-driven load."
+    },
+    "Surface_net_solar_radiation": {
+      "operator": null,
+      "reasoning": "No requirement — solar radiation is low in winter regardless."
+    },
+    "10_metre_wind": {
+      "operator": null,
+      "reasoning": "No requirement — wind has secondary effect compared to temperature."
+    },
+    "day_of_week": {
+      "operator": null,
+      "reasoning": "No requirement beyond is_workday — weekday variation is minimal within workdays."
+    },
+    "pricing": {
+      "operator": null,
+      "reasoning": "No requirement — pricing tier doesn't drive the load pattern shape."
+    }
+  },
+
+  "expected_load_characteristics": {
+    "mean_range": [3500, 5600],
+    "description": "High overall load with dual-peak daily pattern (morning industrial + evening residential)"
+  }
+}

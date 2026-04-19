@@ -1,0 +1,879 @@
+{
+  "prototype_spec": {
+    "prototype_id": 1,
+    "name": "cold_winter_workday",
+    "description": "Cold winter workday with high heating-driven electricity load. This is the dominant high-load regime in the dataset. Sub-zero temperatures drive electric heating demand, creating a characteristic dual-peak pattern: a morning ramp-up as factories and offices open (8-10am), a mild midday dip, and a strong evening peak (17-20pm) as residential heating combines with cooking and lighting. Load stays elevated overnight due to continuous heating.",
+    "reasoning": "Winter workdays consistently produce the highest load in this dataset (5000-5600 MW vs. dataset mean of ~2400 MW). The key drivers are: (1) sub-zero skin temperatures requiring electric heating, (2) industrial/commercial activity on workdays, (3) the combination of heating + industrial load that only occurs on winter workdays. This prototype captures the single most important regime for accurate forecasting.",
+    "channel_requirements": {
+      "Skin_temperature": {
+        "operator": "<",
+        "threshold": 0,
+        "unit": "\u00b0C",
+        "reasoning": "Sub-zero temperatures are the primary driver of heating demand. Global stats show p25=-0.48\u00b0C, so this captures roughly the coldest quarter of the data."
+      },
+      "solar_month": {
+        "operator": "in",
+        "values": [
+          1,
+          2,
+          11,
+          12
+        ],
+        "reasoning": "Winter months. Lunar calendar is less reliable for seasonal filtering."
+      },
+      "is_workday": {
+        "operator": "==",
+        "threshold": 1,
+        "reasoning": "Workdays have industrial + commercial + residential load stacked together."
+      },
+      "is_holiday": {
+        "operator": "==",
+        "threshold": 0,
+        "reasoning": "Exclude holidays (including Spring Festival) which drastically reduce industrial load even in winter."
+      },
+      "Relative_humidity": {
+        "operator": null,
+        "reasoning": "No requirement \u2014 humidity has weak correlation with load in winter."
+      },
+      "Total_precipitation_4h_ahead": {
+        "operator": null,
+        "reasoning": "No requirement \u2014 precipitation has minimal impact on heating-driven load."
+      },
+      "Surface_net_solar_radiation": {
+        "operator": null,
+        "reasoning": "No requirement \u2014 solar radiation is low in winter regardless."
+      },
+      "10_metre_wind": {
+        "operator": null,
+        "reasoning": "No requirement \u2014 wind has secondary effect compared to temperature."
+      },
+      "day_of_week": {
+        "operator": null,
+        "reasoning": "No requirement beyond is_workday \u2014 weekday variation is minimal within workdays."
+      },
+      "pricing": {
+        "operator": null,
+        "reasoning": "No requirement \u2014 pricing tier doesn't drive the load pattern shape."
+      }
+    },
+    "expected_load_characteristics": {
+      "mean_range": [
+        3500,
+        5600
+      ],
+      "description": "High overall load with dual-peak daily pattern (morning industrial + evening residential)"
+    }
+  },
+  "instance_finding": {
+    "n_total_segments": 771,
+    "n_strict_matches": 125,
+    "n_selected": 20,
+    "top_k": 20,
+    "relaxation_log": [],
+    "selected_instances": [
+      {
+        "segment_id": 686,
+        "start_idx": 65856,
+        "end_idx": 66336,
+        "margin": 16.1,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -13.1,
+            "margin": 13.1
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 687,
+        "start_idx": 65952,
+        "end_idx": 66432,
+        "margin": 15.8,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -12.8,
+            "margin": 12.8
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 685,
+        "start_idx": 65760,
+        "end_idx": 66240,
+        "margin": 15.2,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -12.2,
+            "margin": 12.2
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 719,
+        "start_idx": 69024,
+        "end_idx": 69504,
+        "margin": 14.49,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -11.49,
+            "margin": 11.49
+          },
+          "solar_month": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 718,
+        "start_idx": 68928,
+        "end_idx": 69408,
+        "margin": 14.22,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -11.22,
+            "margin": 11.22
+          },
+          "solar_month": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 684,
+        "start_idx": 65664,
+        "end_idx": 66144,
+        "margin": 13.99,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -10.99,
+            "margin": 10.99
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 683,
+        "start_idx": 65568,
+        "end_idx": 66048,
+        "margin": 13.79,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -10.79,
+            "margin": 10.79
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 748,
+        "start_idx": 71808,
+        "end_idx": 72288,
+        "margin": 12.58,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -9.58,
+            "margin": 9.58
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 749,
+        "start_idx": 71904,
+        "end_idx": 72384,
+        "margin": 12.44,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -9.44,
+            "margin": 9.44
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 720,
+        "start_idx": 69120,
+        "end_idx": 69600,
+        "margin": 12.3,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -9.3,
+            "margin": 9.3
+          },
+          "solar_month": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 323,
+        "start_idx": 31008,
+        "end_idx": 31488,
+        "margin": 12.13,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -9.13,
+            "margin": 9.13
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 347,
+        "start_idx": 33312,
+        "end_idx": 33792,
+        "margin": 11.81,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -8.81,
+            "margin": 8.81
+          },
+          "solar_month": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 750,
+        "start_idx": 72000,
+        "end_idx": 72480,
+        "margin": 11.78,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -8.78,
+            "margin": 8.78
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 698,
+        "start_idx": 67008,
+        "end_idx": 67488,
+        "margin": 11.13,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -8.13,
+            "margin": 8.13
+          },
+          "solar_month": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 730,
+        "start_idx": 70080,
+        "end_idx": 70560,
+        "margin": 11.08,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -8.08,
+            "margin": 8.08
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 316,
+        "start_idx": 30336,
+        "end_idx": 30816,
+        "margin": 11.0,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -8.0,
+            "margin": 8.0
+          },
+          "solar_month": {
+            "match": true,
+            "value": 12,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 729,
+        "start_idx": 69984,
+        "end_idx": 70464,
+        "margin": 10.879999999999999,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -7.88,
+            "margin": 7.88
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 13,
+        "start_idx": 1248,
+        "end_idx": 1728,
+        "margin": 10.629999999999999,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -7.63,
+            "margin": 7.63
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 731,
+        "start_idx": 70176,
+        "end_idx": 70656,
+        "margin": 10.59,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -7.59,
+            "margin": 7.59
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      },
+      {
+        "segment_id": 732,
+        "start_idx": 70272,
+        "end_idx": 70752,
+        "margin": 10.530000000000001,
+        "details": {
+          "Skin_temperature": {
+            "match": true,
+            "value": -7.53,
+            "margin": 7.53
+          },
+          "solar_month": {
+            "match": true,
+            "value": 2,
+            "margin": 1.0
+          },
+          "is_workday": {
+            "match": true,
+            "value": 1,
+            "margin": 1.0
+          },
+          "is_holiday": {
+            "match": true,
+            "value": 0,
+            "margin": 1.0
+          }
+        }
+      }
+    ]
+  },
+  "prototype_init": {
+    "prototype_value": [
+      4397.741872664702,
+      4482.043769859338,
+      4559.992568900098,
+      4596.483256749298,
+      4624.182096752256,
+      4676.610412479698,
+      4694.077587224259,
+      4785.908070213614,
+      4798.952403779297,
+      4808.9222031478785,
+      4798.842751864015,
+      4801.824885596965,
+      4701.371596421888,
+      4613.802390904253,
+      4523.70124488661,
+      4465.032939168577,
+      4455.396160914354,
+      4483.639207601024,
+      4455.358686236469,
+      4490.316336325817,
+      4473.512031175327,
+      4428.489761570343,
+      4397.623183309799,
+      4357.461993245859,
+      4337.47584895842,
+      4304.823688450728,
+      4252.428910475394,
+      4260.727747284889,
+      4212.970493105531,
+      4175.364454699561,
+      4118.48064314125,
+      4110.878790681025,
+      4113.234465947602,
+      4117.627119634474,
+      4097.362638508947,
+      4120.831601567906,
+      4177.031441425923,
+      4201.390936727697,
+      4200.312655879764,
+      4201.161554061497,
+      4171.572197069459,
+      4136.881352352968,
+      4106.633018536247,
+      4095.708724320665,
+      4082.7214609872794,
+      4054.9385340387785,
+      4031.550694007446,
+      3987.3867707089107,
+      3956.1754809584377,
+      3901.113153828913,
+      3849.147873067576,
+      3818.6390382429304,
+      3751.327162063581,
+      3676.685299564357,
+      3585.067883681006,
+      3518.5044239117883,
+      3438.601692875497,
+      3343.517056232309,
+      3248.1609036288946,
+      3189.508105016105,
+      3107.264110049253,
+      3029.656377652974,
+      2969.5973060717297,
+      2933.609848522986,
+      2880.8777049115906,
+      2841.9216115777504,
+      2806.8192105931607,
+      2773.359026047208,
+      2749.918016432046,
+      2730.459661788342,
+      2708.414911277295,
+      2674.894049827266,
+      2658.7512683998702,
+      2643.2695372404096,
+      2626.531702999523,
+      2631.267813762499,
+      2613.759515838655,
+      2606.333577922177,
+      2616.191088372441,
+      2629.15288485939,
+      2628.3772975506613,
+      2649.8199344649825,
+      2668.4604369923463,
+      2707.0487821186666,
+      2739.514694816454,
+      2802.525544332494,
+      2862.373927888318,
+      2953.3727390711565,
+      3043.6131518275624,
+      3155.4913438304284,
+      3242.208375511418,
+      3385.361079190544,
+      3556.1583994235502,
+      3749.888933241963,
+      3942.1706125116993,
+      4118.811070123124
+    ],
+    "prototype_value_std": [
+      1773.3288471504334,
+      1805.053656110387,
+      1852.6877955905065,
+      1868.8056106643858,
+      1879.8003158317565,
+      1908.7649286811607,
+      1916.2060098352238,
+      1976.460360138218,
+      2001.5143997510984,
+      1986.4452998587878,
+      1968.6354855341576,
+      1951.3117882201866,
+      1883.3189626126748,
+      1819.352103465646,
+      1776.437477351198,
+      1760.5790698573826,
+      1767.656147065036,
+      1785.4254836930575,
+      1788.3985653885793,
+      1822.2685785110532,
+      1802.3008138958596,
+      1787.936890866869,
+      1776.1111549084717,
+      1734.7028362705353,
+      1732.963666765804,
+      1710.6992219523634,
+      1694.7513054162416,
+      1675.9200357310065,
+      1659.1374420147176,
+      1644.305300359837,
+      1601.3631924673339,
+      1610.2457142287594,
+      1601.8735389443502,
+      1597.6545470810827,
+      1561.5066756220579,
+      1561.7523375521193,
+      1583.8833394380886,
+      1616.7095553761883,
+      1622.0674537107886,
+      1616.9824092720814,
+      1608.1093510390497,
+      1597.1973242322188,
+      1570.2611594293523,
+      1564.5224471346603,
+      1553.3519028958303,
+      1533.1570590038996,
+      1518.5138810322167,
+      1501.5310472890963,
+      1473.0587864478418,
+      1464.5907004215162,
+      1444.3962462530822,
+      1435.7521330994161,
+      1417.4729155012124,
+      1387.4583986690257,
+      1334.7028251742747,
+      1294.9549407997902,
+      1255.072206822841,
+      1205.1439984925607,
+      1153.0229834618074,
+      1118.9839541114654,
+      1075.0724674291735,
+      1038.8073122837054,
+      1005.4257196647166,
+      971.3330844745209,
+      943.7473836914412,
+      925.2770894786013,
+      902.0123124759523,
+      894.4350471855738,
+      877.4020046277983,
+      859.7073657725631,
+      847.3926764989848,
+      838.4933378858286,
+      842.491282914721,
+      825.4210584861745,
+      818.9768960752933,
+      812.6905281460658,
+      804.6763336313005,
+      804.2311199902553,
+      815.4924541950779,
+      815.9586136978586,
+      827.3244953283871,
+      845.3902415584079,
+      848.8006139663959,
+      862.8471418927913,
+      888.7479763746574,
+      937.5625143670127,
+      977.9949775797589,
+      1018.6180919777389,
+      1066.8150356262515,
+      1125.2005944827515,
+      1186.5192228225487,
+      1284.823314334056,
+      1351.566591675941,
+      1465.4916297413868,
+      1546.3363973234466,
+      1638.4073006537217
+    ],
+    "n_instances": 20,
+    "individual_means": [
+      2467.8876322537585,
+      2395.461680488204,
+      2680.6869656611843,
+      5673.905852725539,
+      5923.194080805701,
+      2802.870354161814,
+      2760.990058418462,
+      5150.361650170087,
+      4815.253161839525,
+      5489.8254222468495,
+      1967.0108315472983,
+      1632.284699173085,
+      4802.8348631873805,
+      5407.419387272576,
+      4342.4159169280565,
+      2258.215983440043,
+      4634.667708792083,
+      2028.7878909548447,
+      4039.6621211755587,
+      3615.782703225588
+    ]
+  },
+  "selected_segment_indices": [
+    65856,
+    65952,
+    65760,
+    69024,
+    68928,
+    65664,
+    65568,
+    71808,
+    71904,
+    69120,
+    31008,
+    33312,
+    72000,
+    67008,
+    70080,
+    30336,
+    69984,
+    1248,
+    70176,
+    70272
+  ]
+}
