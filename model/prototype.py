@@ -34,3 +34,13 @@ class Prototype(nn.Module):
         output = self.align_layer.backward(x,output, self.input_length)
 
         return output, score
+
+    # Thin pass-throughs so the training loop can call
+    # ``prototype_model.set_initial_prototypes(...)`` /
+    # ``prototype_model.anchor_loss(...)`` without reaching into the
+    # nested ``self.prototype`` (Prototype_Layer).
+    def set_initial_prototypes(self, embedding, value, anchor_mask):
+        self.prototype.set_initial_prototypes(embedding, value, anchor_mask)
+
+    def anchor_loss(self, lambda_emb=1.0, lambda_val=1.0):
+        return self.prototype.anchor_loss(lambda_emb, lambda_val)

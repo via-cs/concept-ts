@@ -44,7 +44,22 @@ def get_args():
     parser.add_argument('--top_k_activate', type=int, default=3, help='Top-k activation count for similarity calculation')
     
     parser.add_argument('--pretrain_checkpoint', type=str, default='None', help='pretrained embedding checkpoints')
-    parser.add_argument('--init_weight', type=str, default='None', help='Path to init_weight tensor')
+    parser.add_argument('--init_weight', type=str, default='None', help='Path to init_weight tensor (legacy, prototype_value only)')
+
+    # LLM-guided initialization + hybrid training
+    parser.add_argument('--init_embedding', type=str, default='None',
+                        help='Path to init_embedding.pt (shape (P,D)) from prototype_initializer.py')
+    parser.add_argument('--init_value', type=str, default='None',
+                        help='Path to init_value.pt (shape (P,L,O)) from prototype_initializer.py')
+    parser.add_argument('--anchor_mask', type=str, default='None',
+                        help='Path to anchor_mask.pt (shape (P,)) from prototype_initializer.py')
+    parser.add_argument('--anchor_lambda_emb', type=float, default=1.0,
+                        help='Initial weight on the μ anchor term of the hybrid loss')
+    parser.add_argument('--anchor_lambda_val', type=float, default=1.0,
+                        help='Initial weight on the p anchor term of the hybrid loss')
+    parser.add_argument('--anchor_decay', type=float, default=0.9,
+                        help='Per-epoch multiplicative decay of the anchor weights '
+                             '(1.0 = constant, <1 = gradually release prototypes)')
 
     return parser.parse_args()
 
@@ -56,19 +71,28 @@ def set_seed(seed: int = 0) -> None:
     np.random.seed(seed)
     random.seed(seed)
 
-def train_loss(pred, ans, score):
+def train_loss(pred, ans, score, anchor_term=None):
+    """Forecasting loss + entropy reg + (optional) hybrid anchor term.
 
-    batch_size = ans.size(0)
-    prototype_num = score.size(2)
-
+    The anchor term is the weighted MSE between current layer-0
+    (μ, p) and their LLM-initialized anchors (μ₀, p₀). It acts as
+    an elastic tether: big when a prototype strays too far, zero
+    for blank (unanchored) prototypes. This is the "hybrid" half
+    of the hybrid-training strategy — predictions push prototypes
+    toward the data, anchors push them back toward their semantic
+    meaning.
+    """
     ls = 0
     for i in range(len(pred) - 1):
         ls += 0.1 * nn.L1Loss()(pred[i], ans)
 
     ls += nn.L1Loss()(pred[-1], ans)
-    
+
     entropy = -torch.sum(score * torch.log(score + 1e-8), dim=-1)
     ls += (1e-3) * torch.mean(entropy)
+
+    if anchor_term is not None:
+        ls = ls + anchor_term
 
     return ls
 
@@ -113,7 +137,8 @@ def train_loop(
     test_dataset, batch_size, num_epochs, prototype_layer_num,
     optimizer, lr, lr_decay_factor, lr_decay_step,
     checkpoint_path_model, checkpoint_path_prototype,
-    init_weight_path, device
+    init_weight_path, device,
+    anchor_lambda_emb=0.0, anchor_lambda_val=0.0, anchor_decay=1.0,
 ):
     if os.path.exists(init_weight_path):
         init_value = torch.load(init_weight_path, map_location=device).float().to(device)
@@ -133,7 +158,14 @@ def train_loop(
 
     
     for epoch in range(num_epochs):
-        print(f"[Epoch {epoch + 1}/{num_epochs}] Current LR = {optimizer.param_groups[0]['lr']:.6f}")
+        # Decayed anchor coefficients: start strong so the prototypes stay
+        # close to their LLM-given meanings, then release over time so they
+        # can adapt to local details ("hybrid" training).
+        cur_lambda_emb = anchor_lambda_emb * (anchor_decay ** epoch)
+        cur_lambda_val = anchor_lambda_val * (anchor_decay ** epoch)
+
+        print(f"[Epoch {epoch + 1}/{num_epochs}] Current LR = {optimizer.param_groups[0]['lr']:.6f}  "
+              f"λ_μ={cur_lambda_emb:.4f}  λ_p={cur_lambda_val:.4f}")
         prototype_model.prototype.clear_error_statistics()
 
         for data, ans in train_loader:
@@ -149,10 +181,18 @@ def train_loop(
                 all_score, all_ans, ans.to(device)
             )
 
+            anchor_term = None
+            if cur_lambda_emb > 0 or cur_lambda_val > 0:
+                anchor_term = prototype_model.anchor_loss(
+                    lambda_emb=cur_lambda_emb,
+                    lambda_val=cur_lambda_val,
+                )
+
             loss = train_loss(
                 all_ans,
                 ans.to(device),
-                all_score[0]
+                all_score[0],
+                anchor_term=anchor_term,
             )
 
             optimizer.zero_grad()
@@ -272,6 +312,36 @@ def main():
             prototype_model.prototype.prototype_value[0].data=init_value.reshape(args.prototype_num,96,1)
         print("Successfully load init weight!")
 
+    # --------------------------------------------------------------
+    # LLM-guided prototype initialization + anchor registration.
+    # Expects the three tensors produced by
+    # LLM_prototype/prototype_initializer.py.
+    # --------------------------------------------------------------
+    if (os.path.exists(args.init_embedding)
+            and os.path.exists(args.init_value)
+            and os.path.exists(args.anchor_mask)):
+
+        mu0 = torch.load(args.init_embedding, map_location=device).float()
+        p0  = torch.load(args.init_value,     map_location=device).float()
+        mk0 = torch.load(args.anchor_mask,    map_location=device).float()
+
+        P_expected = prototype_model.prototype.prototype_embedding[0].shape[0]
+        if mu0.shape[0] != P_expected:
+            raise ValueError(
+                f"init_embedding has {mu0.shape[0]} prototypes but "
+                f"--prototype_num is {P_expected}. Set "
+                f"--prototype_num {mu0.shape[0]} (N LLM + M blank)."
+            )
+
+        prototype_model.set_initial_prototypes(mu0, p0, mk0)
+        n_anchored = int(mk0.sum().item())
+        n_blank    = int((mk0 == 0).sum().item())
+        print(f"LLM init loaded: {n_anchored} anchored + {n_blank} blank "
+              f"(total {P_expected})")
+    else:
+        print("No LLM init tensors provided — running with the original "
+              "ProtoTS random prototypes.")
+
     train_data = LOF_Dataset(args.input_length, args.output_length, 'train', args.input_dim, args.dataset)
     val_data   = LOF_Dataset(args.input_length, args.output_length, 'vali',  args.input_dim, args.dataset)
     test_data  = LOF_Dataset(args.input_length, args.output_length, 'test',  args.input_dim, args.dataset)
@@ -298,7 +368,10 @@ def main():
         checkpoint_path_model=model_path,
         checkpoint_path_prototype=prototype_path,
         init_weight_path=args.init_weight,
-        device=device
+        device=device,
+        anchor_lambda_emb=args.anchor_lambda_emb,
+        anchor_lambda_val=args.anchor_lambda_val,
+        anchor_decay=args.anchor_decay,
     )
 
 

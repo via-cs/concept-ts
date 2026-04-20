@@ -77,6 +77,69 @@ class Prototype_Layer(nn.Module):
         self.cumulative_loss.append(torch.zeros(num))
         self.activation_count.append(torch.zeros(num))
 
+    # ------------------------------------------------------------------
+    # Hybrid-training hooks (LLM-guided anchoring for layer-0 prototypes)
+    # ------------------------------------------------------------------
+    def set_initial_prototypes(self, embedding, value, anchor_mask):
+        """Overwrite layer-0 μ/p with the LLM-initialized tensors, and
+        register anchor buffers so we can regularize later prototypes back
+        toward them during training.
+
+        Args:
+            embedding:   Tensor of shape (P, D)
+            value:       Tensor of shape (P, L, O)
+            anchor_mask: Tensor of shape (P,) with 1.0 for LLM-initialized
+                         prototypes (to be anchored) and 0.0 for "blank"
+                         prototypes (random init, free to evolve).
+        """
+        device = self.prototype_embedding[0].device
+        embedding = embedding.to(device).to(self.prototype_embedding[0].dtype)
+        value = value.to(device).to(self.prototype_value[0].dtype)
+        anchor_mask = anchor_mask.to(device).float()
+
+        with torch.no_grad():
+            self.prototype_embedding[0].data.copy_(embedding)
+            self.prototype_value[0].data.copy_(value)
+
+        # register_buffer() gives the anchors free ride through .to(device)
+        # and state_dict but keeps them out of the optimizer.
+        self.register_buffer("anchor_embedding", embedding.detach().clone(),
+                             persistent=False)
+        self.register_buffer("anchor_value", value.detach().clone(),
+                             persistent=False)
+        self.register_buffer("anchor_mask", anchor_mask.detach().clone(),
+                             persistent=False)
+
+    def anchor_loss(self, lambda_emb=1.0, lambda_val=1.0):
+        """Hybrid-training regularizer.
+
+        Pulls layer-0 prototypes back toward their LLM-initialized
+        (μ₀, p₀) anchors, *only* for prototypes whose anchor_mask==1.
+        Blank prototypes (mask==0) contribute nothing, so they can adapt
+        to local details unconstrained.
+
+        The returned scalar is mean-over-anchored-prototypes so it doesn't
+        grow with N.
+        """
+        if not hasattr(self, "anchor_mask"):
+            # No anchors have been registered → no-op so training still works.
+            return self.prototype_embedding[0].new_zeros(())
+
+        mask = self.anchor_mask
+        if mask.sum() == 0:
+            return self.prototype_embedding[0].new_zeros(())
+
+        mu  = self.prototype_embedding[0]
+        mu0 = self.anchor_embedding
+        p   = self.prototype_value[0]
+        p0  = self.anchor_value
+
+        mse_mu = ((mu - mu0) ** 2).mean(dim=-1)          # (P,)
+        mse_p  = ((p  - p0)  ** 2).mean(dim=(1, 2))      # (P,)
+
+        per_proto = lambda_emb * mse_mu + lambda_val * mse_p
+        return (mask * per_proto).sum() / mask.sum().clamp(min=1.0)
+
     def clear_error_statistics(self):
         curr_layer = self.layer_num - 1
         self.cumulative_loss[curr_layer].fill_(0)
