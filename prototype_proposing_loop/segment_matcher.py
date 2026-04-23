@@ -193,31 +193,87 @@ def _compute_percentiles(segments: list, channel: str, req: dict) -> dict:
     }
 
 
+def _forecast_coherence_cv(matches_top_k: list, segments_by_id: dict,
+                           target_variable: str) -> float:
+    """Coefficient of variation of the forecast-window target mean
+    across the top-K selected segments. Low CV = coherent forecasts.
+
+    CV = std(forecast_mean_i) / |mean(forecast_mean_i)|  (over i = 1..K)
+
+    Returns None if there aren't enough segments, or the target channel
+    isn't continuous in forecast_stats.
+    """
+    if not matches_top_k:
+        return None
+
+    means = []
+    for m in matches_top_k:
+        seg = segments_by_id.get(m["segment_id"])
+        if seg is None:
+            continue
+        fc = seg.get("forecast_stats", {}).get(target_variable, {})
+        if "mean" in fc:
+            means.append(fc["mean"])
+
+    if len(means) < 2:
+        return None
+
+    arr = np.asarray(means, dtype=float)
+    mu = arr.mean()
+    sd = arr.std(ddof=0)
+    denom = max(abs(mu), 1e-9)
+    return float(sd / denom)
+
+
+def _discriminative_requirements(bottleneck: dict, min_rejection: float) -> dict:
+    """From bottleneck analysis, list requirements whose individual
+    rejection rate is at least `min_rejection` (as a fraction, not pct).
+
+    Returns dict:
+      - n_discriminative: int
+      - discriminative: list of (channel, rejection_pct)
+      - weak: list of (channel, rejection_pct) with rejection_pct < min_rejection*100
+    """
+    cutoff_pct = min_rejection * 100.0
+    discriminative, weak = [], []
+    for ch, an in bottleneck.items():
+        entry = (ch, an["rejection_pct"])
+        if an["rejection_pct"] >= cutoff_pct:
+            discriminative.append(entry)
+        else:
+            weak.append(entry)
+    return {
+        "n_discriminative": len(discriminative),
+        "discriminative": discriminative,
+        "weak": weak,
+    }
+
+
 def evaluate_prototype(
     prototype_spec: dict,
     segments: list,
     top_k: int = 10,
     min_match_ratio: float = 0.5,
+    target_variable: str = "load",
+    segments_by_id: dict = None,
 ) -> dict:
-    """Full evaluation of a single prototype spec against the segment bank.
+    """Evaluate a single prototype spec. Returns per-prototype metrics
+    needed by the quality rubric. Inter-prototype checks (Jaccard) are
+    deferred to evaluate_all_prototypes.
 
     Args:
         prototype_spec: A prototype dict with "channel_requirements"
         segments: Full list of segments from Part A
         top_k: Desired number of instances per prototype
-        min_match_ratio: Minimum ratio of matches to top_k (below this = "low_quality")
-
-    Returns:
-        Dict with:
-          - status: "good" or "low_quality"
-          - n_matches: total segments matching all requirements
-          - min_required: top_k * min_match_ratio
-          - selected_indices: start_idx of top-K matched segments
-          - bottleneck: analysis of which requirement is most restrictive
-          - matched_load_stats: mean/std of matched segments' load (for quality check)
+        min_match_ratio: K_min / top_k — below this a prototype fails criterion 1
+        target_variable: Name of the forecast target channel (for coherence CV)
+        segments_by_id: Optional precomputed {segment_id: segment} dict
     """
     requirements = prototype_spec.get("channel_requirements", {})
     min_required = int(top_k * min_match_ratio)
+
+    if segments_by_id is None:
+        segments_by_id = {s["segment_id"]: s for s in segments}
 
     # Match all segments
     matches = []
@@ -235,9 +291,9 @@ def evaluate_prototype(
     matches.sort(key=lambda m: m["margin"], reverse=True)
     selected = matches[:top_k]
 
-    # Determine status
     n_matches = len(matches)
-    status = "good" if n_matches >= min_required else "low_quality"
+    n_total = len(segments)
+    generality = n_matches / n_total if n_total > 0 else 0.0
 
     # Bottleneck analysis (always compute — useful even for "good" prototypes)
     bottleneck = analyze_bottleneck(segments, requirements)
@@ -250,15 +306,20 @@ def evaluate_prototype(
             worst_rejection = analysis["rejection_count"]
             worst_channel = ch
 
+    # Forecast coherence CV (criterion 4)
+    forecast_cv = _forecast_coherence_cv(selected, segments_by_id, target_variable)
+
     result = {
         "prototype_id": prototype_spec.get("prototype_id"),
         "name": prototype_spec.get("name", "unnamed"),
-        "status": status,
         "n_matches": n_matches,
-        "n_total_segments": len(segments),
+        "n_total_segments": n_total,
         "top_k": top_k,
         "min_required": min_required,
+        "generality": round(generality, 4),
+        "forecast_coherence_cv": None if forecast_cv is None else round(forecast_cv, 4),
         "selected_indices": [m["start_idx"] for m in selected],
+        "matched_segment_ids": [m["segment_id"] for m in matches],
         "bottleneck_analysis": bottleneck,
         "worst_bottleneck": {
             "channel": worst_channel,
@@ -271,26 +332,148 @@ def evaluate_prototype(
     return result
 
 
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    u = len(a | b)
+    return len(a & b) / u if u > 0 else 0.0
+
+
+def _apply_rubric(
+    per_proto: list,
+    min_required: int,
+    generality_cap: float,
+    max_jaccard: float,
+    max_forecast_cv: float,
+    min_active_reqs: int,
+    min_req_rejection: float,
+) -> list:
+    """Apply the full quality rubric. Mutates each result in `per_proto`
+    with:
+        - failure_modes: list[str] drawn from
+            {"too_few", "too_general", "overlap", "incoherent", "weak_requirements"}
+        - status: "good" | "low_quality"
+        - max_jaccard_overlap: float
+        - max_jaccard_with: prototype_id of the overlap culprit (or None)
+        - discriminative_requirements: dict with n_discriminative / weak lists
+
+    Jaccard is computed against *earlier-accepted* prototypes only, in
+    input order. An accepted prototype is one whose final status is
+    "good" (i.e. all criteria passed).
+    """
+    accepted_sets = []    # list of (pid, set_of_matched_ids) for good prototypes
+
+    for r in per_proto:
+        fails = []
+
+        # Criterion 1: K_min ≤ n_matches
+        if r["n_matches"] < min_required:
+            fails.append("too_few")
+
+        # Criterion 2: generality cap
+        if r["generality"] > generality_cap:
+            fails.append("too_general")
+
+        # Criterion 4: forecast coherence CV
+        cv = r.get("forecast_coherence_cv")
+        if cv is not None and cv > max_forecast_cv:
+            fails.append("incoherent")
+
+        # Criterion 6: ≥ min_active_reqs requirements with ≥ min_req_rejection each
+        disc = _discriminative_requirements(
+            r["bottleneck_analysis"], min_req_rejection
+        )
+        r["discriminative_requirements"] = disc
+        if disc["n_discriminative"] < min_active_reqs:
+            fails.append("weak_requirements")
+
+        # Criterion 3: Jaccard overlap with any earlier-accepted prototype
+        my_ids = set(r["matched_segment_ids"])
+        best_jacc, best_pid = 0.0, None
+        for (pid, prev_ids) in accepted_sets:
+            j = _jaccard(my_ids, prev_ids)
+            if j > best_jacc:
+                best_jacc, best_pid = j, pid
+        r["max_jaccard_overlap"] = round(best_jacc, 4)
+        r["max_jaccard_with"] = best_pid
+        if best_jacc > max_jaccard:
+            fails.append("overlap")
+
+        r["failure_modes"] = fails
+        r["status"] = "good" if not fails else "low_quality"
+        r["rubric_thresholds"] = {
+            "min_required": min_required,
+            "generality_cap": generality_cap,
+            "max_jaccard": max_jaccard,
+            "max_forecast_cv": max_forecast_cv,
+            "min_active_reqs": min_active_reqs,
+            "min_req_rejection": min_req_rejection,
+        }
+
+        if r["status"] == "good":
+            accepted_sets.append((r["prototype_id"], my_ids))
+
+    return per_proto
+
+
 def evaluate_all_prototypes(
     prototype_specs: list,
     segments: list,
     top_k: int = 10,
     min_match_ratio: float = 0.5,
+    *,
+    generality_cap: float = 0.4,
+    max_jaccard: float = 0.5,
+    max_forecast_cv: float = 0.3,
+    min_active_reqs: int = 2,
+    min_req_rejection: float = 0.15,
+    target_variable: str = "load",
 ) -> dict:
-    """Evaluate all N prototypes and return a summary.
+    """Evaluate all N prototypes with the full quality rubric.
+
+    A prototype is "good" only if ALL of:
+        (1) n_matches ≥ top_k * min_match_ratio
+        (2) n_matches / total ≤ generality_cap
+        (3) max Jaccard overlap with any earlier-accepted prototype ≤ max_jaccard
+        (4) forecast coherence CV ≤ max_forecast_cv
+        (6) ≥ min_active_reqs requirements with per-requirement
+            rejection rate ≥ min_req_rejection
 
     Returns:
         Dict with:
-          - results: list of per-prototype evaluation results
+          - results: list of per-prototype evaluation results (with
+            `failure_modes` and new rubric fields)
           - n_good: count of "good" prototypes
           - n_low_quality: count of "low_quality" prototypes
-          - all_good: bool, True if all prototypes pass
+          - all_good: bool
           - low_quality_ids: list of prototype_ids that need revision
+          - rubric: the threshold config used (for downstream logging)
     """
-    results = []
+    segments_by_id = {s["segment_id"]: s for s in segments}
+    min_required = int(top_k * min_match_ratio)
+
+    # Phase 1: per-prototype metrics (no cross-prototype dependencies yet)
+    per_proto = []
     for spec in prototype_specs:
-        result = evaluate_prototype(spec, segments, top_k, min_match_ratio)
-        results.append(result)
+        r = evaluate_prototype(
+            spec, segments,
+            top_k=top_k,
+            min_match_ratio=min_match_ratio,
+            target_variable=target_variable,
+            segments_by_id=segments_by_id,
+        )
+        per_proto.append(r)
+
+    # Phase 2: apply the full rubric (including Jaccard against earlier accepted)
+    results = _apply_rubric(
+        per_proto,
+        min_required=min_required,
+        generality_cap=generality_cap,
+        max_jaccard=max_jaccard,
+        max_forecast_cv=max_forecast_cv,
+        min_active_reqs=min_active_reqs,
+        min_req_rejection=min_req_rejection,
+    )
 
     good = [r for r in results if r["status"] == "good"]
     low_quality = [r for r in results if r["status"] == "low_quality"]
@@ -301,4 +484,15 @@ def evaluate_all_prototypes(
         "n_low_quality": len(low_quality),
         "all_good": len(low_quality) == 0,
         "low_quality_ids": [r["prototype_id"] for r in low_quality],
+        "rubric": {
+            "min_match_ratio": min_match_ratio,
+            "min_required": min_required,
+            "top_k": top_k,
+            "generality_cap": generality_cap,
+            "max_jaccard": max_jaccard,
+            "max_forecast_cv": max_forecast_cv,
+            "min_active_reqs": min_active_reqs,
+            "min_req_rejection": min_req_rejection,
+            "target_variable": target_variable,
+        },
     }

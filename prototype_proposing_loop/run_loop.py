@@ -41,6 +41,12 @@ def run_loop(
     min_match_ratio: float = 0.5,
     max_iterations: int = 3,
     output_dir: str = None,
+    *,
+    generality_cap: float = 0.4,
+    max_jaccard: float = 0.5,
+    max_forecast_cv: float = 0.3,
+    min_active_reqs: int = 2,
+    min_req_rejection: float = 0.15,
 ):
     """Run the full propose-validate-revise loop.
 
@@ -48,9 +54,16 @@ def run_loop(
         segments_path: Path to RE_full_segments.json from Part A
         n_prototypes: Number of prototypes to generate
         top_k: Desired instances per prototype
-        min_match_ratio: Below this ratio of top_k = "low_quality"
+        min_match_ratio: Below this ratio of top_k = criterion-1 fail
         max_iterations: Maximum revision rounds
         output_dir: Where to save outputs (default: prototype_proposing_loop/output/)
+        generality_cap: Criterion 2 — max fraction of segments a spec can match
+        max_jaccard: Criterion 3 — max Jaccard overlap vs any earlier accepted
+        max_forecast_cv: Criterion 4 — max coefficient-of-variation of
+                         forecast-mean across the top-K matched segments
+        min_active_reqs: Criterion 6 — min count of discriminative requirements
+        min_req_rejection: Criterion 6 — a requirement is "discriminative"
+                           if it individually rejects this fraction of segments
     """
     if output_dir is None:
         output_dir = os.path.join(os.path.dirname(__file__), "output")
@@ -106,14 +119,27 @@ def run_loop(
 
         # Validate
         evaluation = evaluate_all_prototypes(
-            prototypes, segments, top_k=top_k, min_match_ratio=min_match_ratio
+            prototypes, segments,
+            top_k=top_k, min_match_ratio=min_match_ratio,
+            generality_cap=generality_cap,
+            max_jaccard=max_jaccard,
+            max_forecast_cv=max_forecast_cv,
+            min_active_reqs=min_active_reqs,
+            min_req_rejection=min_req_rejection,
+            target_variable=metadata.get("target_variable", "load"),
         )
 
         # Print summary
         for r in evaluation["results"]:
             status_icon = "✓" if r["status"] == "good" else "✗"
-            print(f"  {status_icon} Prototype {r['prototype_id']} \"{r['name']}\": "
-                  f"{r['n_matches']} matches [{r['status']}]")
+            modes = r.get("failure_modes", [])
+            tag = "[good]" if not modes else f"[low_quality: {','.join(modes)}]"
+            print(
+                f"  {status_icon} Prototype {r['prototype_id']} \"{r['name']}\": "
+                f"n={r['n_matches']}, gen={r['generality']}, "
+                f"cv={r.get('forecast_coherence_cv')}, "
+                f"J={r.get('max_jaccard_overlap', 0)} {tag}"
+            )
 
         print(f"\n  Summary: {evaluation['n_good']} good, "
               f"{evaluation['n_low_quality']} need revision")
@@ -161,14 +187,27 @@ def run_loop(
 
     # Final validation
     final_eval = evaluate_all_prototypes(
-        prototypes, segments, top_k=top_k, min_match_ratio=min_match_ratio
+        prototypes, segments,
+        top_k=top_k, min_match_ratio=min_match_ratio,
+        generality_cap=generality_cap,
+        max_jaccard=max_jaccard,
+        max_forecast_cv=max_forecast_cv,
+        min_active_reqs=min_active_reqs,
+        min_req_rejection=min_req_rejection,
+        target_variable=metadata.get("target_variable", "load"),
     )
 
     for r in final_eval["results"]:
         status_icon = "✓" if r["status"] == "good" else "✗"
-        print(f"  {status_icon} Prototype {r['prototype_id']} \"{r['name']}\": "
-              f"{r['n_matches']} matches, "
-              f"selected {len(r['selected_indices'])} instances")
+        modes = r.get("failure_modes", [])
+        tag = "good" if not modes else f"low_quality: {','.join(modes)}"
+        print(
+            f"  {status_icon} Prototype {r['prototype_id']} \"{r['name']}\": "
+            f"n={r['n_matches']}, gen={r['generality']}, "
+            f"cv={r.get('forecast_coherence_cv')}, "
+            f"J={r.get('max_jaccard_overlap', 0)} [{tag}] | "
+            f"selected {len(r['selected_indices'])} instances"
+        )
 
     # Save final outputs
     final_output = {
@@ -233,6 +272,23 @@ def main():
                         help="Max revision rounds (default: 3)")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: prototype_proposing_loop/output/)")
+
+    # Rubric knobs
+    parser.add_argument("--generality_cap", type=float, default=0.4,
+                        help="Criterion 2: max n_matches/total (default: 0.4)")
+    parser.add_argument("--max_jaccard", type=float, default=0.5,
+                        help="Criterion 3: max Jaccard vs earlier accepted "
+                             "(default: 0.5)")
+    parser.add_argument("--max_forecast_cv", type=float, default=0.3,
+                        help="Criterion 4: max CV of forecast-mean over top-K "
+                             "(default: 0.3)")
+    parser.add_argument("--min_active_reqs", type=int, default=2,
+                        help="Criterion 6: min discriminative requirements "
+                             "(default: 2)")
+    parser.add_argument("--min_req_rejection", type=float, default=0.15,
+                        help="Criterion 6: fraction of segments a requirement "
+                             "must individually reject to count as discriminative "
+                             "(default: 0.15)")
     args = parser.parse_args()
 
     run_loop(
@@ -242,6 +298,11 @@ def main():
         min_match_ratio=args.min_match_ratio,
         max_iterations=args.max_iterations,
         output_dir=args.output_dir,
+        generality_cap=args.generality_cap,
+        max_jaccard=args.max_jaccard,
+        max_forecast_cv=args.max_forecast_cv,
+        min_active_reqs=args.min_active_reqs,
+        min_req_rejection=args.min_req_rejection,
     )
 
 

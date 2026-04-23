@@ -69,6 +69,13 @@ def get_args():
     p.add_argument("--max_iterations", type=int, default=3)
     p.add_argument("--min_match_ratio", type=float, default=0.5)
 
+    # Rubric knobs (applied inside run_loop → evaluate_all_prototypes)
+    p.add_argument("--generality_cap",    type=float, default=0.4)
+    p.add_argument("--max_jaccard",       type=float, default=0.5)
+    p.add_argument("--max_forecast_cv",   type=float, default=0.3)
+    p.add_argument("--min_active_reqs",   type=int,   default=2)
+    p.add_argument("--min_req_rejection", type=float, default=0.15)
+
     # Init phase
     p.add_argument("--num_blank",      type=int,   default=2)
     p.add_argument("--relaxation_steps", type=int, default=3)
@@ -128,6 +135,11 @@ def main():
         min_match_ratio=args.min_match_ratio,
         max_iterations=args.max_iterations,
         output_dir=loop_out,
+        generality_cap=args.generality_cap,
+        max_jaccard=args.max_jaccard,
+        max_forecast_cv=args.max_forecast_cv,
+        min_active_reqs=args.min_active_reqs,
+        min_req_rejection=args.min_req_rejection,
     )
     specs = loop_result["prototypes"]
     print(f"\nLoop converged with {len(specs)} prototype specs.")
