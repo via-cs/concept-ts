@@ -61,6 +61,15 @@ def get_args():
                         help='Per-epoch multiplicative decay of the anchor weights '
                              '(1.0 = constant, <1 = gradually release prototypes)')
 
+    # Zero-shot evaluation: skip the training loop entirely and just run
+    # test-set inference on the freshly initialized prototype layer
+    # (random or LLM-init), against the pretrained encoder. Useful for
+    # isolating whether the LLM-suggested (μ₀, p₀) carry signal *before*
+    # any gradient step washes them out.
+    parser.add_argument('--zero_shot', action='store_true',
+                        help='Skip training; evaluate the freshly initialized '
+                             'prototype layer on the test set and exit.')
+
     return parser.parse_args()
 
 
@@ -345,6 +354,21 @@ def main():
     train_data = LOF_Dataset(args.input_length, args.output_length, 'train', args.input_dim, args.dataset)
     val_data   = LOF_Dataset(args.input_length, args.output_length, 'vali',  args.input_dim, args.dataset)
     test_data  = LOF_Dataset(args.input_length, args.output_length, 'test',  args.input_dim, args.dataset)
+
+    # ------------------------------------------------------------------
+    # Zero-shot mode: pretrained encoder + freshly initialized prototype
+    # layer, no training. Evaluate once on the test set and exit.
+    # ------------------------------------------------------------------
+    if args.zero_shot:
+        tag = "LLM-init" if (os.path.exists(args.init_embedding)
+                             and os.path.exists(args.init_value)
+                             and os.path.exists(args.anchor_mask)) else "random init"
+        zs_mse, zs_mae = evaluate_with_prototype(
+            model, prototype_model, test_data, args.batch_size, device
+        )
+        print(f"Zero-shot Test Results ({tag}) -> "
+              f"MSE: {zs_mse:.6f}, MAE: {zs_mae:.6f}")
+        return
 
     optimizer = torch.optim.Adam(
         [{"params": prototype_model.parameters()}, {"params": model.parameters()}], 
