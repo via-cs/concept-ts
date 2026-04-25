@@ -46,11 +46,19 @@ class Prototype_Layer(nn.Module):
             )
         )
 
-        self.patch_embedding = nn.Sequential(
-            nn.Linear(self.input_length, self.input_length * 2),
-            nn.ReLU(),
-            nn.Linear(self.input_length * 2, self.prototype_dim)
-        )
+        # ------------------------------------------------------------------
+        # C1 architecture: matching key = time-averaged encoder output, in the
+        # same prototype_dim space as ``prototype_embedding``. Original
+        # ``patch_embedding`` (kept below for reference) projected the
+        # feature-averaged time curve through a learned 2-layer MLP into a
+        # different 128-dim space, which broke the LLM-init coordinate system.
+        # Requires encoder_mid_dim == prototype_dim (true for ProtoLLM: 128).
+        # ------------------------------------------------------------------
+        # self.patch_embedding = nn.Sequential(
+        #     nn.Linear(self.input_length, self.input_length * 2, bias=False),
+        #     nn.ReLU(),
+        #     nn.Linear(self.input_length * 2, self.prototype_dim, bias=False)
+        # )
 
         self.parent_indices = []
         self.cumulative_loss = []
@@ -163,31 +171,44 @@ class Prototype_Layer(nn.Module):
 
 
     def forward(self, x):
+        # x: (B, length=output_length, embedding_dim=prototype_dim)
+        # The encoder produces a (B, 96, 128) tensor where dim 1 is time and
+        # dim 2 is the encoder feature axis. We compare prototypes in this
+        # feature space directly: the match key is the per-feature mean over
+        # time. This puts the matching dot product in the same 128-dim space
+        # that `prototype_embedding` lives in (after LLM init) and that μ₀ is
+        # constructed in inside `prototype_initializer.py`.
         batch, length, embedding_dim = x.shape
-        patch_embedding = self.patch_embedding(x.mean(dim=-1, keepdim=True).transpose(1, 2))
+        match_key = x.mean(dim=1, keepdim=True)   # (B, 1, embedding_dim)
+
+        # --- original patch_embedding path (kept for reference) -----------
+        # x_flat = x.mean(dim=-1)                              # (B, L)
+        # patch_emb = self.patch_embedding(x_flat).unsqueeze(1) # (B, 1, prototype_dim)
+        # then ``patch_emb`` was used everywhere ``match_key`` is used below.
+        # ------------------------------------------------------------------
 
         all_score = []
         all_ans = []
 
         for i in range(self.layer_num):
-            raw_score = torch.einsum('...ij,...jk->...ik', patch_embedding, 
+            raw_score = torch.einsum('...ij,...jk->...ik', match_key,
                                      self.prototype_embedding[i].unsqueeze(0).expand(batch, -1, -1).transpose(1, 2))
-            
+
             if i == 0:
                 score = raw_score.softmax(dim=-1)
             else:
                 local_score = self._compute_local_softmax(raw_score, i)
-                
+
                 parent_idx = self.parent_indices[i-1]
                 parent_score = all_score[i-1][:, :, parent_idx]
                 score = parent_score * local_score
-            
+
             all_score.append(score)
 
-            value_bias = torch.abs(self.layer_bias[i](patch_embedding))
+            value_bias = torch.abs(self.layer_bias[i](match_key))
             value_bias = value_bias.reshape(batch, self.prototype_num[i], 1, 1)
             weighted_prototype = value_bias * self.prototype_value[i].unsqueeze(0)
-            
+
             ans = (score.reshape(batch, -1, 1, 1) * weighted_prototype).sum(dim=1)
             all_ans.append(ans)
 
