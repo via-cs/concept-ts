@@ -333,6 +333,18 @@ def main():
         mu0 = torch.load(args.init_embedding, map_location=device).float()
         p0  = torch.load(args.init_value,     map_location=device).float()
         mk0 = torch.load(args.anchor_mask,    map_location=device).float()
+        
+        def _pdist(W):
+            P = W.shape[0]
+            flat = W.reshape(P, -1)
+            d = torch.cdist(flat, flat)
+            off = d[~torch.eye(P, dtype=torch.bool, device=W.device)]
+            return off.mean().item(), off.std().item(), off.min().item()
+
+        mu = prototype_model.prototype.prototype_embedding[0].detach()
+        pv = prototype_model.prototype.prototype_value[0].detach()
+        print(f"  μ pairwise dist: mean={_pdist(mu)[0]:.4f}  min={_pdist(mu)[2]:.4f}")
+        print(f"  p pairwise dist: mean={_pdist(pv)[0]:.4f}  min={_pdist(pv)[2]:.4f}")
 
         P_expected = prototype_model.prototype.prototype_embedding[0].shape[0]
         if mu0.shape[0] != P_expected:
