@@ -79,6 +79,12 @@ def get_args():
     parser.add_argument("--similarity", type=str, default="dot",
                         choices=["dot", "cosine", "l2"],
                         help="Similarity metric. 'dot' matches what the model uses internally.")
+    parser.add_argument("--min_gap", type=int, default=-1,
+                        help="Minimum index distance between any two selected top-K segments. "
+                             "Two segments at indices s_a, s_b overlap iff |s_a - s_b| < length. "
+                             "-1 (default) sets min_gap = input_length + output_length, "
+                             "which guarantees zero time-step overlap. "
+                             "Pass 0 to disable the constraint and recover the old behaviour.")
     parser.add_argument("--inverse_scale_target", action="store_true",
                         help="Plot the target ('load') in original units. "
                              "Exogenous features are always plotted in raw units (never scaled by the dataloader).")
@@ -162,6 +168,40 @@ def list_prototype_layers(state_dict):
         layers.append(i)
         i += 1
     return layers
+
+
+def topk_non_overlapping(scores, k, min_gap):
+    """Greedy non-overlap selection: return up to k indices whose pairwise
+    distance is at least `min_gap`, ranked by descending score.
+
+    Implements standard non-maximum suppression in 1-D index space. Two
+    segments at indices s_a and s_b in a sliding-window dataset overlap iff
+    |s_a - s_b| < length, so passing min_gap = input_length + output_length
+    guarantees the selected segments share no time steps.
+
+    Returns
+    -------
+    selected_idx : list[int]
+        Up to k segment indices (may be fewer if non-overlap can't be met).
+    selected_vals : list[float]
+        Their corresponding similarity scores.
+    """
+    if min_gap <= 0:
+        topk_vals, topk_idx = torch.topk(scores, k)
+        return topk_idx.tolist(), topk_vals.tolist()
+
+    sorted_vals, sorted_idx = torch.sort(scores, descending=True)
+    sorted_idx_list = sorted_idx.tolist()
+    sorted_vals_list = sorted_vals.tolist()
+
+    selected_idx, selected_vals = [], []
+    for idx, val in zip(sorted_idx_list, sorted_vals_list):
+        if all(abs(idx - s) >= min_gap for s in selected_idx):
+            selected_idx.append(idx)
+            selected_vals.append(val)
+            if len(selected_idx) == k:
+                break
+    return selected_idx, selected_vals
 
 
 def safe_filename(s: str) -> str:
@@ -329,6 +369,17 @@ def main():
     if not args.no_plots:
         os.makedirs(plot_root, exist_ok=True)
 
+    # Resolve min_gap. -1 sentinel ⇒ enforce full non-overlap (length-apart).
+    length = args.input_length + args.output_length
+    min_gap = length if args.min_gap < 0 else args.min_gap
+    if min_gap > 0:
+        print(f"Non-overlap constraint: any two selected top-K segments must be "
+              f"at least {min_gap} indices apart "
+              f"(length = {length}, so this is "
+              f"{'zero' if min_gap >= length else 'partial'} time-step overlap).")
+    else:
+        print("Non-overlap constraint: DISABLED (segments may share time steps).")
+
     results = {
         "metadata": {
             "dataset": args.dataset,
@@ -337,6 +388,7 @@ def main():
             "layer": int(layer_idx),
             "available_layers": available_layers,
             "top_k": int(args.top_k),
+            "min_gap": int(min_gap),
             "similarity_mode": args.similarity,
             "n_prototypes": int(P),
             "embed_dim": int(D),
@@ -348,12 +400,16 @@ def main():
         "segments_per_prototype": {},
     }
 
-    print(f"\nFinding top-{args.top_k} segments per prototype + plotting per-feature curves:")
+    print(f"\nFinding top-{args.top_k} non-overlapping segments per prototype + "
+          f"plotting per-feature curves:")
     for p_idx in range(P):
         scores = sim[:, p_idx]
-        topk_vals, topk_idx = torch.topk(scores, args.top_k)
-        topk_idx  = topk_idx.tolist()
-        topk_vals = topk_vals.tolist()
+        topk_idx, topk_vals = topk_non_overlapping(scores, args.top_k, min_gap)
+
+        if len(topk_idx) < args.top_k:
+            print(f"  [warn] prototype {p_idx}: only {len(topk_idx)} non-overlapping "
+                  f"segments available (wanted {args.top_k}). "
+                  f"Consider lowering --min_gap or --top_k.")
 
         # Fetch the K segments' raw data
         topk_segments = []
