@@ -1,28 +1,36 @@
 """
 Interpretability tool: for each learned prototype, find the top-K training
-segments whose encoder match_key is most similar to it.
+segments whose encoder match_key is most similar to it, then plot every
+feature channel of those K segments in a per-prototype subfolder.
 
-Pipeline:
-    1. Load the pretrained encoder (from embedding_learning.py).
-    2. Parse the trained prototype checkpoint (from prototype_learning.py)
-       and pull out prototype_embedding / prototype_value tensors at the
-       chosen layer (default = deepest layer in the checkpoint).
-    3. Run the encoder over every training segment, take match_key as
-       encoder.mean(dim=1)  -- this matches the C1 architecture currently
-       active in layer/prototype.py.
-    4. For each prototype p_i, rank all segments by similarity(match_key, p_i)
-       and keep the top-K.
-    5. Save segment indices, similarity scores, and target curves to JSON,
-       and emit a per-prototype plot overlaying the K curves alongside the
-       prototype's learned forecast (prototype_value).
+Pipeline
+--------
+1. Load the pretrained encoder (from embedding_learning.py).
+2. Parse the trained prototype checkpoint (from prototype_learning.py)
+   and extract prototype_embedding / prototype_value at the chosen layer
+   (default = deepest layer in the checkpoint).
+3. Run the encoder over every training segment, take match_key as
+   encoder.mean(dim=1)  -- this matches the C1 architecture currently
+   active in layer/prototype.py.
+4. For each prototype p_i, rank all segments by similarity(match_key, p_i)
+   and keep the top-K.
+5. Save a lightweight JSON of (segment indices, similarity scores) and
+   emit one PNG per (prototype, feature) showing the K curves overlaid
+   on top of their average. For the target feature ("load"), also overlay
+   the prototype's learned forecast curve (prototype_value).
 
-Usage from repo root:
-    python -u ./interpretability/extract_top_k.py \
-        --dataset ./dataset/LOF/RE.csv \
-        --encoder_checkpoint ./checkpoint/embedding_learning/RE_OL96_IL384_L4_D0.5_EMB128_BDP0.1.pth \
-        --prototype_checkpoint ./checkpoint/prototype_learning/RE_OL96_IL384_PN6_SR0.4.pth \
-        --top_k 10 \
-        --output_dir ./interpretability/output/RE
+Output layout
+-------------
+output_dir/
+    topk_results.json
+    plots/
+        prototype_00/
+            feature_00_<name>.png
+            feature_01_<name>.png
+            ...
+            feature_22_load.png
+        prototype_01/
+            ...
 """
 
 import argparse
@@ -31,6 +39,7 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -70,8 +79,9 @@ def get_args():
     parser.add_argument("--similarity", type=str, default="dot",
                         choices=["dot", "cosine", "l2"],
                         help="Similarity metric. 'dot' matches what the model uses internally.")
-    parser.add_argument("--inverse_scale", action="store_true",
-                        help="Plot target curves in original units (un-scale via StandardScaler).")
+    parser.add_argument("--inverse_scale_target", action="store_true",
+                        help="Plot the target ('load') in original units. "
+                             "Exogenous features are always plotted in raw units (never scaled by the dataloader).")
 
     # Output
     parser.add_argument("--output_dir", type=str, default="./interpretability/output")
@@ -94,17 +104,32 @@ def get_args():
 
 
 # ---------------------------------------------------------------------------
-# Core
+# Helpers
 # ---------------------------------------------------------------------------
+
+def read_feature_names(csv_path, input_dim):
+    """Best-effort recovery of column names from the dataset CSV.
+
+    LOF_Dataset uses "load" as the target and concatenates input_data columns
+    as [<exogenous in CSV order>, load]. We mirror that order here so the
+    feature names match input_data's columns exactly.
+    """
+    try:
+        df_head = pd.read_csv(csv_path, nrows=0)
+        cols = list(df_head.columns)
+        if "load" in cols and len(cols) == input_dim:
+            exog = [c for c in cols if c != "load"]
+            return exog + ["load"], (input_dim - 1)
+    except Exception as e:
+        print(f"  [warn] couldn't parse CSV column names ({e}); using generic names")
+    # Fallback
+    names = [f"channel_{i}" for i in range(input_dim - 1)] + ["load"]
+    return names, (input_dim - 1)
+
 
 @torch.no_grad()
 def compute_match_keys(model, dataset, batch_size, device):
-    """Run the encoder over every segment and return per-segment match_key.
-
-    Returns
-    -------
-    Tensor of shape (N_segments, mid_dim).
-    """
+    """Run the encoder over every segment and return per-segment match_key."""
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     keys = []
@@ -130,7 +155,7 @@ def compute_similarity(match_keys, prototype_embedding, mode="dot"):
 
 
 def list_prototype_layers(state_dict):
-    """Return sorted list of prototype-layer indices found in a state dict."""
+    """Return sorted list of prototype-layer indices in a state dict."""
     layers = []
     i = 0
     while f"prototype.prototype_embedding.{i}" in state_dict:
@@ -139,48 +164,99 @@ def list_prototype_layers(state_dict):
     return layers
 
 
+def safe_filename(s: str) -> str:
+    """Sanitise a feature name for use in a filename."""
+    return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in s)
+
+
 # ---------------------------------------------------------------------------
-# Plot
+# Plotting
 # ---------------------------------------------------------------------------
 
-def plot_prototype_topk(p_idx, topk_segments, prototype_value_curve,
-                         input_length, output_length, save_path):
-    """Overlay the K segment curves, their average, and the prototype's
-    learned forecast curve, all on one axis."""
+def plot_per_feature(p_idx, topk_segments, prototype_value_target,
+                      feature_names, target_idx, input_length, output_length,
+                      save_dir, inverse_scale_target=False, inver_data_fn=None):
+    """For each feature channel, save one PNG in `save_dir`.
+
+    Each plot contains:
+      - K faint curves (one per top-K segment), spanning lookback + forecast
+      - bold mean lookback + mean forecast curves
+      - vertical line at the lookback/forecast boundary
+      - for the target ("load") channel only: a dashed green line showing
+        prototype_value (the model's learned forecast for this prototype)
+    """
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-
+    K = len(topk_segments)
     t_lb = np.arange(input_length)
     t_fc = np.arange(input_length, input_length + output_length)
 
-    # Faint individual curves
-    for seg in topk_segments:
-        ax.plot(t_lb, seg["lookback_target"], color="steelblue", alpha=0.25, lw=0.8)
-        ax.plot(t_fc, seg["forecast_target"], color="crimson",   alpha=0.25, lw=0.8)
+    for c, fname in enumerate(feature_names):
+        fig, ax = plt.subplots(figsize=(12, 4))
 
-    # Bold averages across the K
-    avg_lb = np.mean([s["lookback_target"] for s in topk_segments], axis=0)
-    avg_fc = np.mean([s["forecast_target"] for s in topk_segments], axis=0)
-    ax.plot(t_lb, avg_lb, color="steelblue", lw=2.2,
-            label=f"mean lookback (K={len(topk_segments)})")
-    ax.plot(t_fc, avg_fc, color="crimson",   lw=2.2,
-            label=f"mean forecast (K={len(topk_segments)})")
+        is_target = (c == target_idx)
 
-    # Prototype's learned forecast curve (prototype_value)
-    if prototype_value_curve is not None:
-        ax.plot(t_fc, prototype_value_curve, color="green", lw=2.2,
-                linestyle="--", label="prototype_value (model output)")
+        if is_target:
+            # Last column of input_data is target * mask → first input_length steps
+            # are the unmasked lookback target; last output_length are zeros.
+            # The actual unmasked forecast lives in seg["forecast_target"].
+            curves_lb, curves_fc = [], []
+            for seg in topk_segments:
+                lb = seg["input_data"][:input_length, c].astype(np.float64)
+                fc = seg["forecast_target"].astype(np.float64)
+                if inverse_scale_target and inver_data_fn is not None:
+                    lb = inver_data_fn(lb)
+                    fc = inver_data_fn(fc)
+                curves_lb.append(lb)
+                curves_fc.append(fc)
+                ax.plot(t_lb, lb, color="steelblue", alpha=0.25, lw=0.8)
+                ax.plot(t_fc, fc, color="crimson",   alpha=0.25, lw=0.8)
 
-    ax.axvline(x=input_length, color="gray", linestyle=":", alpha=0.6,
-               label="lookback / forecast boundary")
-    ax.set_title(f"Prototype {p_idx} — top-{len(topk_segments)} most-similar segments")
-    ax.set_xlabel("Time step")
-    ax.set_ylabel("Target value")
-    ax.legend(loc="upper right", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=80)
-    plt.close(fig)
+            avg_lb = np.mean(curves_lb, axis=0)
+            avg_fc = np.mean(curves_fc, axis=0)
+            ax.plot(t_lb, avg_lb, color="steelblue", lw=2.2,
+                    label=f"mean lookback (K={K})")
+            ax.plot(t_fc, avg_fc, color="crimson", lw=2.2,
+                    label=f"mean forecast (K={K})")
+
+            if prototype_value_target is not None:
+                pv = prototype_value_target.astype(np.float64)
+                if inverse_scale_target and inver_data_fn is not None:
+                    pv = inver_data_fn(pv)
+                ax.plot(t_fc, pv, color="green", lw=2.2, linestyle="--",
+                        label="prototype_value (model output)")
+
+            ylabel = f"{fname} ({'original' if inverse_scale_target else 'z-scored'})"
+
+        else:
+            # Exogenous channels are NOT scaled by LOF_Dataset, and have actual
+            # values for both lookback and forecast portions of the window.
+            curves_full = []
+            for seg in topk_segments:
+                full = seg["input_data"][:, c].astype(np.float64)
+                curves_full.append(full)
+                ax.plot(t_lb, full[:input_length], color="steelblue", alpha=0.25, lw=0.8)
+                ax.plot(t_fc, full[input_length:], color="crimson",   alpha=0.25, lw=0.8)
+
+            avg_full = np.mean(curves_full, axis=0)
+            ax.plot(t_lb, avg_full[:input_length], color="steelblue", lw=2.2,
+                    label=f"mean lookback (K={K})")
+            ax.plot(t_fc, avg_full[input_length:], color="crimson", lw=2.2,
+                    label=f"mean forecast (K={K})")
+
+            ylabel = f"{fname} (raw)"
+
+        ax.axvline(x=input_length, color="gray", linestyle=":", alpha=0.6,
+                   label="lookback / forecast boundary")
+        ax.set_title(f"Prototype {p_idx}  |  feature: {fname}")
+        ax.set_xlabel("Time step")
+        ax.set_ylabel(ylabel)
+        ax.legend(loc="upper right", fontsize=8)
+        fig.tight_layout()
+
+        out_name = f"feature_{c:02d}_{safe_filename(fname)}.png"
+        fig.savefig(os.path.join(save_dir, out_name), dpi=80)
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -230,10 +306,14 @@ def main():
     print(f"  prototype_embedding: {tuple(prototype_embedding.shape)}")
     print(f"  prototype_value:     {tuple(prototype_value.shape)}")
 
-    # 3. Training data ------------------------------------------------------
+    # 3. Training data + feature names -------------------------------------
     train_data = LOF_Dataset(args.input_length, args.output_length, "train",
                              args.input_dim, args.dataset)
     print(f"Loaded {len(train_data)} training segments from {args.dataset}")
+
+    feature_names, target_idx = read_feature_names(args.dataset, args.input_dim)
+    print(f"Feature names ({len(feature_names)}): "
+          f"{feature_names[:3]} ... {feature_names[-3:]}  (target idx = {target_idx})")
 
     # 4. Per-segment match keys --------------------------------------------
     match_keys = compute_match_keys(encoder_model, train_data, args.batch_size, device)
@@ -243,73 +323,79 @@ def main():
     sim = compute_similarity(match_keys, prototype_embedding, args.similarity)
     print(f"similarity matrix ({args.similarity}): {tuple(sim.shape)}")
 
-    # 6. Top-K per prototype ------------------------------------------------
+    # 6. Top-K per prototype + plots ---------------------------------------
     os.makedirs(args.output_dir, exist_ok=True)
-    plot_dir = os.path.join(args.output_dir, "plots")
+    plot_root = os.path.join(args.output_dir, "plots")
     if not args.no_plots:
-        os.makedirs(plot_dir, exist_ok=True)
+        os.makedirs(plot_root, exist_ok=True)
 
     results = {
         "metadata": {
             "dataset": args.dataset,
             "encoder_checkpoint": args.encoder_checkpoint,
             "prototype_checkpoint": args.prototype_checkpoint,
-            "layer": layer_idx,
+            "layer": int(layer_idx),
             "available_layers": available_layers,
-            "top_k": args.top_k,
+            "top_k": int(args.top_k),
             "similarity_mode": args.similarity,
             "n_prototypes": int(P),
             "embed_dim": int(D),
             "n_training_segments": int(match_keys.shape[0]),
-            "inverse_scale": bool(args.inverse_scale),
+            "feature_names": feature_names,
+            "target_idx": int(target_idx),
+            "inverse_scale_target": bool(args.inverse_scale_target),
         },
         "segments_per_prototype": {},
     }
 
-    print(f"\nFinding top-{args.top_k} per prototype:")
+    print(f"\nFinding top-{args.top_k} segments per prototype + plotting per-feature curves:")
     for p_idx in range(P):
         scores = sim[:, p_idx]
         topk_vals, topk_idx = torch.topk(scores, args.top_k)
         topk_idx  = topk_idx.tolist()
         topk_vals = topk_vals.tolist()
 
+        # Fetch the K segments' raw data
         topk_segments = []
         for rank, (idx, score) in enumerate(zip(topk_idx, topk_vals)):
             input_data, target = train_data[idx]
-            # Last column of input_data is target * mask: first input_length steps
-            # are the unmasked lookback target, last output_length are zeroed.
-            lb_tgt = input_data[: args.input_length, -1].numpy().astype(np.float64)
-            fc_tgt = target.squeeze(-1).numpy().astype(np.float64)
-
-            if args.inverse_scale:
-                lb_tgt = train_data.inver_data(lb_tgt)
-                fc_tgt = train_data.inver_data(fc_tgt)
-
             topk_segments.append({
                 "rank": rank + 1,
                 "segment_index": int(idx),
                 "similarity_score": float(score),
-                "lookback_target": lb_tgt.tolist(),
-                "forecast_target": fc_tgt.tolist(),
+                "input_data": input_data.numpy(),                  # (T, in_dim)
+                "forecast_target": target.squeeze(-1).numpy(),     # (output_length,)
             })
 
-        results["segments_per_prototype"][p_idx] = topk_segments
+        # Save lightweight metadata only (no curves, to keep JSON small)
+        results["segments_per_prototype"][p_idx] = [
+            {"rank": s["rank"], "segment_index": s["segment_index"],
+             "similarity_score": s["similarity_score"]}
+            for s in topk_segments
+        ]
 
+        # Plots
         if not args.no_plots:
-            pv = prototype_value[p_idx].squeeze(-1).numpy().astype(np.float64)
-            if args.inverse_scale:
-                pv = train_data.inver_data(pv)
-            plot_prototype_topk(
+            proto_dir = os.path.join(plot_root, f"prototype_{p_idx:02d}")
+            os.makedirs(proto_dir, exist_ok=True)
+
+            pv_target = prototype_value[p_idx].squeeze(-1).numpy().astype(np.float64)
+            plot_per_feature(
                 p_idx=p_idx,
                 topk_segments=topk_segments,
-                prototype_value_curve=pv,
+                prototype_value_target=pv_target,
+                feature_names=feature_names,
+                target_idx=target_idx,
                 input_length=args.input_length,
                 output_length=args.output_length,
-                save_path=os.path.join(plot_dir, f"prototype_{p_idx:02d}.png"),
+                save_dir=proto_dir,
+                inverse_scale_target=args.inverse_scale_target,
+                inver_data_fn=train_data.inver_data,
             )
 
         head = ", ".join(f"{i}({s:.3f})" for i, s in zip(topk_idx[:3], topk_vals[:3]))
-        print(f"  prototype {p_idx:2d}: top3 = [{head}, ...]")
+        print(f"  prototype {p_idx:2d}: top3 = [{head}, ...]"
+              + ("" if args.no_plots else f"  -> {os.path.join(plot_root, f'prototype_{p_idx:02d}')}/"))
 
     # 7. Save JSON ----------------------------------------------------------
     out_json = os.path.join(args.output_dir, "topk_results.json")
@@ -317,7 +403,8 @@ def main():
         json.dump(results, f, indent=2)
     print(f"\nSaved JSON  -> {out_json}")
     if not args.no_plots:
-        print(f"Saved plots -> {plot_dir}/")
+        print(f"Saved plots -> {plot_root}/  (one subfolder per prototype, "
+              f"{args.input_dim} feature plots each)")
 
 
 if __name__ == "__main__":
