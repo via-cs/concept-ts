@@ -571,19 +571,57 @@ def main():
         print(f"Saved plots -> {plot_root}/  (one subfolder per prototype, "
               f"{args.input_dim} feature plots each)")
 
-    # 8. Save coherence CSV ------------------------------------------------
-    coh_df = pd.DataFrame(coherence_records)
+    # 8. Save coherence CSV (wide format) ----------------------------------
+    # Layout:
+    #   row index = feature_name  (one row per feature channel)
+    #   columns   = "prototype 0", "prototype 1", ..., "prototype N-1", "all_training_sets"
+    #   each cell = "A(B)"  where A = mean_std and B = mean_cv
+    #     - A (mean_std): per-timestep std across the cohort, averaged over time.
+    #       Lower means the cohort's curves are tighter at every step.
+    #     - B (mean_cv):  per-timestep CV (std / |mean|), averaged over time.
+    #       Dimensionless, useful for cross-feature comparison; unstable when
+    #       the per-timestep mean is near zero (e.g. for the z-scored target).
+    # The "all_training_sets" column is the baseline cohort (every training
+    # segment), so each row's prototype columns become directly comparable
+    # to the right-most column without any mental arithmetic.
+    def _fmt(std_v, cv_v):
+        if std_v is None or (isinstance(std_v, float) and np.isnan(std_v)):
+            return "n/a"
+        return f"{std_v:.3g}({cv_v:.3g})"
+
+    rec_lookup = {(r["prototype_id"], r["feature_idx"]): r for r in coherence_records}
+    wide_rows = {}
+    proto_cols = [f"prototype {p_idx}" for p_idx in range(P)]
+    for c, fname in enumerate(feature_names):
+        row = {}
+        for p_idx in range(P):
+            r = rec_lookup.get((p_idx, c))
+            row[f"prototype {p_idx}"] = (
+                _fmt(r["mean_std_K"], r["mean_cv_K"]) if r is not None else "n/a"
+            )
+        row["all_training_sets"] = _fmt(float(baseline_std[c]), float(baseline_cv[c]))
+        wide_rows[fname] = row
+
+    wide_df = pd.DataFrame.from_dict(wide_rows, orient="index",
+                                      columns=proto_cols + ["all_training_sets"])
+    wide_df.index.name = "feature_name"
+
     out_csv = os.path.join(args.output_dir, "per_feature_coherence.csv")
-    coh_df.to_csv(out_csv, index=False)
+    wide_df.to_csv(out_csv)
     print(f"Saved coherence -> {out_csv}  "
-          f"(rows = {len(coh_df)} = n_prototypes × n_features)")
+          f"(rows = {len(wide_df)} features × cols = {len(wide_df.columns)} "
+          f"= {P} prototypes + 1 baseline)")
+    print("Each cell is formatted as  std(cv)  : "
+          "lower std = curves more aligned at every timestep; "
+          "lower cv = tighter relative spread.")
 
     # Brief summary: which features each prototype concentrates most
-    print("\nPer-prototype top-3 most concentrated features (smallest std_ratio):")
-    for p_idx, group in coh_df.groupby("prototype_id"):
+    long_df = pd.DataFrame(coherence_records)
+    print("\nPer-prototype top-3 most concentrated features (smallest std vs baseline):")
+    for p_idx, group in long_df.groupby("prototype_id"):
         ranked = group.sort_values("std_ratio_K_over_N").head(3)
         head = ", ".join(
-            f"{r.feature_name}(std_ratio={r.std_ratio_K_over_N:.3f})"
+            f"{r.feature_name}({r.std_ratio_K_over_N:.2f}x baseline)"
             for r in ranked.itertuples()
         )
         print(f"  prototype {p_idx:2d}: {head}")
