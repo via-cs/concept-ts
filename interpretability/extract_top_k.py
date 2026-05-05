@@ -170,6 +170,72 @@ def list_prototype_layers(state_dict):
     return layers
 
 
+def compute_curve_stats(seg_curves, eps=1e-9):
+    """Per-feature coherence over K segment curves of ONE feature.
+
+    Parameters
+    ----------
+    seg_curves : np.ndarray, shape (K, T)
+        K segments' curves for a single feature, all aligned to relative
+        time-step (column 0 = first step of segment, etc.).
+
+    Returns
+    -------
+    mean_std : float
+        Mean over time of per-timestep std across the K curves. Same units
+        as the input. Lower = K curves more aligned at every step.
+    mean_cv : float
+        Mean over time of per-timestep CV = std / (|mean| + eps).
+        Dimensionless. Useful for cross-feature comparison.
+
+    Returns NaN for both metrics if K < 2 (std undefined for a single sample).
+    """
+    if seg_curves.shape[0] < 2:
+        return float("nan"), float("nan")
+    mean_t = seg_curves.mean(axis=0)                       # (T,)
+    std_t  = seg_curves.std(axis=0, ddof=0)                # (T,)
+    cv_t   = std_t / (np.abs(mean_t) + eps)                # (T,)
+    return float(std_t.mean()), float(cv_t.mean())
+
+
+@torch.no_grad()
+def compute_baseline_curve_stats(dataset, input_length, output_length,
+                                  target_idx, n_features, eps=1e-9):
+    """Stream all training segments, accumulate per-timestep mean/std per
+    feature, and reduce to per-feature scalar coherence metrics.
+
+    Returns
+    -------
+    mean_std : np.ndarray, shape (n_features,)
+        Per-feature std averaged over time, computed as if all training
+        segments were the cohort (the natural N-baseline for the K-coherence).
+    mean_cv : np.ndarray, shape (n_features,)
+        Per-feature CV averaged over time.
+    n_segments : int
+        Number of training segments used (= len(dataset)).
+    """
+    T = input_length + output_length
+    sum_t    = np.zeros((T, n_features), dtype=np.float64)
+    sum_sq_t = np.zeros((T, n_features), dtype=np.float64)
+    n = 0
+
+    for idx in tqdm(range(len(dataset)), desc="Baseline coherence (full train set)"):
+        input_data, target = dataset[idx]
+        full = input_data.numpy().astype(np.float64)
+        # Replace the dataloader's zero-mask in the target's forecast portion
+        # with the actual forecast values so the curve is complete.
+        full[input_length:, target_idx] = target.squeeze(-1).numpy().astype(np.float64)
+        sum_t    += full
+        sum_sq_t += full * full
+        n += 1
+
+    mean_t = sum_t / n
+    var_t  = np.maximum(sum_sq_t / n - mean_t * mean_t, 0.0)
+    std_t  = np.sqrt(var_t)
+    cv_t   = std_t / (np.abs(mean_t) + eps)
+    return std_t.mean(axis=0), cv_t.mean(axis=0), n
+
+
 def topk_non_overlapping(scores, k, min_gap):
     """Greedy non-overlap selection: return up to k indices whose pairwise
     distance is at least `min_gap`, ranked by descending score.
@@ -359,6 +425,13 @@ def main():
     match_keys = compute_match_keys(encoder_model, train_data, args.batch_size, device)
     print(f"match_keys: {tuple(match_keys.shape)}")
 
+    # 4b. Baseline coherence over the entire training set ------------------
+    baseline_std, baseline_cv, n_baseline = compute_baseline_curve_stats(
+        train_data, args.input_length, args.output_length,
+        target_idx=target_idx, n_features=args.input_dim,
+    )
+    print(f"Baseline computed over {n_baseline} training segments.")
+
     # 5. Similarity ---------------------------------------------------------
     sim = compute_similarity(match_keys, prototype_embedding, args.similarity)
     print(f"similarity matrix ({args.similarity}): {tuple(sim.shape)}")
@@ -400,8 +473,10 @@ def main():
         "segments_per_prototype": {},
     }
 
+    coherence_records = []   # one row per (prototype, feature) for the CSV
+
     print(f"\nFinding top-{args.top_k} non-overlapping segments per prototype + "
-          f"plotting per-feature curves:")
+          f"plotting per-feature curves + computing coherence:")
     for p_idx in range(P):
         scores = sim[:, p_idx]
         topk_idx, topk_vals = topk_non_overlapping(scores, args.top_k, min_gap)
@@ -429,6 +504,40 @@ def main():
              "similarity_score": s["similarity_score"]}
             for s in topk_segments
         ]
+
+        # ---- Per-feature coherence over the K matched segments -----------
+        T = args.input_length + args.output_length
+        K = len(topk_segments)
+        # Stack the K full curves: (K, T, n_features)
+        if K >= 1:
+            curves_KTC = np.zeros((K, T, args.input_dim), dtype=np.float64)
+            for i, seg in enumerate(topk_segments):
+                full = seg["input_data"].astype(np.float64)
+                # Replace zero-masked target forecast with the actual forecast
+                full[args.input_length:, target_idx] = \
+                    seg["forecast_target"].astype(np.float64)
+                curves_KTC[i] = full
+
+            for c, fname in enumerate(feature_names):
+                mean_std_K, mean_cv_K = compute_curve_stats(curves_KTC[:, :, c])
+                std_n = float(baseline_std[c])
+                cv_n = float(baseline_cv[c])
+                std_ratio = (mean_std_K / (std_n + 1e-9)) if not np.isnan(mean_std_K) else float("nan")
+                cv_ratio  = (mean_cv_K  / (cv_n  + 1e-9)) if not np.isnan(mean_cv_K)  else float("nan")
+                coherence_records.append({
+                    "prototype_id": int(p_idx),
+                    "feature_idx": int(c),
+                    "feature_name": fname,
+                    "is_target": bool(c == target_idx),
+                    "n_segments_K": int(K),
+                    "n_segments_N": int(n_baseline),
+                    "mean_std_K": mean_std_K,
+                    "mean_std_N": std_n,
+                    "std_ratio_K_over_N": std_ratio,
+                    "mean_cv_K": mean_cv_K,
+                    "mean_cv_N": cv_n,
+                    "cv_ratio_K_over_N": cv_ratio,
+                })
 
         # Plots
         if not args.no_plots:
@@ -461,6 +570,23 @@ def main():
     if not args.no_plots:
         print(f"Saved plots -> {plot_root}/  (one subfolder per prototype, "
               f"{args.input_dim} feature plots each)")
+
+    # 8. Save coherence CSV ------------------------------------------------
+    coh_df = pd.DataFrame(coherence_records)
+    out_csv = os.path.join(args.output_dir, "per_feature_coherence.csv")
+    coh_df.to_csv(out_csv, index=False)
+    print(f"Saved coherence -> {out_csv}  "
+          f"(rows = {len(coh_df)} = n_prototypes × n_features)")
+
+    # Brief summary: which features each prototype concentrates most
+    print("\nPer-prototype top-3 most concentrated features (smallest std_ratio):")
+    for p_idx, group in coh_df.groupby("prototype_id"):
+        ranked = group.sort_values("std_ratio_K_over_N").head(3)
+        head = ", ".join(
+            f"{r.feature_name}(std_ratio={r.std_ratio_K_over_N:.3f})"
+            for r in ranked.itertuples()
+        )
+        print(f"  prototype {p_idx:2d}: {head}")
 
 
 if __name__ == "__main__":
