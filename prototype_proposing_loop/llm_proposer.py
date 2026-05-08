@@ -1,126 +1,108 @@
 """
-LLM Proposer: Interfaces with Claude API to generate and revise prototype specs.
+LLM Proposer: interface with Claude for the function-based pipeline.
 
-Two modes:
-1. Initial proposal: Given dataset context + global stats, propose N prototypes
-2. Revision: Given previous specs + feedback report, revise low-quality prototypes
+Given dataset context (global stats + cluster summaries), Claude returns a
+JSON array of prototype objects, each containing a Python `select_segments`
+function as a string. We parse the JSON and pass it back to the loop.
 
-API key is loaded from environment variable ANTHROPIC_API_KEY.
+API key: read from ANTHROPIC_API_KEY (env var). Fall back to a hard-coded
+constant if the env var isn't set, for convenience inside Colab.
 """
 
-import os
+from __future__ import annotations
+
 import json
+import os
 import re
-
-# ============================================================
-# TODO: pip install anthropic
-# ============================================================
-
-Claude_API_KEY = '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'
 
 try:
     import anthropic
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
-    print("WARNING: anthropic package not installed. Run: pip install anthropic")
 
 
-def get_client():
-    """Create an Anthropic client. Reads API key from environment."""
+# Optional fallback (set this if you don't want to export ANTHROPIC_API_KEY)
+_HARDCODED_API_KEY: str | None = None
+
+
+def _get_client() -> "anthropic.Anthropic":
     if not HAS_ANTHROPIC:
         raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
-
-    api_key = Claude_API_KEY
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or _HARDCODED_API_KEY
     if not api_key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. "
-            "Export it: export ANTHROPIC_API_KEY='sk-ant-...'"
+            "ANTHROPIC_API_KEY not set. Either export it, or assign "
+            "llm_proposer._HARDCODED_API_KEY in this file."
         )
-
     return anthropic.Anthropic(api_key=api_key)
 
 
-def call_claude(prompt: str, system_prompt: str = "", model: str = "claude-sonnet-4-20250514") -> str:
-    """Send a prompt to Claude and return the response text.
-
-    Args:
-        prompt: The user message
-        system_prompt: System-level instructions
-        model: Model identifier (default: claude-sonnet-4-20250514)
-
-    Returns:
-        The assistant's response text
-    """
-    client = get_client()
-
-    messages = [{"role": "user", "content": prompt}]
-
+def call_claude(prompt: str, system_prompt: str = "",
+                model: str = "claude-sonnet-4-20250514",
+                max_tokens: int = 8192) -> str:
+    client = _get_client()
     kwargs = {
         "model": model,
-        "max_tokens": 8192,
-        "messages": messages,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
     }
     if system_prompt:
         kwargs["system"] = system_prompt
-
     response = client.messages.create(**kwargs)
-
     return response.content[0].text
 
 
-def extract_json_from_response(response_text: str) -> list:
-    """Extract JSON array from Claude's response text.
+# ---------------------------------------------------------------------------
+# Response parsing
+# ---------------------------------------------------------------------------
 
-    Claude often wraps JSON in markdown code blocks. This handles that.
-    """
-    # Try to find JSON array in code blocks first
-    code_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', response_text)
-    if code_block_match:
+def extract_json_array(response_text: str) -> list:
+    """Pull the JSON array out of a Claude response. Handles markdown fencing."""
+    fenced = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", response_text)
+    if fenced:
         try:
-            return json.loads(code_block_match.group(1))
+            return json.loads(fenced.group(1))
         except json.JSONDecodeError:
             pass
-
-    # Try to find a bare JSON array
-    array_match = re.search(r'(\[[\s\S]*\])', response_text)
-    if array_match:
+    bare = re.search(r"(\[[\s\S]*\])", response_text)
+    if bare:
         try:
-            return json.loads(array_match.group(1))
+            return json.loads(bare.group(1))
         except json.JSONDecodeError:
             pass
-
     raise ValueError(
-        "Could not extract JSON array from LLM response. "
-        f"Response preview: {response_text[:500]}..."
+        f"Could not extract JSON array from LLM response. "
+        f"Preview: {response_text[:500]}..."
     )
 
 
-def propose_initial_prototypes(
-    n_prototypes: int,
-    global_statistics: dict,
-    metadata: dict,
-    initial_prompt_template: str,
-) -> list:
-    """Ask Claude to propose N initial prototype specs.
+def _validate_prototype(p: dict) -> None:
+    """Light schema check — fail loud on missing essentials."""
+    for key in ("prototype_id", "name", "function"):
+        if key not in p:
+            raise ValueError(f"prototype missing required field '{key}': {p}")
+    if not isinstance(p["function"], str) or "select_segments" not in p["function"]:
+        raise ValueError(
+            f"prototype '{p.get('name')}' has invalid function field "
+            f"(must be a string defining select_segments)"
+        )
 
-    Args:
-        n_prototypes: Number of prototypes to generate
-        global_statistics: Global stats dict from Part A preprocessing
-        metadata: Dataset metadata dict from Part A
-        initial_prompt_template: The prompt template string
 
-    Returns:
-        List of prototype spec dicts
-    """
-    # Format the global stats into a compact string for the prompt
-    stats_str = json.dumps(global_statistics, indent=2)
-    channels_str = json.dumps(metadata.get("channels", {}), indent=2)
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
+def propose_initial_prototypes(n_prototypes: int, global_statistics: dict,
+                                cluster_summaries: list, metadata: dict,
+                                initial_prompt_template: str) -> list:
+    """First-round prototype generation."""
     prompt = initial_prompt_template.format(
         n_prototypes=n_prototypes,
-        global_statistics=stats_str,
-        channel_descriptions=channels_str,
+        n_clusters=len(cluster_summaries),
+        global_statistics=json.dumps(global_statistics, indent=2),
+        cluster_summaries=json.dumps(cluster_summaries, indent=2),
+        channel_descriptions=json.dumps(metadata.get("channels", {}), indent=2),
         dataset_name=metadata.get("dataset_name", "unknown"),
         target_variable=metadata.get("target_variable", "load"),
         target_description=metadata.get("target_description", ""),
@@ -130,56 +112,35 @@ def propose_initial_prototypes(
         total_segments=metadata.get("total_segments", 0),
         training_rows=metadata.get("training_rows", 0),
     )
-
     system_prompt = (
-        "You are a domain expert in time series forecasting. "
-        "You generate structured JSON prototype specifications based on domain knowledge "
-        "and dataset statistics. Always return valid JSON."
+        "You are a domain expert in time series forecasting. You produce "
+        "Python filter functions and structured JSON. Always return valid JSON."
     )
-
     print(f"Calling Claude to propose {n_prototypes} prototypes...")
-    response_text = call_claude(prompt, system_prompt)
-
-    prototypes = extract_json_from_response(response_text)
-    print(f"  Received {len(prototypes)} prototypes from Claude")
-
+    response = call_claude(prompt, system_prompt)
+    prototypes = extract_json_array(response)
+    for p in prototypes:
+        _validate_prototype(p)
+    print(f"  Received {len(prototypes)} prototypes.")
     return prototypes
 
 
-def propose_revisions(
-    current_prototypes: list,
-    feedback_text: str,
-    revision_prompt_template: str,
-) -> list:
-    """Ask Claude to revise low-quality prototypes based on feedback.
-
-    Args:
-        current_prototypes: The full list of current prototype specs
-        feedback_text: Feedback report from feedback_generator
-        revision_prompt_template: The revision prompt template
-
-    Returns:
-        Updated list of all prototype specs (revised + unchanged)
-    """
-    current_specs_str = json.dumps(current_prototypes, indent=2)
-
+def propose_revisions(current_prototypes: list, feedback_text: str,
+                       revision_prompt_template: str) -> list:
+    """Revision round: ask Claude to fix flagged prototypes."""
     prompt = revision_prompt_template.format(
-        current_prototypes=current_specs_str,
+        current_prototypes=json.dumps(current_prototypes, indent=2),
         feedback=feedback_text,
     )
-
     system_prompt = (
-        "You are a domain expert in time series forecasting. "
-        "You are revising prototype specifications based on validation feedback. "
-        "Return the COMPLETE list of all prototypes (both revised and unchanged) as a JSON array. "
-        "For revised prototypes, adjust the requirements to be less restrictive "
-        "using the percentile data provided, while preserving the prototype's conceptual identity."
+        "You are revising prototype filter functions based on validation "
+        "feedback. Return the COMPLETE list of all prototypes (revised + "
+        "unchanged) as a JSON array."
     )
-
-    print("Calling Claude to revise prototypes...")
-    response_text = call_claude(prompt, system_prompt)
-
-    prototypes = extract_json_from_response(response_text)
-    print(f"  Received {len(prototypes)} prototypes from Claude")
-
+    print("Calling Claude for revision...")
+    response = call_claude(prompt, system_prompt)
+    prototypes = extract_json_array(response)
+    for p in prototypes:
+        _validate_prototype(p)
+    print(f"  Received {len(prototypes)} prototypes.")
     return prototypes

@@ -1,118 +1,161 @@
 """
-Prompt templates for the prototype proposing loop.
+Prompt templates for the prototype proposing loop (function-based).
 
-Two templates:
-1. INITIAL_PROMPT: First-round prototype generation
-2. REVISION_PROMPT: Revision based on validation feedback
+The LLM is asked to return, per prototype, a Python function `select_segments`
+that takes a list of segment dicts and returns matching indices. The full
+schema is given inline so the LLM knows how to access fields.
 """
+
 
 INITIAL_PROMPT = """You are a domain expert in electricity load forecasting for a province in northern China. You are helping design a prototype-based forecasting model.
 
-## Context
+## Task Context
 
-We have a dataset of electricity load at {time_resolution} resolution. The model uses a {input_length}-step lookback window to forecast the next {output_length} steps. The training set has {training_rows} rows, segmented into {total_segments} non-overlapping windows.
-
-Dataset: {dataset_name}
-Target: {target_variable} — {target_description}
+- Dataset: {dataset_name}
+- Target: {target_variable} ({target_description})
+- Time resolution: {time_resolution}
+- Lookback window: {input_length} steps
+- Forecast window: {output_length} steps
+- Total training segments: {total_segments}
 
 ## Available Feature Channels
 
 {channel_descriptions}
 
-## Global Statistics Across Training Set
+## Global Statistics (over all training segments)
 
 {global_statistics}
 
+## Cluster Summaries (training segments grouped into {n_clusters} natural regimes)
+
+The training segments cluster into {n_clusters} natural groups by K-means on
+per-segment summary vectors. Each cluster's "signature" tells you the
+dominant value of each categorical channel and the deviation (in std-units)
+of each continuous channel from the global mean. Use these as a guide for
+choosing realistic thresholds.
+
+{cluster_summaries}
+
+## Segment Schema
+
+Each segment is a dict with this structure:
+
+```python
+{{
+  "segment_id": int,
+  "start_idx": int,
+  "end_idx": int,
+  "lookback_stats": {{
+    # one entry per channel; continuous channels have:
+    "Skin_temperature": {{
+      "mean": float, "median": float, "std": float, "min": float,
+      "max": float, "range": float, "skewness": float,
+      "kurtosis": float, "slope": float, "volume": float
+    }},
+    # discrete channels have:
+    "is_workday": {{
+      "mode": int, "n_unique": int, "distribution": {{"0": float, "1": float}}
+    }},
+    # ... one such entry per channel listed above
+  }},
+  "forecast_stats": {{
+    # same structure as lookback_stats, but over the {output_length}-step forecast window
+  }},
+  "cross_channel_stats": {{
+    "load_corr_Skin_temperature": float,
+    "is_uniform_day_type": bool,
+    "uniform_day_type": "workday" | "non_workday",
+    "contains_holiday": bool,
+    "is_all_holiday": bool
+  }},
+  "time_context": {{
+    "season": "spring" | "summer" | "autumn" | "winter",
+    "forecast_start": {{
+      "hour": int, "solar_month": int, "solar_day": int, "minute": int
+    }},
+    # also: lookback_start, lookback_end, forecast_end
+  }}
+}}
+```
+
+NOTE: the column literally called "month" in the dataset actually stores the
+**hour of day** (0-23), not the calendar month. The calendar month is in
+"solar_month".
+
 ## Your Task
 
-Design exactly {n_prototypes} prototypes that together cover the major electricity load regimes in this dataset. Each prototype represents a distinct, recurring pattern in the daily load curve (the {output_length}-step forecast).
+Design exactly {n_prototypes} prototypes that together cover the major
+electricity-load regimes in this dataset. The {n_prototypes} prototypes must
+be MUTUALLY DISTINCT and COLLECTIVELY EXHAUSTIVE.
 
-For each prototype, provide:
+For each prototype, write a Python function that filters a list of segments
+to those matching the prototype's regime.
 
-1. **name**: A short snake_case identifier (e.g., "cold_winter_workday")
-2. **description**: 2-3 sentences explaining what this prototype captures and why it matters.
-3. **channel_requirements**: For each relevant feature channel, specify a filtering condition:
+Each function MUST satisfy ALL of these constraints:
 
-For channels that matter:
-```json
-"channel_name": {{
-  "operator": "<" | ">" | "==" | "in" | "between",
-  "threshold": <number>,
-  "values": [<list>],
-  "low": <number>, "high": <number>,
-  "stat": "mean" | "mode",
-  "reasoning": "Why this condition matters"
-}}
-```
-
-For channels that don't matter:
-```json
-"channel_name": {{
-  "operator": null,
-  "reasoning": "Why irrelevant"
-}}
-```
-
-4. **expected_load_characteristics**: What the daily load curve should roughly look like.
-
-## Important Guidelines
-
-- The {n_prototypes} prototypes should be MUTUALLY DISTINCT and COLLECTIVELY EXHAUSTIVE.
-- Focus on REGIME-BASED conditions (sustained states over 4 days) rather than momentary transitions.
-- Use the global statistics above to set REALISTIC thresholds. For example, if temperature p25=-0.48, setting a threshold of < -20 would match almost nothing.
-- Not every channel needs a requirement. Only include channels that genuinely distinguish this prototype.
-- For discrete channels (is_workday, solar_month, etc.), use "stat": "mode".
-- For continuous channels (Skin_temperature, etc.), use "stat": "mean".
-- Each prototype should match roughly 3-15% of the total segments. Avoid overly restrictive requirements.
-- You do NOT need to list irrelevant channels. Only include channels with actual requirements.
+1. Be named exactly `select_segments`
+2. Take one argument `segments: list[dict]`
+3. Return a list of integer indices (into `segments`) of matching segments
+4. Use only standard Python — no `import`, no I/O, no attribute access on
+   modules. Operate on the dict structure shown above.
+5. Be deterministic and pure (no randomness, no global state).
+6. Be defensive about missing keys: use `seg.get("lookback_stats", {{}}).get("CHANNEL", {{}}).get("STAT", default)`
+   so the function never KeyErrors on a malformed segment.
 
 ## Output Format
 
-Return a JSON array of {n_prototypes} prototype objects. Example structure:
+Return a JSON array of {n_prototypes} objects with this exact shape:
 
 ```json
 [
   {{
     "prototype_id": 1,
     "name": "cold_winter_workday",
-    "description": "...",
-    "channel_requirements": {{
-      "Skin_temperature": {{"operator": "<", "threshold": 0, "stat": "mean", "reasoning": "..."}},
-      "solar_month": {{"operator": "in", "values": [1, 2, 11, 12], "stat": "mode", "reasoning": "..."}},
-      "is_workday": {{"operator": "==", "threshold": 1, "stat": "mode", "reasoning": "..."}}
-    }},
-    "expected_load_characteristics": {{
-      "mean_range": [3500, 5600],
-      "description": "High overnight heating load, dual peaks at morning and evening"
-    }}
+    "description": "Cold winter workday regime with sustained heating load.",
+    "function": "def select_segments(segments):\\n    matched = []\\n    for i, seg in enumerate(segments):\\n        lb = seg.get('lookback_stats', {{}})\\n        temp = lb.get('Skin_temperature', {{}}).get('mean', 999)\\n        is_workday = lb.get('is_workday', {{}}).get('mode', 0)\\n        smonth = lb.get('solar_month', {{}}).get('mode', 0)\\n        if temp < 0 and is_workday == 1 and smonth in [12, 1, 2]:\\n            matched.append(i)\\n    return matched"
   }}
 ]
 ```
+
+Important:
+- Each prototype should match roughly 3-15% of total segments. Use the
+  cluster summaries and global percentiles to choose realistic thresholds.
+- Function code must be a single string with `\\n` line separators (so that
+  the JSON stays valid). Keep functions short and readable; long control
+  flow is unnecessary.
+- The function bodies should reference real channel names and stat keys
+  exactly as shown in the schema above.
 
 Return ONLY the JSON array, no other text.
 """
 
 
-REVISION_PROMPT = """You previously proposed the following prototype specifications for an electricity load forecasting model:
+REVISION_PROMPT = """You previously proposed prototypes whose Python `select_segments` functions
+were validated against the full segment bank. Some failed the quality rubric.
+
+## Current Prototypes
 
 {current_prototypes}
 
-## Validation Results
-
-We ran these prototypes against the actual dataset segment bank. Here is the evaluation report:
+## Validation Report
 
 {feedback}
 
 ## Your Task
 
-Revise the prototypes marked as "REVISION NEEDED" so they match enough segments. Use the percentile data in the report to set more realistic thresholds.
+Revise the prototypes flagged as REVISION NEEDED so they pass every listed
+failure mode. Keep each prototype's conceptual identity (don't change what
+regime it represents); only adjust the function body — typically by
+loosening or tightening thresholds, dropping over-restrictive predicates,
+adding a discriminative one, or replacing one channel with a related one.
 
-Rules:
-1. Keep each prototype's conceptual identity (don't change what it represents, just relax overly strict thresholds).
-2. Use the percentile data provided to choose thresholds that are realistic for this dataset.
-3. Return the COMPLETE list of ALL prototypes (both revised and unchanged) as a JSON array.
-4. Use the exact same JSON format as before.
-5. For revised prototypes, update the "reasoning" field to explain your changes.
+The revised functions must follow the same constraints as before:
 
-Return ONLY the JSON array, no other text.
+1. Named `select_segments`, takes `segments: list[dict]`, returns list[int].
+2. No imports, only standard Python.
+3. Deterministic and pure.
+4. Defensive `.get(...)` access for every nested field.
+
+Return the COMPLETE list of all prototypes (revised + unchanged) as a JSON
+array in the exact same format as before. No other text.
 """
