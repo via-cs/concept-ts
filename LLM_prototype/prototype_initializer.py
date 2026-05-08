@@ -205,6 +205,14 @@ def main():
     parser.add_argument("--typical_num", type=int, default=20,
                         help="K most typical segments per prototype")
     parser.add_argument("--num_blank", type=int, default=2)
+    parser.add_argument("--random_value_init", action="store_true",
+                        help="Skip p_init computation and use torch.randn for "
+                             "prototype_value. Recommended whenever the model's "
+                             "learned prototype_value is observed to differ "
+                             "strongly from matched segments' averaged forecast "
+                             "(typical for ProtoTS, where prototype_value acts as "
+                             "a basis vector, not a literal forecast). Pair with "
+                             "--anchor_lambda_val 0 in prototype_learning.py.")
     # encoder hyperparameters
     parser.add_argument("--input_length", type=int, default=96 * 4)
     parser.add_argument("--output_length", type=int, default=96)
@@ -285,8 +293,19 @@ def main():
 
     # ---- Stack + append blanks ----
     mu_init = torch.stack(mu_list, dim=0)                      # (N, D)
-    p_init  = torch.stack(p_list, dim=0)                       # (N, L, 1)
     N = mu_init.shape[0]
+
+    if args.random_value_init:
+        # Override the averaged-forecast p_init with random tensors. The
+        # rationale is that prototype_value learns as a mixture-basis vector,
+        # not as a literal forecast curve, so a "real" forecast init places
+        # it in a coordinate system the model has to leave during training.
+        p_init = torch.randn(N, args.output_length, args.output_dim)
+        print(f"[--random_value_init] overrode p_init with torch.randn"
+              f"({N}, {args.output_length}, {args.output_dim})")
+    else:
+        p_init = torch.stack(p_list, dim=0)                    # (N, L, 1)
+
     M = args.num_blank
 
     if M > 0:

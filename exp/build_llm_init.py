@@ -83,6 +83,10 @@ def get_args():
     p.add_argument("--typical_num", type=int, default=20,
                    help="Number of typical segments per prototype to encode + average")
     p.add_argument("--num_blank",   type=int, default=2)
+    p.add_argument("--random_value_init", action="store_true",
+                   help="Use torch.randn for prototype_value instead of the "
+                        "averaged forecast curves. Recommended; pair with "
+                        "--anchor_lambda_val 0 in prototype_learning.py.")
 
     # Encoder shape (must match embedding_learning.py)
     p.add_argument("--input_length",  type=int, default=96 * 4)
@@ -189,8 +193,13 @@ def main():
 
     # Stack + append blanks
     mu_init = torch.stack(mu_list, dim=0)
-    p_init  = torch.stack(p_list, dim=0)
     N = mu_init.shape[0]
+    if args.random_value_init:
+        p_init = torch.randn(N, args.output_length, args.output_dim)
+        print(f"[--random_value_init] overrode p_init with torch.randn"
+              f"({N}, {args.output_length}, {args.output_dim})")
+    else:
+        p_init = torch.stack(p_list, dim=0)
     M = args.num_blank
     if M > 0:
         mu_blank = torch.empty(M, args.embed_dim)
