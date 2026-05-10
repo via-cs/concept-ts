@@ -1,3 +1,17 @@
+"""
+Encoder export point.
+
+By default, ``Embedding_Learning`` is now bound to the conv-based
+``ConvEmbedding_Learning`` from ``convolution_encoder/``. The original
+Mixer-based encoder is preserved as ``MixerEmbedding_Learning`` below for
+A/B testing or rollback — to revert, just change the bottom alias from
+``ConvEmbedding_Learning`` back to ``MixerEmbedding_Learning``.
+
+Both classes share an identical constructor signature and forward contract,
+so any swap is transparent to embedding_learning.py / prototype_learning.py
+/ extract_top_k.py / etc.
+"""
+
 import torch
 import torch.nn as nn
 
@@ -5,8 +19,16 @@ from layer.rev_norm import Rev_in
 from layer.backbone import Backbone
 from layer.channel_embedding import channel_embedding
 
+from convolution_encoder.encoder import ConvEmbedding_Learning
 
-class Embedding_Learning(nn.Module):
+
+# --------------------------------------------------------------------------
+# Original ProtoTS encoder (TSMixer-style). Preserved verbatim so we can fall
+# back / compare. To revert the global default, change the alias at the
+# bottom of this file from ConvEmbedding_Learning to MixerEmbedding_Learning.
+# --------------------------------------------------------------------------
+
+class MixerEmbedding_Learning(nn.Module):
     def __init__(
         self,
         input_dim,
@@ -82,3 +104,11 @@ class Embedding_Learning(nn.Module):
             nn.init.normal_(m.weight, mean=0, std=1 / (input_dim ** 0.5))
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
+
+
+# --------------------------------------------------------------------------
+# Default export.
+# Change this single line to MixerEmbedding_Learning to roll back to the
+# original ProtoTS encoder.
+# --------------------------------------------------------------------------
+Embedding_Learning = ConvEmbedding_Learning
