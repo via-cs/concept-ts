@@ -111,4 +111,5 @@ class MixerEmbedding_Learning(nn.Module):
 # Currently set to the original Mixer-based encoder.
 # Change this single line to ConvEmbedding_Learning to test the conv encoder.
 # --------------------------------------------------------------------------
-Embedding_Learning = MixerEmbedding_Learning
+# Embedding_Learning = MixerEmbedding_Learning
+Embedding_Learning = ConvEmbedding_Learning

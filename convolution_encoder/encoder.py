@@ -1,29 +1,41 @@
 """
-Drop-in replacement for ``model.embedding.Embedding_Learning``.
+ConvEmbedding_Learning — drop-in replacement for the Mixer-based encoder,
+following the ModernTCN design (Luo & Wang, ICLR 2024).
 
-Architecture (matches the sketch from the brainstorm):
+Pipeline:
 
-    Stage 0 + 1 : per-channel embedding (Rev_in target, sentinel forecast,
-                   per-channel lookups / Linear)              → (N, T, in_dim, D_pc)
-    Stage 2     : channel-independent ModernTCN temporal stack
-                   (K blocks, shared weights across channels) → (N, T, in_dim, D_pc)
-    Stage 3     : late cross-channel mixing (Option 3A:
-                   flatten + 2-layer MLP)                      → (N, T, mid_dim)
-    Stage 4     : time-axis projection (T → output_length)    → (N, output_length, mid_dim)
-    Stage 5     : prediction head (Linear D → output_dim)     → (N, output_length, output_dim)
-    Stage 6     : Rev_in.de_rev_in                             → (N, output_length, output_dim)
+    x ∈ (B, T, M)                              # raw input from LOF_Dataset
+    │
+    ├── Stage 0+1 : PerChannelEmbedding        # Rev_in + sentinel + per-variable embed
+    │   output      (B, T, M, D)                # channel axis preserved
+    │
+    ├── Stage 2  : DepthwisePatchify           # length-P kernel, stride S, groups=M*D
+    │   output     (B, M, D, N)                # N = T // S patches
+    │
+    ├── Stage 3  : K × ModernTCNBlock           # DWConv → ConvFFN1 → ConvFFN2 → +residual
+    │   output     (B, M, D, N)
+    │
+    ├── Stage 4  : decode                       # (B, M, D, N) → (B, output_length, mid_dim)
+    │
+    ├── Stage 5  : Linear(mid_dim, output_dim)  # prediction head
+    │
+    └── Stage 6  : Rev_in.de_rev_in             # un-normalize → (B, output_length, output_dim)
 
-The constructor signature exactly matches ``Embedding_Learning`` so the rest
-of the pipeline (embedding_learning.py, prototype_learning.py, etc.) needs
-no changes. Two of the parameters — ``bottle_dim_p`` and ``norm_type`` —
-were Mixer-specific knobs and are accepted for compatibility but ignored
-by this conv-based encoder.
+Constructor signature matches ``Embedding_Learning`` exactly, so downstream
+code (embedding_learning.py, prototype_learning.py, build_llm_init.py,
+extract_top_k.py, etc.) needs zero changes. The Mixer-only constructor
+args ``bottle_dim_p`` and ``norm_type`` are accepted and ignored.
+
+ModernTCN-specific knobs (``d_pc``, ``patch_size``, ``patch_stride``,
+``kernel_size``, ``expand``) have defaults sized for the RE dataset
+(T=480, M=23). To tune, edit the defaults below or pass via kwargs.
 """
 
 import torch
 import torch.nn as nn
 
 from convolution_encoder.channel_embedding import PerChannelEmbedding
+from convolution_encoder.patchify import DepthwisePatchify
 from convolution_encoder.conv_block import ModernTCNBlock
 
 
@@ -34,17 +46,19 @@ class ConvEmbedding_Learning(nn.Module):
         mid_dim: int,
         ext_dim: int,
         output_dim: int,
-        bottle_dim_p,           # ignored — kept for signature parity
+        bottle_dim_p,                # ignored — Mixer-only knob
         input_length: int,
         output_length: int,
         num_blocks: int,
         dropout: float,
         use_rev_in: int = 1,
-        norm_type: str = "B",   # ignored — kept for signature parity
-        # Conv-encoder specific knobs (defaults sized for the RE dataset)
-        d_pc: int = 64,
-        kernel_size: int = 51,
-        expand: int = 2,
+        norm_type: str = "B",        # ignored — Mixer-only knob
+        # --- ModernTCN-specific knobs ---
+        d_pc: int = 32,              # per-variable embedding dim D
+        patch_size: int = 4,         # patch length P
+        patch_stride: int = 4,       # patch stride S; T must be divisible by S
+        kernel_size: int = 51,       # DWConv kernel size (odd)
+        expand: int = 2,             # ConvFFN expand factor r
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -55,9 +69,19 @@ class ConvEmbedding_Learning(nn.Module):
         self.output_length = output_length
         self.use_rev_in = use_rev_in
         self.d_pc = d_pc
+        self.patch_size = patch_size
+        self.patch_stride = patch_stride
         self.total_length = input_length + output_length
 
-        # Stage 0+1: per-channel embedding (Rev_in inside)
+        # Number of patches after stem (assuming aligned T and S; pad in
+        # DepthwisePatchify handles minor mismatch).
+        self.n_patches = self.total_length // patch_stride
+        if self.total_length % patch_stride != 0:
+            # Padded version will be slightly larger; recompute conservatively.
+            pad = (patch_size - patch_stride) if patch_size > patch_stride else 0
+            self.n_patches = ((self.total_length + pad) - patch_size) // patch_stride + 1
+
+        # ---- Stage 0+1: per-channel embedding ----
         # Named ``embeding`` (typo preserved from ProtoTS) so downstream code
         # that calls ``model.embeding.denorm(...)`` keeps working unchanged.
         self.embeding = PerChannelEmbedding(
@@ -68,10 +92,19 @@ class ConvEmbedding_Learning(nn.Module):
             output_length=output_length,
         )
 
-        # Stage 2: K ModernTCN blocks, shared weights across channels
-        self.temporal_blocks = nn.ModuleList([
+        # ---- Stage 2: depthwise patchification ----
+        self.patchify = DepthwisePatchify(
+            M=input_dim,
+            D=d_pc,
+            patch_size=patch_size,
+            stride=patch_stride,
+        )
+
+        # ---- Stage 3: K ModernTCN blocks ----
+        self.blocks = nn.ModuleList([
             ModernTCNBlock(
-                dim=d_pc,
+                M=input_dim,
+                D=d_pc,
                 kernel_size=kernel_size,
                 expand=expand,
                 dropout=dropout,
@@ -79,17 +112,13 @@ class ConvEmbedding_Learning(nn.Module):
             for _ in range(num_blocks)
         ])
 
-        # Stage 3: late cross-channel mixing (Option 3A)
-        self.cross_channel_mix = nn.Sequential(
-            nn.Linear(input_dim * d_pc, mid_dim),
-            nn.GELU(),
-            nn.Linear(mid_dim, mid_dim),
-        )
+        # ---- Stage 4: decode to (B, output_length, mid_dim) ----
+        # First project N patches → output_length along the time axis,
+        # then mix M*D channels → mid_dim per output timestep.
+        self.decode_time = nn.Linear(self.n_patches, output_length)
+        self.decode_feature = nn.Linear(input_dim * d_pc, mid_dim)
 
-        # Stage 4: time-axis projection
-        self.output_time_linear = nn.Linear(self.total_length, output_length)
-
-        # Stage 5: prediction head
+        # ---- Stage 5: prediction head ----
         self.output_feature_linear = nn.Linear(mid_dim, output_dim)
 
         self._init_linear_weights()
@@ -110,49 +139,39 @@ class ConvEmbedding_Learning(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """
-        Parameters
-        ----------
-        x : (N, total_length, input_dim) — the dataloader's combined window.
+        x : (B, total_length, input_dim) — combined window from LOF_Dataset.
 
         Returns
         -------
-        prediction : (N, output_length, output_dim) — denormed forecast
-                     (in z-scored target space, same as ProtoTS).
-        encoder    : (N, output_length, mid_dim) — features consumed by
-                     the prototype layer.
+        prediction : (B, output_length, output_dim) — denormed forecast
+                     (z-scored target space, matching ProtoTS).
+        encoder    : (B, output_length, mid_dim) — features consumed by the
+                     prototype layer.
         """
-        N = x.size(0)
+        B = x.size(0)
 
-        # Stage 0+1: per-channel embedding, channel axis preserved
-        h = self.embeding(x, self.use_rev_in)          # (N, T, in_dim, d_pc)
-        T = h.size(1)
-        in_dim = h.size(2)
-        d_pc = h.size(3)
+        # Stage 0+1: per-channel embedding (channel axis preserved)
+        z = self.embeding(x, self.use_rev_in)              # (B, T, M, D)
 
-        # Stage 2: channel-independent temporal stack
-        # (N, T, in_dim, d_pc) → (N*in_dim, d_pc, T)
-        h = h.permute(0, 2, 3, 1).contiguous()         # (N, in_dim, d_pc, T)
-        h = h.reshape(N * in_dim, d_pc, T)
-        for block in self.temporal_blocks:
-            h = block(h)                                # (N*in_dim, d_pc, T)
-        # Reshape back, restore (N, T, in_dim, d_pc)
-        h = h.reshape(N, in_dim, d_pc, T)
-        h = h.permute(0, 3, 1, 2).contiguous()         # (N, T, in_dim, d_pc)
+        # Stage 2: depthwise patchification
+        z = self.patchify(z)                                # (B, M, D, N)
 
-        # Stage 3: late cross-channel mixing (flatten → MLP)
-        h = h.reshape(N, T, in_dim * d_pc)             # (N, T, in_dim*d_pc)
-        h = self.cross_channel_mix(h)                   # (N, T, mid_dim)
+        # Stage 3: K ModernTCN blocks
+        for block in self.blocks:
+            z = block(z)                                    # (B, M, D, N)
 
-        # Stage 4: time-axis projection (T → output_length)
-        h = h.transpose(1, 2)                           # (N, mid_dim, T)
-        h = self.output_time_linear(h)                  # (N, mid_dim, output_length)
-        encoder = h.transpose(1, 2)                     # (N, output_length, mid_dim)
+        # Stage 4: decode
+        _, M, D, N = z.shape
+        z = z.reshape(B, M * D, N)                          # (B, M*D, N)
+        z = self.decode_time(z)                             # (B, M*D, output_length)
+        z = z.transpose(1, 2)                                # (B, output_length, M*D)
+        encoder = self.decode_feature(z)                     # (B, output_length, mid_dim)
 
         # Stage 5: prediction head
-        output = self.output_feature_linear(encoder)    # (N, output_length, output_dim)
+        output = self.output_feature_linear(encoder)         # (B, output_length, output_dim)
 
         # Stage 6: undo Rev_in
         if self.use_rev_in:
-            output = self.embeding.denorm(output)
+            output = self.embeding.denorm(output)            # back to z-scored target space
 
         return output, encoder
