@@ -47,13 +47,22 @@ class Prototype_Layer(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # C1 architecture: matching key = time-averaged encoder output, in the
-        # same prototype_dim space as ``prototype_embedding``. Original
-        # ``patch_embedding`` (kept below for reference) projected the
-        # feature-averaged time curve through a learned 2-layer MLP into a
-        # different 128-dim space, which broke the LLM-init coordinate system.
-        # Requires encoder_mid_dim == prototype_dim (true for ProtoLLM: 128).
+        # C2 architecture: matching key = matching_head(encoder.mean(dim=1)).
+        # The matching_head is a single Linear(D, D) with NO bias and
+        # initialized to identity, so at training start match_key == time_mean
+        # (preserving the C1 property that μ₀ lives in the encoder's feature
+        # space) but the layer can drift away from identity during joint
+        # training to absorb any encoder/prototype coordinate-system tension.
+        # This restores the role the original ``patch_embedding`` played as an
+        # adapter, without sacrificing the LLM-init coordinate alignment.
         # ------------------------------------------------------------------
+        self.matching_head = nn.Linear(self.prototype_dim,
+                                        self.prototype_dim, bias=False)
+        # NOTE: identity init must be applied AFTER _init_linear_layers()
+        # below, otherwise the Kaiming-uniform pass in that helper will
+        # overwrite the identity. See bottom of __init__.
+
+        # Original ``patch_embedding`` (kept for reference; do not enable):
         # self.patch_embedding = nn.Sequential(
         #     nn.Linear(self.input_length, self.input_length * 2, bias=False),
         #     nn.ReLU(),
@@ -65,6 +74,11 @@ class Prototype_Layer(nn.Module):
         self.activation_count = []
 
         self._init_linear_layers()
+
+        # matching_head identity init AFTER _init_linear_layers, so the
+        # generic Kaiming-uniform pass over all Linear modules doesn't
+        # clobber it. At training start, matching_head(x) == x.
+        nn.init.eye_(self.matching_head.weight)
 
         self._init_stats(init_prototype_num)
 
@@ -173,13 +187,15 @@ class Prototype_Layer(nn.Module):
     def forward(self, x):
         # x: (B, length=output_length, embedding_dim=prototype_dim)
         # The encoder produces a (B, 96, 128) tensor where dim 1 is time and
-        # dim 2 is the encoder feature axis. We compare prototypes in this
-        # feature space directly: the match key is the per-feature mean over
-        # time. This puts the matching dot product in the same 128-dim space
-        # that `prototype_embedding` lives in (after LLM init) and that μ₀ is
-        # constructed in inside `prototype_initializer.py`.
+        # dim 2 is the encoder feature axis. We collapse over time first
+        # (time_mean), then pass through the matching_head adapter to obtain
+        # match_key — the prototype-side adapter that lets matching geometry
+        # drift away from the encoder's natural feature shape during training,
+        # without breaking the LLM-init coordinate system at epoch 0
+        # (matching_head is identity-initialized).
         batch, length, embedding_dim = x.shape
-        match_key = x.mean(dim=1, keepdim=True)   # (B, 1, embedding_dim)
+        time_mean = x.mean(dim=1, keepdim=True)              # (B, 1, D)
+        match_key = self.matching_head(time_mean)             # (B, 1, D), identity at init
 
         # --- original patch_embedding path (kept for reference) -----------
         # x_flat = x.mean(dim=-1)                              # (B, L)

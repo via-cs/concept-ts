@@ -108,7 +108,7 @@ class MixerEmbedding_Learning(nn.Module):
 
 # --------------------------------------------------------------------------
 # Default export.
-# Change this single line to MixerEmbedding_Learning to roll back to the
-# original ProtoTS encoder.
+# Currently set to the original Mixer-based encoder.
+# Change this single line to ConvEmbedding_Learning to test the conv encoder.
 # --------------------------------------------------------------------------
-Embedding_Learning = ConvEmbedding_Learning
+Embedding_Learning = MixerEmbedding_Learning
