@@ -29,10 +29,16 @@ class Prototype(nn.Module):
         self.align_layer = align()
 
     def forward(self, embd, x):
-        embd = self.align_layer(x, embd, self.input_length)
+        # ``embd`` is now a (B, prototype_dim) time-averaged feature vector
+        # produced by the encoder. The original ProtoTS align_layer is only
+        # meaningful for a 3D (B, T, D) representation — it rolled the time
+        # axis to canonicalise inputs before matching, and inverted that roll
+        # on the prediction so the output landed in the original time-of-day
+        # frame. With the encoder pre-averaging over time, the match key is
+        # time-invariant by construction, and prototype_value is learned in
+        # the actual time-of-day frame; neither direction of align_layer is
+        # needed any more. We bypass it entirely here.
         output, score = self.prototype(embd)
-        output = self.align_layer.backward(x,output, self.input_length)
-
         return output, score
 
     # Thin pass-throughs so the training loop can call

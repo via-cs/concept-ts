@@ -100,6 +100,10 @@ def encode_segments(model: nn.Module, dataset: LOF_Dataset,
     Each segment in the segment-bank JSON has a `start_idx` field — that's
     the row index in the original CSV. LOF_Dataset's own __getitem__ uses
     the same indexing convention, so we pass start_idx directly.
+
+    The encoder now returns a time-averaged ``(B, mid_dim)`` tensor (the
+    averaging happens inside ``ConvEmbedding_Learning.forward``), so each
+    segment contributes a single ``(mid_dim,)`` vector here.
     """
     model.eval()
     latents = []
@@ -109,11 +113,11 @@ def encode_segments(model: nn.Module, dataset: LOF_Dataset,
             continue
         data, _ = dataset[s]
         data = data.unsqueeze(0).to(device)
-        _, encoder = model(data)             # (1, output_length, mid_dim)
-        latents.append(encoder.squeeze(0).cpu())
+        _, encoder = model(data)             # (1, mid_dim) — already time-averaged
+        latents.append(encoder.squeeze(0).cpu())  # (mid_dim,)
     if not latents:
         return None
-    return torch.stack(latents, dim=0)        # (K, L, D)
+    return torch.stack(latents, dim=0)        # (K, mid_dim)
 
 
 def forecast_curves(dataset: LOF_Dataset, start_indices: list,
@@ -165,10 +169,12 @@ def build_one_prototype(spec: dict, segments: list,
     start_indices = [segments[i]["start_idx"] for i in typical]
 
     # 3. Encode + average -> μ
+    # The encoder already mean-pools over the time axis, so each row of
+    # ``latents`` is one (mid_dim,) vector. We just average over instances.
     latents = encode_segments(model, dataset, start_indices, device)
     if latents is None:
         return None
-    mu = latents.mean(dim=(0, 1))                              # (D,)
+    mu = latents.mean(dim=0)                                   # (D,)
 
     # 4. Average forecast curves -> p
     fcs = forecast_curves(dataset, start_indices, input_length, output_length)

@@ -47,38 +47,19 @@ class Prototype_Layer(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # C2 architecture: matching key = matching_head(encoder.mean(dim=1)).
-        # The matching_head is a single Linear(D, D) with NO bias and
-        # initialized to identity, so at training start match_key == time_mean
-        # (preserving the C1 property that μ₀ lives in the encoder's feature
-        # space) but the layer can drift away from identity during joint
-        # training to absorb any encoder/prototype coordinate-system tension.
-        # This restores the role the original ``patch_embedding`` played as an
-        # adapter, without sacrificing the LLM-init coordinate alignment.
+        # No matching adapter: the upstream encoder now returns a time-averaged
+        # (B, mid_dim) feature vector, and that vector is compared directly
+        # against ``prototype_embedding`` via dot product. Because the encoder
+        # produces the match key already in the same coordinate system as the
+        # prototype bank, no Linear projection (matching_head) or temporal
+        # mean (`x.mean(dim=1)`) is needed inside this layer.
         # ------------------------------------------------------------------
-        self.matching_head = nn.Linear(self.prototype_dim,
-                                        self.prototype_dim, bias=False)
-        # NOTE: identity init must be applied AFTER _init_linear_layers()
-        # below, otherwise the Kaiming-uniform pass in that helper will
-        # overwrite the identity. See bottom of __init__.
-
-        # Original ``patch_embedding`` (kept for reference; do not enable):
-        # self.patch_embedding = nn.Sequential(
-        #     nn.Linear(self.input_length, self.input_length * 2, bias=False),
-        #     nn.ReLU(),
-        #     nn.Linear(self.input_length * 2, self.prototype_dim, bias=False)
-        # )
 
         self.parent_indices = []
         self.cumulative_loss = []
         self.activation_count = []
 
         self._init_linear_layers()
-
-        # matching_head identity init AFTER _init_linear_layers, so the
-        # generic Kaiming-uniform pass over all Linear modules doesn't
-        # clobber it. At training start, matching_head(x) == x.
-        nn.init.eye_(self.matching_head.weight)
 
         self._init_stats(init_prototype_num)
 
@@ -185,23 +166,12 @@ class Prototype_Layer(nn.Module):
 
 
     def forward(self, x):
-        # x: (B, length=output_length, embedding_dim=prototype_dim)
-        # The encoder produces a (B, 96, 128) tensor where dim 1 is time and
-        # dim 2 is the encoder feature axis. We collapse over time first
-        # (time_mean), then pass through the matching_head adapter to obtain
-        # match_key — the prototype-side adapter that lets matching geometry
-        # drift away from the encoder's natural feature shape during training,
-        # without breaking the LLM-init coordinate system at epoch 0
-        # (matching_head is identity-initialized).
-        batch, length, embedding_dim = x.shape
-        time_mean = x.mean(dim=1, keepdim=True)              # (B, 1, D)
-        match_key = self.matching_head(time_mean)             # (B, 1, D), identity at init
-
-        # --- original patch_embedding path (kept for reference) -----------
-        # x_flat = x.mean(dim=-1)                              # (B, L)
-        # patch_emb = self.patch_embedding(x_flat).unsqueeze(1) # (B, 1, prototype_dim)
-        # then ``patch_emb`` was used everywhere ``match_key`` is used below.
-        # ------------------------------------------------------------------
+        # x: (B, embedding_dim) — time-averaged encoder output.
+        # The encoder now performs the time mean internally, so this layer
+        # compares x directly against ``prototype_embedding`` via dot product.
+        # No adapter (matching_head) and no further temporal collapse here.
+        batch, embedding_dim = x.shape
+        match_key = x.unsqueeze(1)                            # (B, 1, D)
 
         all_score = []
         all_ans = []

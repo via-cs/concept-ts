@@ -135,15 +135,18 @@ def read_feature_names(csv_path, input_dim):
 
 @torch.no_grad()
 def compute_match_keys(model, dataset, batch_size, device):
-    """Run the encoder over every segment and return per-segment match_key."""
+    """Run the encoder over every segment and return per-segment match_key.
+
+    The encoder now returns a ``(B, mid_dim)`` time-averaged feature vector
+    directly, so the match key is the encoder output without further reduction.
+    """
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     keys = []
     for data, _ in tqdm(loader, desc="Encoding training segments"):
         data = data.to(device)
-        _, encoder = model(data)            # (B, output_length, mid_dim)
-        match_key = encoder.mean(dim=1)     # (B, mid_dim)  -- C1 matching key
-        keys.append(match_key.cpu())
+        _, encoder = model(data)            # (B, mid_dim) — already time-averaged
+        keys.append(encoder.cpu())
     return torch.cat(keys, dim=0)
 
 

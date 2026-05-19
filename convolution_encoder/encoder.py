@@ -145,8 +145,9 @@ class ConvEmbedding_Learning(nn.Module):
         -------
         prediction : (B, output_length, output_dim) — denormed forecast
                      (z-scored target space, matching ProtoTS).
-        encoder    : (B, output_length, mid_dim) — features consumed by the
-                     prototype layer.
+        encoder    : (B, mid_dim) — time-averaged feature vector that the
+                     prototype layer compares directly against its prototype
+                     embeddings (no further mean / adapter required).
         """
         B = x.size(0)
 
@@ -165,13 +166,22 @@ class ConvEmbedding_Learning(nn.Module):
         z = z.reshape(B, M * D, N)                          # (B, M*D, N)
         z = self.decode_time(z)                             # (B, M*D, output_length)
         z = z.transpose(1, 2)                                # (B, output_length, M*D)
-        encoder = self.decode_feature(z)                     # (B, output_length, mid_dim)
+        encoder_full = self.decode_feature(z)                # (B, output_length, mid_dim)
 
-        # Stage 5: prediction head
-        output = self.output_feature_linear(encoder)         # (B, output_length, output_dim)
+        # Stage 5: prediction head — operates on the per-timestep features,
+        # so the L1-loss pretraining objective and the (B, output_length, 1)
+        # prediction contract are unchanged.
+        output = self.output_feature_linear(encoder_full)    # (B, output_length, output_dim)
 
         # Stage 6: undo Rev_in
         if self.use_rev_in:
             output = self.embeding.denorm(output)            # back to z-scored target space
+
+        # Time-averaged encoder representation: the match key the prototype
+        # layer will compare against its prototype_embedding bank.
+        # Mean over time is invariant to time-of-day cyclic shifts, so this
+        # also subsumes the role the original ProtoTS align_layer played for
+        # the matching side.
+        encoder = encoder_full.mean(dim=1)                   # (B, mid_dim)
 
         return output, encoder
