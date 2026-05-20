@@ -121,7 +121,25 @@ class ConvEmbedding_Learning(nn.Module):
         # ---- Stage 5: prediction head ----
         self.output_feature_linear = nn.Linear(mid_dim, output_dim)
 
+        # ---- Stage 6: learnable shared time pooling ----
+        # Replaces the fixed ``mean(dim=1)`` aggregation with a learnable
+        # Linear(output_length, 1) that gives the time axis a learned single
+        # weighting vector, shared across the mid_dim channels. Following the
+        # same simple-linear-projection pattern as ``decode_time`` (480 → 96)
+        # and ``decode_feature`` (M·D → mid_dim).
+        # Initialized to a constant 1/output_length so this layer is exactly
+        # equivalent to the mean at training start — pretraining therefore
+        # starts from the same coordinate system the previous mean-based
+        # encoder produced, and gradient descent is free to drift away
+        # from uniform weights wherever a non-uniform temporal weighting
+        # helps the L1 prediction loss.
+        self.time_pool = nn.Linear(output_length, 1, bias=False)
+
         self._init_linear_weights()
+
+        # Mean-equivalent init — applied AFTER _init_linear_weights so the
+        # generic Linear-init pass over all Linear modules doesn't clobber it.
+        nn.init.constant_(self.time_pool.weight, 1.0 / output_length)
 
     def _init_linear_weights(self):
         """Match ProtoTS's per-Linear init: N(0, 1/sqrt(fan_in)), zero biases.
@@ -177,11 +195,15 @@ class ConvEmbedding_Learning(nn.Module):
         if self.use_rev_in:
             output = self.embeding.denorm(output)            # back to z-scored target space
 
-        # Time-averaged encoder representation: the match key the prototype
+        # Learnable shared time pooling: the match key the prototype
         # layer will compare against its prototype_embedding bank.
-        # Mean over time is invariant to time-of-day cyclic shifts, so this
-        # also subsumes the role the original ProtoTS align_layer played for
-        # the matching side.
-        encoder = encoder_full.mean(dim=1)                   # (B, mid_dim)
+        # At init the weights are constant 1/output_length, so this layer
+        # is equivalent to encoder_full.mean(dim=1). During training the
+        # weighting can drift to non-uniform — e.g. recency bias, or
+        # attention to specific timesteps — wherever the L1 prediction loss
+        # benefits from it. Shared across the mid_dim channels (a single
+        # length-output_length weight vector).
+        encoder_t = encoder_full.transpose(1, 2)             # (B, mid_dim, output_length)
+        encoder = self.time_pool(encoder_t).squeeze(-1)       # (B, mid_dim)
 
         return output, encoder
