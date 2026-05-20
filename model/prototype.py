@@ -29,13 +29,26 @@ class Prototype(nn.Module):
         self.align_layer = align()
 
     def forward(self, embd, x):
-        # ``embd`` may be (B, T, D) — Mixer-encoder path — or (B, D) —
-        # ConvEmbedding-encoder path. Both shapes are passed through to
-        # the prototype layer, which dispatches internally: 3D inputs go
-        # through patch_embedding; 2D inputs are used as the match key
-        # directly. The original align_layer (cyclic-shift canonicalisation)
-        # is bypassed regardless of encoder type.
+        # ``embd`` may be (B, T, D) — Mixer-encoder path, original ProtoTS —
+        # or (B, D) — ConvEmbedding-encoder path.
+        #
+        # For the Mixer path we reproduce original ProtoTS exactly: roll the
+        # encoder output by −time_of_day before matching (canonicalise to
+        # midnight-aligned reference), then roll the per-layer predictions
+        # by +time_of_day after the prototype layer to recover the input's
+        # actual time-of-day frame. ``prototype_value`` is learned in the
+        # canonical frame; ``align_layer.backward`` un-canonicalises it.
+        #
+        # For the ConvEmbedding path neither direction is meaningful — the
+        # encoder has already aggregated over the time axis, so the match
+        # key is time-invariant by construction and ``prototype_value`` is
+        # learned in the actual time frame. We skip align_layer in that case.
+        use_align = (embd.dim() == 3)
+        if use_align:
+            embd = self.align_layer(x, embd, self.input_length)
         output, score = self.prototype(embd)
+        if use_align:
+            output = self.align_layer.backward(x, output, self.input_length)
         return output, score
 
     # Thin pass-throughs so the training loop can call
