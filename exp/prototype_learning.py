@@ -220,26 +220,38 @@ def train_loop(
             print(f"Prototype state saved at {checkpoint_path_prototype}")
         else:
             patience_counter += 1
-            if patience_counter >= 5 and current_layer_num < prototype_layer_num:
-                model.load_state_dict(torch.load(checkpoint_path_model, map_location=device))
-                prototype_model.load_state_dict(torch.load(checkpoint_path_prototype, map_location=device))
-                step_mse, step_mae = evaluate_with_prototype(model, prototype_model, test_dataset, batch_size, device)
-                print(f"{current_layer_num} Layers Test Results -> MSE: {step_mse:.6f}, MAE: {step_mae:.6f}")
-                
-                
-                current_lr = 2e-4
-                optimizer = torch.optim.Adam(
-                    [{"params": prototype_model.parameters()}, {"params": model.parameters()}],
-                    # [{"params": prototype_model.parameters()}],
-                    lr=current_lr
-                )
+            if patience_counter >= 5:
+                if current_layer_num < prototype_layer_num:
+                    # Validation plateaued mid-stack — grow one more prototype layer.
+                    model.load_state_dict(torch.load(checkpoint_path_model, map_location=device))
+                    prototype_model.load_state_dict(torch.load(checkpoint_path_prototype, map_location=device))
+                    step_mse, step_mae = evaluate_with_prototype(model, prototype_model, test_dataset, batch_size, device)
+                    print(f"{current_layer_num} Layers Test Results -> MSE: {step_mse:.6f}, MAE: {step_mae:.6f}")
 
-                current_layer_num += 1
-                prototype_model.prototype.add_prototype(device)
 
-                best_val_mae = float('inf')
-                patience_counter = 0
-                time_step = 0
+                    current_lr = 2e-4
+                    optimizer = torch.optim.Adam(
+                        [{"params": prototype_model.parameters()}, {"params": model.parameters()}],
+                        # [{"params": prototype_model.parameters()}],
+                        lr=current_lr
+                    )
+
+                    current_layer_num += 1
+                    prototype_model.prototype.add_prototype(device)
+
+                    best_val_mae = float('inf')
+                    patience_counter = 0
+                    time_step = 0
+                else:
+                    # Already at the final prototype layer. With prototype_layer_num=3
+                    # this fires after the second split (current_layer_num == 3) and
+                    # the third layer's validation MAE plateaus for 5 epochs — i.e.
+                    # the training is structurally done. Break out and run the final
+                    # test evaluation on the best checkpoint.
+                    print(f"\n  Validation MAE plateaued at final prototype layer "
+                          f"({current_layer_num} of {prototype_layer_num}). "
+                          f"Early-stopping at epoch {epoch + 1} / {num_epochs}.")
+                    break
 
         time_step += 1
 
