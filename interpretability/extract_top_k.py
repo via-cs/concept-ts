@@ -145,7 +145,10 @@ def compute_match_keys(model, dataset, batch_size, device):
     keys = []
     for data, _ in tqdm(loader, desc="Encoding training segments"):
         data = data.to(device)
-        _, encoder = model(data)            # (B, mid_dim) — already time-averaged
+        _, encoder = model(data)            # (B, mid_dim) for ConvEmbedding,
+                                             # (B, output_length, mid_dim) for MixerEmbedding
+        if encoder.dim() == 3:
+            encoder = encoder.mean(dim=1)   # average over time for Mixer encoder
         keys.append(encoder.cpu())
     return torch.cat(keys, dim=0)
 

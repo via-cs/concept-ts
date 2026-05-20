@@ -47,13 +47,16 @@ class Prototype_Layer(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # No matching adapter: the upstream encoder now returns a time-averaged
-        # (B, mid_dim) feature vector, and that vector is compared directly
-        # against ``prototype_embedding`` via dot product. Because the encoder
-        # produces the match key already in the same coordinate system as the
-        # prototype bank, no Linear projection (matching_head) or temporal
-        # mean (`x.mean(dim=1)`) is needed inside this layer.
+        # Original-ProtoTS patch_embedding adapter. Active only when the
+        # encoder returns a per-timestep tensor (B, T, D) — i.e. the legacy
+        # Mixer-encoder path. With the ConvEmbedding encoder, which returns
+        # a pre-averaged (B, D) match key, this layer is unused at runtime.
         # ------------------------------------------------------------------
+        self.patch_embedding = nn.Sequential(
+            nn.Linear(self.input_length, self.input_length * 2, bias=False),
+            nn.ReLU(),
+            nn.Linear(self.input_length * 2, self.prototype_dim, bias=False)
+        )
 
         self.parent_indices = []
         self.cumulative_loss = []
@@ -166,12 +169,22 @@ class Prototype_Layer(nn.Module):
 
 
     def forward(self, x):
-        # x: (B, embedding_dim) — time-averaged encoder output.
-        # The encoder now performs the time mean internally, so this layer
-        # compares x directly against ``prototype_embedding`` via dot product.
-        # No adapter (matching_head) and no further temporal collapse here.
-        batch, embedding_dim = x.shape
-        match_key = x.unsqueeze(1)                            # (B, 1, D)
+        # The encoder may return either a per-timestep tensor (B, T, D) —
+        # the original ProtoTS / Mixer-encoder path — or a pre-averaged
+        # tensor (B, D) — the ConvEmbedding encoder path. We dispatch on
+        # the dimensionality:
+        #   * 3D: apply the original ProtoTS patch_embedding adapter
+        #         (feature-mean over D, then 2-layer MLP from input_length
+        #         to prototype_dim) to extract the match key.
+        #   * 2D: use the encoder output directly; the encoder has already
+        #         performed the time aggregation internally (time_pool).
+        if x.dim() == 3:
+            batch, length, embedding_dim = x.shape
+            x_flat = x.mean(dim=-1)                              # (B, length)
+            match_key = self.patch_embedding(x_flat).unsqueeze(1)  # (B, 1, prototype_dim)
+        else:
+            batch, embedding_dim = x.shape
+            match_key = x.unsqueeze(1)                            # (B, 1, prototype_dim)
 
         all_score = []
         all_ans = []

@@ -113,7 +113,10 @@ def encode_segments(model: nn.Module, dataset: LOF_Dataset,
             continue
         data, _ = dataset[s]
         data = data.unsqueeze(0).to(device)
-        _, encoder = model(data)             # (1, mid_dim) — already time-averaged
+        _, encoder = model(data)             # (1, mid_dim) for ConvEmbedding,
+                                              # (1, output_length, mid_dim) for MixerEmbedding
+        if encoder.dim() == 3:
+            encoder = encoder.mean(dim=1)    # average over time for Mixer encoder
         latents.append(encoder.squeeze(0).cpu())  # (mid_dim,)
     if not latents:
         return None
