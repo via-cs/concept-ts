@@ -7,12 +7,23 @@ import torch.nn as nn
 
 from sklearn.cluster import KMeans
 
+from model.embedding import ADAPTER_MODE
+
+
 class Prototype_Layer(nn.Module):
     def __init__(
-        self, prototype_dim, input_length, output_dim, 
-        init_prototype_num, prototype_split_num, top_k_activate, split_ratio
+        self, prototype_dim, input_length, output_dim,
+        init_prototype_num, prototype_split_num, top_k_activate, split_ratio,
+        adapter_mode=None,
     ):
         super(Prototype_Layer, self).__init__()
+
+        # Resolve adapter mode (defaults to the module-level switch in
+        # model/embedding.py, which is derived from the encoder alias).
+        self.adapter_mode = adapter_mode if adapter_mode is not None else ADAPTER_MODE
+        assert self.adapter_mode in ("none", "matching_head", "patch_embedding"), (
+            f"Unknown ADAPTER_MODE: {self.adapter_mode}"
+        )
 
         self.prototype_dim = prototype_dim
         self.split_num = prototype_split_num
@@ -47,22 +58,44 @@ class Prototype_Layer(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # Original-ProtoTS patch_embedding adapter. Active only when the
-        # encoder returns a per-timestep tensor (B, T, D) — i.e. the legacy
-        # Mixer-encoder path. With the ConvEmbedding encoder, which returns
-        # a pre-averaged (B, D) match key, this layer is unused at runtime.
+        # Adapter modules. Only the one matching ``adapter_mode`` is built,
+        # so unused modes don't waste parameters or pollute optimizer state.
+        #
+        #   "patch_embedding"  — original ProtoTS adapter (Mode C).
+        #                        x: (B, L, D) → mean(dim=-1) → (B, L)
+        #                        → 2-layer MLP (L → 2L → D) → match_key.
+        #
+        #   "matching_head"    — identity-initialized adapter (Mode B).
+        #                        x: (B, L, D) → mean(dim=1) → (B, 1, D)
+        #                        → Linear(D, D, eye init) → match_key.
+        #                        At step 0 this is a no-op so the LLM-init
+        #                        coordinate system is preserved.
+        #
+        #   "none"             — no adapter (Mode A). Encoder already
+        #                        returns (B, D); used directly.
         # ------------------------------------------------------------------
-        self.patch_embedding = nn.Sequential(
-            nn.Linear(self.input_length, self.input_length * 2, bias=False),
-            nn.ReLU(),
-            nn.Linear(self.input_length * 2, self.prototype_dim, bias=False)
-        )
+        if self.adapter_mode == "patch_embedding":
+            self.patch_embedding = nn.Sequential(
+                nn.Linear(self.input_length, self.input_length * 2, bias=False),
+                nn.ReLU(),
+                nn.Linear(self.input_length * 2, self.prototype_dim, bias=False)
+            )
+        elif self.adapter_mode == "matching_head":
+            self.matching_head = nn.Linear(self.prototype_dim,
+                                           self.prototype_dim, bias=False)
+            # eye init applied AFTER _init_linear_layers below.
 
         self.parent_indices = []
         self.cumulative_loss = []
         self.activation_count = []
 
         self._init_linear_layers()
+
+        # matching_head identity init — AFTER _init_linear_layers so the
+        # generic Kaiming-uniform pass over all Linear modules doesn't
+        # clobber it. At training start, matching_head(x) == x.
+        if self.adapter_mode == "matching_head":
+            nn.init.eye_(self.matching_head.weight)
 
         self._init_stats(init_prototype_num)
 
@@ -169,22 +202,36 @@ class Prototype_Layer(nn.Module):
 
 
     def forward(self, x):
-        # The encoder may return either a per-timestep tensor (B, T, D) —
-        # the original ProtoTS / Mixer-encoder path — or a pre-averaged
-        # tensor (B, D) — the ConvEmbedding encoder path. We dispatch on
-        # the dimensionality:
-        #   * 3D: apply the original ProtoTS patch_embedding adapter
-        #         (feature-mean over D, then 2-layer MLP from input_length
-        #         to prototype_dim) to extract the match key.
-        #   * 2D: use the encoder output directly; the encoder has already
-        #         performed the time aggregation internally (time_pool).
-        if x.dim() == 3:
+        # Match-key extraction depends on the adapter mode (see __init__):
+        #   * "patch_embedding" — Mixer / original-ProtoTS path. Encoder
+        #     returns (B, L, D); apply feature-mean over D then 2-layer
+        #     MLP from L to prototype_dim.
+        #   * "matching_head"   — identity-init adapter path. Encoder
+        #     returns (B, L, D); apply mean-over-time then Linear(D, D)
+        #     (eye-init). At step 0 this is a no-op so the LLM-init
+        #     coordinate system is preserved.
+        #   * "none"            — ConvEmbedding-with-time_pool path.
+        #     Encoder returns (B, D); used directly as the match key.
+        if self.adapter_mode == "patch_embedding":
+            assert x.dim() == 3, (
+                f"patch_embedding adapter expects (B, L, D), got shape {tuple(x.shape)}"
+            )
             batch, length, embedding_dim = x.shape
-            x_flat = x.mean(dim=-1)                              # (B, length)
-            match_key = self.patch_embedding(x_flat).unsqueeze(1)  # (B, 1, prototype_dim)
-        else:
+            x_flat = x.mean(dim=-1)                                  # (B, L)
+            match_key = self.patch_embedding(x_flat).unsqueeze(1)     # (B, 1, D)
+        elif self.adapter_mode == "matching_head":
+            assert x.dim() == 3, (
+                f"matching_head adapter expects (B, L, D), got shape {tuple(x.shape)}"
+            )
+            batch, length, embedding_dim = x.shape
+            time_mean = x.mean(dim=1, keepdim=True)                  # (B, 1, D)
+            match_key = self.matching_head(time_mean)                 # (B, 1, D), eye at init
+        else:  # "none"
+            assert x.dim() == 2, (
+                f"'none' adapter expects (B, D), got shape {tuple(x.shape)}"
+            )
             batch, embedding_dim = x.shape
-            match_key = x.unsqueeze(1)                            # (B, 1, prototype_dim)
+            match_key = x.unsqueeze(1)                                # (B, 1, D)
 
         all_score = []
         all_ans = []

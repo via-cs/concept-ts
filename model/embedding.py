@@ -1,15 +1,37 @@
 """
-Encoder export point.
+Encoder export point + adapter-mode switch.
 
-By default, ``Embedding_Learning`` is now bound to the conv-based
-``ConvEmbedding_Learning`` from ``convolution_encoder/``. The original
-Mixer-based encoder is preserved as ``MixerEmbedding_Learning`` below for
-A/B testing or rollback — to revert, just change the bottom alias from
-``ConvEmbedding_Learning`` back to ``MixerEmbedding_Learning``.
+Three encoder variants are available; flip ONE line at the bottom of this
+file to switch between them. ``ADAPTER_MODE`` is derived automatically from
+whichever class is bound to ``Embedding_Learning``.
 
-Both classes share an identical constructor signature and forward contract,
-so any swap is transparent to embedding_learning.py / prototype_learning.py
-/ extract_top_k.py / etc.
+    Mode A — "none"             (current default)
+        Embedding_Learning = ConvEmbedding_Learning
+        Conv encoder with its own learnable 96→1 ``time_pool``.
+        Returns (B, mid_dim). Prototype_Layer uses it directly as the
+        match key — no adapter. align_layer is skipped (the encoder has
+        already collapsed the time axis).
+
+    Mode B — "matching_head"    (identity-init adapter, "ProtoLLM copy"-style)
+# Embedding_Learning = ConvEmbedding_WithAdapter
+        Conv encoder WITHOUT time_pool.
+        Returns (B, output_length, mid_dim). Prototype_Layer applies
+        ``matching_head`` — a Linear(mid_dim, mid_dim, bias=False) with
+        ``nn.init.eye_`` init — over ``x.mean(dim=1)`` to produce the
+        match key. At step 0 the adapter is a no-op, so the LLM-init
+        coordinate system is preserved. align_layer IS applied (3D path).
+
+    Mode C — "patch_embedding"  (original ProtoTS)
+# Embedding_Learning = MixerEmbedding_Learning
+        Mixer encoder (preserved verbatim below).
+        Returns (B, output_length, mid_dim). Prototype_Layer applies the
+        original ProtoTS ``patch_embedding`` — mean over the feature axis
+        then a 96→192→128 MLP — to produce the match key. align_layer
+        IS applied (3D path).
+
+All three encoders share an identical constructor signature, so downstream
+code (embedding_learning.py, prototype_learning.py, build_llm_init.py,
+extract_top_k.py, etc.) needs zero changes.
 """
 
 import torch
@@ -19,7 +41,10 @@ from layer.rev_norm import Rev_in
 from layer.backbone import Backbone
 from layer.channel_embedding import channel_embedding
 
-from convolution_encoder.encoder import ConvEmbedding_Learning
+from convolution_encoder.encoder import (
+    ConvEmbedding_Learning,
+    ConvEmbedding_WithAdapter,
+)
 
 
 # --------------------------------------------------------------------------
@@ -107,9 +132,17 @@ class MixerEmbedding_Learning(nn.Module):
 
 
 # --------------------------------------------------------------------------
-# Default export.
-# Currently set to the original Mixer-based encoder.
-# Change this single line to ConvEmbedding_Learning to test the conv encoder.
+# Mode switch — flip ONE of these three lines.
+# ADAPTER_MODE below is derived automatically from your choice.
 # --------------------------------------------------------------------------
-# Embedding_Learning = MixerEmbedding_Learning
-Embedding_Learning = ConvEmbedding_Learning
+Embedding_Learning = ConvEmbedding_Learning        # Mode A: no adapter (default)
+# Embedding_Learning = ConvEmbedding_WithAdapter   # Mode B: matching_head adapter
+# Embedding_Learning = MixerEmbedding_Learning     # Mode C: original ProtoTS
+
+# Derived adapter mode — do not edit; flip the alias above instead.
+_ADAPTER_BY_ENCODER = {
+    ConvEmbedding_Learning:    "none",
+    ConvEmbedding_WithAdapter: "matching_head",
+    MixerEmbedding_Learning:   "patch_embedding",
+}
+ADAPTER_MODE = _ADAPTER_BY_ENCODER[Embedding_Learning]

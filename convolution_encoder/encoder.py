@@ -40,6 +40,26 @@ from convolution_encoder.conv_block import ModernTCNBlock
 
 
 class ConvEmbedding_Learning(nn.Module):
+    """
+    Conv encoder shared by Mode A ("none") and Mode B ("matching_head").
+
+    The only structural difference between the two modes is whether the
+    encoder's own ``time_pool`` is attached at the end:
+
+    - ``use_time_pool=True``  (Mode A, default) — the encoder applies a
+      learnable 96→1 mean-equivalent Linear and returns ``(B, mid_dim)``.
+      The Prototype_Layer takes this 2D match-key directly (no adapter).
+
+    - ``use_time_pool=False`` (Mode B) — the encoder skips ``time_pool`` and
+      returns the per-timestep tensor ``(B, output_length, mid_dim)``. The
+      Prototype_Layer applies an identity-initialized ``matching_head``
+      adapter (``Linear(mid_dim, mid_dim)`` with ``eye`` init) over the
+      time-mean of this tensor to produce the match key. At step 0 the
+      adapter is a no-op, so the LLM-init coordinate system is preserved;
+      gradient descent is free to drift it.
+
+    See ``ConvEmbedding_WithAdapter`` below for the Mode-B alias.
+    """
     def __init__(
         self,
         input_dim: int,
@@ -59,6 +79,8 @@ class ConvEmbedding_Learning(nn.Module):
         patch_stride: int = 4,       # patch stride S; T must be divisible by S
         kernel_size: int = 51,       # DWConv kernel size (odd)
         expand: int = 2,             # ConvFFN expand factor r
+        # --- adapter-mode knob ---
+        use_time_pool: bool = True,  # False → Mode B, encoder returns (B, T, D)
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -68,6 +90,7 @@ class ConvEmbedding_Learning(nn.Module):
         self.input_length = input_length
         self.output_length = output_length
         self.use_rev_in = use_rev_in
+        self.use_time_pool = use_time_pool
         self.d_pc = d_pc
         self.patch_size = patch_size
         self.patch_stride = patch_stride
@@ -121,7 +144,7 @@ class ConvEmbedding_Learning(nn.Module):
         # ---- Stage 5: prediction head ----
         self.output_feature_linear = nn.Linear(mid_dim, output_dim)
 
-        # ---- Stage 6: learnable shared time pooling ----
+        # ---- Stage 6 (Mode A only): learnable shared time pooling ----
         # Replaces the fixed ``mean(dim=1)`` aggregation with a learnable
         # Linear(output_length, 1) that gives the time axis a learned single
         # weighting vector, shared across the mid_dim channels. Following the
@@ -133,13 +156,19 @@ class ConvEmbedding_Learning(nn.Module):
         # encoder produced, and gradient descent is free to drift away
         # from uniform weights wherever a non-uniform temporal weighting
         # helps the L1 prediction loss.
-        self.time_pool = nn.Linear(output_length, 1, bias=False)
+        #
+        # In Mode B (use_time_pool=False) the encoder returns the per-
+        # timestep ``encoder_full`` instead, and the downstream adapter
+        # (``matching_head`` in Prototype_Layer) does the time aggregation.
+        if self.use_time_pool:
+            self.time_pool = nn.Linear(output_length, 1, bias=False)
 
         self._init_linear_weights()
 
         # Mean-equivalent init — applied AFTER _init_linear_weights so the
         # generic Linear-init pass over all Linear modules doesn't clobber it.
-        nn.init.constant_(self.time_pool.weight, 1.0 / output_length)
+        if self.use_time_pool:
+            nn.init.constant_(self.time_pool.weight, 1.0 / output_length)
 
     def _init_linear_weights(self):
         """Match ProtoTS's per-Linear init: N(0, 1/sqrt(fan_in)), zero biases.
@@ -163,9 +192,12 @@ class ConvEmbedding_Learning(nn.Module):
         -------
         prediction : (B, output_length, output_dim) — denormed forecast
                      (z-scored target space, matching ProtoTS).
-        encoder    : (B, mid_dim) — time-averaged feature vector that the
-                     prototype layer compares directly against its prototype
-                     embeddings (no further mean / adapter required).
+        encoder    : in Mode A (use_time_pool=True), (B, mid_dim) — the
+                     time-pooled match key consumed directly by the
+                     prototype layer.
+                     In Mode B (use_time_pool=False), (B, output_length,
+                     mid_dim) — the per-timestep tensor handed to the
+                     prototype layer's matching_head adapter.
         """
         B = x.size(0)
 
@@ -188,22 +220,43 @@ class ConvEmbedding_Learning(nn.Module):
 
         # Stage 5: prediction head — operates on the per-timestep features,
         # so the L1-loss pretraining objective and the (B, output_length, 1)
-        # prediction contract are unchanged.
+        # prediction contract are unchanged regardless of adapter mode.
         output = self.output_feature_linear(encoder_full)    # (B, output_length, output_dim)
 
         # Stage 6: undo Rev_in
         if self.use_rev_in:
             output = self.embeding.denorm(output)            # back to z-scored target space
 
-        # Learnable shared time pooling: the match key the prototype
-        # layer will compare against its prototype_embedding bank.
-        # At init the weights are constant 1/output_length, so this layer
-        # is equivalent to encoder_full.mean(dim=1). During training the
-        # weighting can drift to non-uniform — e.g. recency bias, or
-        # attention to specific timesteps — wherever the L1 prediction loss
-        # benefits from it. Shared across the mid_dim channels (a single
-        # length-output_length weight vector).
-        encoder_t = encoder_full.transpose(1, 2)             # (B, mid_dim, output_length)
-        encoder = self.time_pool(encoder_t).squeeze(-1)       # (B, mid_dim)
+        # Stage 7: match-key extraction.
+        #   Mode A — apply the learnable 96→1 time_pool. At init the weights
+        #            are constant 1/output_length, so this is equivalent to
+        #            encoder_full.mean(dim=1). Returned shape: (B, mid_dim).
+        #   Mode B — return the per-timestep encoder_full unchanged and let
+        #            the Prototype_Layer's matching_head adapter handle
+        #            time aggregation + coordinate alignment.
+        if self.use_time_pool:
+            encoder_t = encoder_full.transpose(1, 2)         # (B, mid_dim, output_length)
+            encoder = self.time_pool(encoder_t).squeeze(-1)   # (B, mid_dim)
+        else:
+            encoder = encoder_full                            # (B, output_length, mid_dim)
 
         return output, encoder
+
+
+# --------------------------------------------------------------------------
+# Mode-B alias: conv encoder *without* the internal time_pool. Pairs with
+# the matching_head adapter in Prototype_Layer (see ADAPTER_MODE resolution
+# in model/embedding.py).
+# --------------------------------------------------------------------------
+class ConvEmbedding_WithAdapter(ConvEmbedding_Learning):
+    """Conv encoder variant that omits ``time_pool`` and returns the
+    per-timestep ``(B, output_length, mid_dim)`` tensor.
+
+    Intended to be paired with ADAPTER_MODE='matching_head'. Constructor
+    signature is identical to ConvEmbedding_Learning, so downstream
+    instantiation in exp/prototype_learning.py does not change.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("use_time_pool", False)
+        super().__init__(*args, **kwargs)

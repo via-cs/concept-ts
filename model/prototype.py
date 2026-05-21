@@ -3,9 +3,12 @@ import torch.nn as nn
 from layer.prototype import Prototype_Layer
 from layer.align_block import align
 
+from model.embedding import ADAPTER_MODE
+
+
 class Prototype(nn.Module):
     def __init__(
-        self, prototype_num, prototype_dim, input_length, 
+        self, prototype_num, prototype_dim, input_length,
         output_dim, prototype_split_num, top_k_activate, split_ratio
     ):
         super(Prototype, self).__init__()
@@ -13,37 +16,43 @@ class Prototype(nn.Module):
         self.prototype_dim = prototype_dim
         self.output_dim = output_dim
         self.input_length = input_length
+        self.adapter_mode = ADAPTER_MODE
 
         self.alpha = nn.Parameter(torch.tensor(0.0))
 
         self.prototype = Prototype_Layer(
             prototype_dim=self.prototype_dim,
-            init_prototype_num=prototype_num,                                                           
+            init_prototype_num=prototype_num,
             input_length=self.input_length,
             output_dim=self.output_dim,
             prototype_split_num=prototype_split_num,
             top_k_activate=top_k_activate,
             split_ratio=split_ratio,
+            adapter_mode=self.adapter_mode,
         )
 
         self.align_layer = align()
 
     def forward(self, embd, x):
-        # ``embd`` may be (B, T, D) — Mixer-encoder path, original ProtoTS —
-        # or (B, D) — ConvEmbedding-encoder path.
-        #
-        # For the Mixer path we reproduce original ProtoTS exactly: roll the
-        # encoder output by −time_of_day before matching (canonicalise to
-        # midnight-aligned reference), then roll the per-layer predictions
-        # by +time_of_day after the prototype layer to recover the input's
-        # actual time-of-day frame. ``prototype_value`` is learned in the
-        # canonical frame; ``align_layer.backward`` un-canonicalises it.
-        #
-        # For the ConvEmbedding path neither direction is meaningful — the
-        # encoder has already aggregated over the time axis, so the match
-        # key is time-invariant by construction and ``prototype_value`` is
-        # learned in the actual time frame. We skip align_layer in that case.
-        use_align = (embd.dim() == 3)
+        # ``embd`` shape depends on ADAPTER_MODE (set in model/embedding.py):
+        #   * "patch_embedding" (Mode C, Mixer encoder): (B, T, D).
+        #     Original ProtoTS path — roll the encoder output by
+        #     −time_of_day before matching (canonicalise to a midnight-
+        #     aligned reference), then roll the per-layer predictions by
+        #     +time_of_day after the prototype layer. ``prototype_value``
+        #     is learned in the canonical frame; align_layer.backward
+        #     un-canonicalises it.
+        #   * "matching_head"   (Mode B, ConvEmbedding without time_pool):
+        #     (B, T, D). Same align dance — the encoder still preserves
+        #     the time axis, and prototype_value is learned in the
+        #     canonical frame so the match key needs to be in that frame
+        #     too.
+        #   * "none"            (Mode A, ConvEmbedding with time_pool):
+        #     (B, D). The encoder has already aggregated over time, the
+        #     match key is time-invariant by construction, and
+        #     prototype_value is learned in the actual time frame. Skip
+        #     align_layer.
+        use_align = (self.adapter_mode != "none")
         if use_align:
             embd = self.align_layer(x, embd, self.input_length)
         output, score = self.prototype(embd)
