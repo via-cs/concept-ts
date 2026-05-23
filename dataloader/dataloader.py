@@ -34,7 +34,7 @@ from sklearn.preprocessing import StandardScaler
 # To revert to the original 70/10/20 chronological split, set USE_LAST_YEAR_SPLIT = False.
 # ---------------------------------------------------------------------------
 
-USE_LAST_YEAR_SPLIT = True
+USE_LAST_YEAR_SPLIT = False
 ROWS_PER_DAY  = 96               # 15-min resolution: 96 rows / day
 ROWS_PER_YEAR = 365 * ROWS_PER_DAY   # 35040
 NUM_CHUNKS    = 24               # 24 bi-weekly chunks across the last year
