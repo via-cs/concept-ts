@@ -98,8 +98,7 @@ def train_loss(pred, ans, score, anchor_term=None):
     ls += nn.L1Loss()(pred[-1], ans)
 
     entropy = -torch.sum(score * torch.log(score + 1e-8), dim=-1)
-    #ls += (1e-3) * torch.mean(entropy)
-    ls += (1e-1) * torch.mean(entropy)
+    ls += (1e-3) * torch.mean(entropy)
 
     if anchor_term is not None:
         ls = ls + anchor_term

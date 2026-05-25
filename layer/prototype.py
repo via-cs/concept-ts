@@ -58,22 +58,6 @@ class Prototype_Layer(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # Per-prototype magnitude scalar (input-independent), replacing the
-        # original ProtoTS layer_bias MLP that was a function of match_key.
-        # The MLP let value_bias bypass score (it could fit any prediction
-        # via per-input modulation, making score uniform/unused). A per-
-        # prototype scalar keeps the shape/magnitude decoupling (each
-        # prototype still has its own learned magnitude) but removes the
-        # per-input lever, so score becomes the only per-input variable on
-        # the prediction path. Initialised to 1.0 so that at step 0 the
-        # forward is exactly  ans = Σᵢ scoreᵢ · prototype_valueᵢ.
-        # ------------------------------------------------------------------
-        self.prototype_scale = nn.ParameterList()
-        self.prototype_scale.append(
-            nn.Parameter(torch.ones(init_prototype_num))
-        )
-
-        # ------------------------------------------------------------------
         # Adapter modules. Only the one matching ``adapter_mode`` is built,
         # so unused modes don't waste parameters or pollute optimizer state.
         #
@@ -267,12 +251,8 @@ class Prototype_Layer(nn.Module):
 
             all_score.append(score)
 
-            # Input-independent per-prototype magnitude scalar (broadcasts
-            # over the batch dim). See prototype_scale construction in
-            # __init__ for the rationale.
-            value_bias = self.prototype_scale[i].abs().reshape(
-                1, self.prototype_num[i], 1, 1
-            )
+            value_bias = torch.abs(self.layer_bias[i](match_key))
+            value_bias = value_bias.reshape(batch, self.prototype_num[i], 1, 1)
             weighted_prototype = value_bias * self.prototype_value[i].unsqueeze(0)
 
             ans = (score.reshape(batch, -1, 1, 1) * weighted_prototype).sum(dim=1)
@@ -347,21 +327,6 @@ class Prototype_Layer(nn.Module):
 
         self.prototype_embedding.append(nn.Parameter(torch.cat(new_emb_list, dim=0)).to(device))
         self.prototype_value.append(nn.Parameter(torch.cat(new_val_list, dim=0)).to(device))
-
-        # Extend prototype_scale to the new size, mirroring the embedding /
-        # value replication so split children inherit their parent's learned
-        # magnitude (non-split prototypes keep their scale unchanged).
-        last_scale = self.prototype_scale[-1].detach()
-        new_scale_list = []
-        for i in range(self.prototype_num[-1]):    # PREVIOUS layer's size — appended below
-            if i in split_set:
-                new_scale_list.append(last_scale[i:i+1].repeat(self.split_num))
-            else:
-                new_scale_list.append(last_scale[i:i+1])
-        self.prototype_scale.append(
-            nn.Parameter(torch.cat(new_scale_list, dim=0)).to(device)
-        )
-
         self.prototype_num.append(new_total)
         self._init_stats(new_total)
         
