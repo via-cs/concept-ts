@@ -10,6 +10,45 @@ from sklearn.cluster import KMeans
 from model.embedding import ADAPTER_MODE
 
 
+# ---------------------------------------------------------------------------
+# Routing nonlinearity switch — set to False to revert to the original
+# ProtoTS softmax behavior.
+# ---------------------------------------------------------------------------
+USE_SPARSEMAX = True
+
+
+def _sparsemax(z: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Sparsemax projection onto the probability simplex (Martins & Astudillo, 2016).
+
+    Behaves like softmax — same shape, output sums to 1 along ``dim`` — but
+    can assign exactly 0 mass to less-relevant entries, producing structural
+    sparsity. Differentiable a.e.; PyTorch's autograd handles ``sort``
+    correctly so this is drop-in usable inside a training loop.
+    """
+    z_sorted, _ = torch.sort(z, dim=dim, descending=True)
+    cumsum = z_sorted.cumsum(dim=dim)
+    K = z.shape[dim]
+    shape = [1] * z.dim()
+    shape[dim] = K
+    k = torch.arange(1, K + 1, device=z.device, dtype=z.dtype).view(shape)
+
+    # Support: largest k such that 1 + k * z_sorted[k] > sum_{j<=k} z_sorted[j]
+    cond = 1 + k * z_sorted > cumsum
+    k_z = cond.sum(dim=dim, keepdim=True)             # support size, long
+    idx = (k_z - 1).clamp(min=0)
+    cumsum_at_k = cumsum.gather(dim, idx)
+
+    tau = (cumsum_at_k - 1) / k_z.to(z.dtype).clamp(min=1)
+    return torch.clamp(z - tau, min=0)
+
+
+def _route(raw_score: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Single switch-point — sparsemax or softmax, controlled by USE_SPARSEMAX."""
+    if USE_SPARSEMAX:
+        return _sparsemax(raw_score, dim=dim)
+    return raw_score.softmax(dim=dim)
+
+
 class Prototype_Layer(nn.Module):
     def __init__(
         self, prototype_dim, input_length, output_dim,
@@ -241,7 +280,7 @@ class Prototype_Layer(nn.Module):
                                      self.prototype_embedding[i].unsqueeze(0).expand(batch, -1, -1).transpose(1, 2))
 
             if i == 0:
-                score = raw_score.softmax(dim=-1)
+                score = _route(raw_score, dim=-1)
             else:
                 local_score = self._compute_local_softmax(raw_score, i)
 
@@ -269,8 +308,8 @@ class Prototype_Layer(nn.Module):
         for p in unique_parents:
             child_indices = [idx for idx, p_val in enumerate(parent_map) if p_val == p]
             subset = raw_score[:, :, child_indices]
-            local_softmax_score[:, :, child_indices] = subset.softmax(dim=-1)
-            
+            local_softmax_score[:, :, child_indices] = _route(subset, dim=-1)
+
         return local_softmax_score
 
     def add_prototype(self, device):

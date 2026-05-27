@@ -15,6 +15,13 @@ from model.prototype import Prototype
 from dataloader.dataloader import LOF_Dataset
 
 
+# ---------------------------------------------------------------------------
+# Experiment flags — set to False to revert each change independently.
+# ---------------------------------------------------------------------------
+FREEZE_ENCODER     = True    # False = encoder co-trained (original ProtoTS)
+USE_LOAD_BALANCING = True    # False = no load-balancing penalty in train_loss
+LB_LAMBDA          = 0.01    # only used if USE_LOAD_BALANCING is True
+
 
 def get_args():
     parser = argparse.ArgumentParser(description="Prototype-enhanced Training (formatted like the reference)")
@@ -100,6 +107,19 @@ def train_loss(pred, ans, score, anchor_term=None):
     entropy = -torch.sum(score * torch.log(score + 1e-8), dim=-1)
     ls += (1e-3) * torch.mean(entropy)
 
+    if USE_LOAD_BALANCING:
+        # Switch-Transformer-style load-balancing: penalise concentration of
+        # routing mass onto a small subset of prototypes across the batch.
+        # ``score`` shape is (B, 1, P). The mean over batch (and the singleton
+        # query axis) gives the per-prototype average routing weight; squaring
+        # and summing yields P * sum(p_i^2), which is 1.0 when usage is
+        # uniform and P when one prototype monopolises the batch — so
+        # minimising this term pushes the model toward even usage.
+        P = score.shape[-1]
+        mean_score = score.mean(dim=(0, 1))                     # (P,)
+        load_balance = P * (mean_score ** 2).sum()
+        ls = ls + LB_LAMBDA * load_balance
+
     if anchor_term is not None:
         ls = ls + anchor_term
 
@@ -136,7 +156,10 @@ def evaluate_with_prototype(model, prototype_model, dataset, batch_size, device)
         if denom is None:
             denom = len(dataset) * pred.size(1) * pred.size(2)
 
-    model.train()
+    # Keep the encoder in eval mode when frozen so dropout / batchnorm
+    # running stats don't reactivate after each validation pass.
+    if not FREEZE_ENCODER:
+        model.train()
     prototype_model.train()
     return total_mse / denom, total_mae / denom
 
@@ -230,9 +253,14 @@ def train_loop(
 
 
                     current_lr = 2e-4
+                    _param_groups = (
+                        [{"params": prototype_model.parameters()}]
+                        if FREEZE_ENCODER else
+                        [{"params": prototype_model.parameters()},
+                         {"params": model.parameters()}]
+                    )
                     optimizer = torch.optim.Adam(
-                        [{"params": prototype_model.parameters()}, {"params": model.parameters()}],
-                        # [{"params": prototype_model.parameters()}],
+                        _param_groups,
                         lr=current_lr
                     )
 
@@ -394,11 +422,20 @@ def main():
               f"MSE: {zs_mse:.6f}, MAE: {zs_mae:.6f}")
         return
 
-    optimizer = torch.optim.Adam(
-        [{"params": prototype_model.parameters()}, {"params": model.parameters()}], 
-        # [{"params": prototype_model.parameters()}], 
-        lr=args.lr
-    )
+    # Freeze the encoder if FREEZE_ENCODER is True: skip its params in the
+    # optimizer AND mark requires_grad=False so backward doesn't waste compute
+    # / activations on it, and keep it in eval mode for the rest of training.
+    if FREEZE_ENCODER:
+        for p in model.parameters():
+            p.requires_grad = False
+        model.eval()
+        _param_groups = [{"params": prototype_model.parameters()}]
+        print("[FREEZE_ENCODER=True] encoder parameters frozen "
+              "(eval mode, no grad, excluded from optimizer)")
+    else:
+        _param_groups = [{"params": prototype_model.parameters()},
+                         {"params": model.parameters()}]
+    optimizer = torch.optim.Adam(_param_groups, lr=args.lr)
 
     train_loop(
         model=model,
