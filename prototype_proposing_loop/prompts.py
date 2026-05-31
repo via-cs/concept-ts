@@ -17,7 +17,7 @@ regime). Flip ``DATASET`` below to switch between the two supported schemas.
 # Riverside PM2.5 schema. Keep this in sync with the ``DATASET`` constant in
 # ``dataloader/dataloader.py``.
 # ---------------------------------------------------------------------------
-DATASET = "LOF"
+DATASET = "AirQualty"
 
 
 # ===========================================================================
