@@ -31,7 +31,7 @@ from layer.rev_norm import Rev_in
 # used by ``nn.Embedding(num_classes, embed_dim)`` for that column index.
 # Continuous columns get 0 (the Linear(1, embed_dim) path runs instead).
 # ---------------------------------------------------------------------------
-DATASET = "AirQuality"
+DATASET = "LOF"
 
 if DATASET == "LOF":
     # 23-column LOF / ProtoTS schema (target = "load", last column).

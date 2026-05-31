@@ -14,7 +14,7 @@ from model.embedding import ADAPTER_MODE
 # Routing nonlinearity switch — set to False to revert to the original
 # ProtoTS softmax behavior.
 # ---------------------------------------------------------------------------
-USE_SPARSEMAX = True
+USE_SPARSEMAX = False
 
 
 def _sparsemax(z: torch.Tensor, dim: int = -1) -> torch.Tensor:

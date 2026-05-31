@@ -135,9 +135,9 @@ class MixerEmbedding_Learning(nn.Module):
 # Mode switch — flip ONE of these three lines.
 # ADAPTER_MODE below is derived automatically from your choice.
 # --------------------------------------------------------------------------
-Embedding_Learning = ConvEmbedding_Learning        # Mode A: no adapter (default)
+# Embedding_Learning = ConvEmbedding_Learning        # Mode A: no adapter (default)
 # Embedding_Learning = ConvEmbedding_WithAdapter   # Mode B: matching_head adapter
-# Embedding_Learning = MixerEmbedding_Learning     # Mode C: original ProtoTS
+Embedding_Learning = MixerEmbedding_Learning     # Mode C: original ProtoTS
 
 # Derived adapter mode — do not edit; flip the alias above instead.
 _ADAPTER_BY_ENCODER = {

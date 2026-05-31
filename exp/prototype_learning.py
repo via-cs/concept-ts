@@ -18,8 +18,8 @@ from dataloader.dataloader import LOF_Dataset
 # ---------------------------------------------------------------------------
 # Experiment flags — set to False to revert each change independently.
 # ---------------------------------------------------------------------------
-FREEZE_ENCODER     = True    # False = encoder co-trained (original ProtoTS)
-USE_LOAD_BALANCING = True    # False = no load-balancing penalty in train_loss
+FREEZE_ENCODER     = False   # False = encoder co-trained (original ProtoTS)
+USE_LOAD_BALANCING = False   # False = no load-balancing penalty in train_loss
 LB_LAMBDA          = 0.01    # only used if USE_LOAD_BALANCING is True
 
 
