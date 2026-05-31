@@ -35,8 +35,33 @@ from sklearn.preprocessing import StandardScaler
 # ---------------------------------------------------------------------------
 
 USE_LAST_YEAR_SPLIT = False
-ROWS_PER_DAY  = 96               # 15-min resolution: 96 rows / day
-ROWS_PER_YEAR = 365 * ROWS_PER_DAY   # 35040
+
+# ---------------------------------------------------------------------------
+# Dataset switch — flip this single constant to point the dataloader at a
+# different schema/resolution. TARGET_COLUMN and ROWS_PER_DAY below are
+# derived automatically.
+#
+#   "LOF"        — 15-min resolution, target column "load"
+#                  (96 rows/day, ~35 040 rows/year).
+#   "AirQuality" — 1-hour resolution, target column "pm25_poc_3"
+#                  (24 rows/day, ~8 760 rows/year). The CSV's
+#                  ``timestamp_utc`` column is auto-dropped since it's
+#                  non-numeric.
+# ---------------------------------------------------------------------------
+DATASET = "LOF"
+
+if DATASET == "LOF":
+    TARGET_COLUMN = "load"
+    ROWS_PER_DAY  = 96               # 15-min resolution: 96 rows / day
+elif DATASET == "AirQuality":
+    TARGET_COLUMN = "pm25_poc_3"
+    ROWS_PER_DAY  = 24               # 1-hour resolution: 24 rows / day
+else:
+    raise ValueError(
+        f"Unknown DATASET={DATASET!r}. Expected 'LOF' or 'AirQuality'."
+    )
+
+ROWS_PER_YEAR = 365 * ROWS_PER_DAY
 NUM_CHUNKS    = 24               # 24 bi-weekly chunks across the last year
 VAL_STRIDE    = 3                # every VAL_STRIDE-th chunk is a val chunk
 
@@ -88,8 +113,23 @@ class LOF_Dataset(data.Dataset):
     def get_data(self, train, data_path):
         dataset = pd.read_csv(data_path, encoding="utf-8")
 
-        self.output = dataset["load"].values.reshape(-1, 1).tolist()
-        dataset.drop("load", axis=1, inplace=True)
+        # Extract the target column (its name depends on the DATASET switch
+        # at the top of this file).
+        if TARGET_COLUMN not in dataset.columns:
+            raise KeyError(
+                f"Target column {TARGET_COLUMN!r} (required by DATASET="
+                f"{DATASET!r}) not found in {data_path}. Available "
+                f"columns: {list(dataset.columns)}"
+            )
+        self.output = dataset[TARGET_COLUMN].values.reshape(-1, 1).tolist()
+        dataset = dataset.drop(TARGET_COLUMN, axis=1)
+
+        # Drop any non-numeric columns (e.g. ``timestamp_utc`` in the
+        # AirQuality CSV) — they can't be tensorised by __getitem__ later.
+        # For the LOF schema all remaining columns are already numeric, so
+        # this is a no-op there.
+        dataset = dataset.select_dtypes(include=[np.number])
+
         self.input = dataset.values.tolist()
 
         N = len(self.input)
