@@ -22,15 +22,50 @@ import torch.nn as nn
 from layer.rev_norm import Rev_in
 
 
-# Hard-coded categorical setup for the RE / ProtoTS dataset.
-_CLASS_FEATURE_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20]
-_CLASS_FEATURE_NUM_CLASSES = [
-    6, 13, 32, 6, 13,
-    32, 25, 61, 0, 0,
-    0, 0, 0, 0, 0,
-    0, 2, 2, 2, 2,
-    7, 0, 0,
-]
+# ---------------------------------------------------------------------------
+# Dataset switch — flip to "AirQuality" to point the per-channel embedder at
+# the Riverside PM2.5 schema. Keep this in sync with ``DATASET`` in
+# ``dataloader/dataloader.py`` and ``prototype_proposing_loop/prompts.py``.
+#
+# Each entry of ``_CLASS_FEATURE_NUM_CLASSES`` is the number of categories
+# used by ``nn.Embedding(num_classes, embed_dim)`` for that column index.
+# Continuous columns get 0 (the Linear(1, embed_dim) path runs instead).
+# ---------------------------------------------------------------------------
+DATASET = "AirQuality"
+
+if DATASET == "LOF":
+    # 23-column LOF / ProtoTS schema (target = "load", last column).
+    #   0:lunar_year   1:lunar_month  2:lunar_day  3:solar_year  4:solar_month
+    #   5:solar_day    6:month(=hour) 7:minute     8-15:continuous weather
+    #  16:is_special_workday  17:is_special_holiday  18:is_holiday
+    #  19:is_workday  20:day_of_week  21:pricing  22:load
+    _CLASS_FEATURE_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20]
+    _CLASS_FEATURE_NUM_CLASSES = [
+        6, 13, 32, 6, 13,
+        32, 25, 61, 0, 0,
+        0, 0, 0, 0, 0,
+        0, 2, 2, 2, 2,
+        7, 0, 0,
+    ]
+elif DATASET == "AirQuality":
+    # 17-column Riverside schema (target = "pm25_poc_3", last column).
+    #   0:wind_spd_res     1:temp_outdoor   2:rel_humidity  3:solar_radiation
+    #   4:uv_radiation     5:baro_pressure  6:sp            7:skt
+    #   8:blh              9:tp            (all continuous so far)
+    #  10:month (1-12)    11:day (1-31)   12:hour (0-23)   13:day_of_week (0-6)
+    #  14:is_weekend      15:is_weekday   16:pm25_poc_3 (target, continuous)
+    _CLASS_FEATURE_INDICES = [10, 11, 12, 13, 14, 15]
+    _CLASS_FEATURE_NUM_CLASSES = [
+        0, 0, 0, 0, 0,     # 0-4   wind_spd_res, temp_outdoor, rel_humidity, solar_radiation, uv_radiation
+        0, 0, 0, 0, 0,     # 5-9   baro_pressure, sp, skt, blh, tp
+        13, 32, 24, 7, 2,  # 10-14 month, day, hour, day_of_week, is_weekend
+        2, 0,              # 15-16 is_weekday, pm25_poc_3 (target)
+    ]
+else:
+    raise ValueError(
+        f"Unknown DATASET={DATASET!r} in convolution_encoder.channel_embedding. "
+        f"Expected 'LOF' or 'AirQuality'."
+    )
 
 
 class PerChannelEmbedding(nn.Module):
