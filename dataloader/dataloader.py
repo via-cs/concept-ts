@@ -48,7 +48,7 @@ USE_LAST_YEAR_SPLIT = False
 #                  ``timestamp_utc`` column is auto-dropped since it's
 #                  non-numeric.
 # ---------------------------------------------------------------------------
-DATASET = "AirQuality"
+DATASET = "LOF"
 
 if DATASET == "LOF":
     TARGET_COLUMN = "load"
