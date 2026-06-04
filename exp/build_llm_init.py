@@ -83,6 +83,20 @@ def get_args():
     p.add_argument("--typical_num", type=int, default=20,
                    help="Number of typical segments per prototype to encode + average")
     p.add_argument("--num_blank",   type=int, default=2)
+    # When set, Phase 1 (the propose-validate-revise loop) is skipped and the
+    # prototypes are loaded directly from the supplied JSON. Use this to share
+    # the same LLM-proposed set between embedding_learning.py's cluster
+    # supervision and build_llm_init.py's typicality / centroid computation,
+    # so the encoder is shaped for exactly the partition that the prototypes
+    # will then live at.
+    p.add_argument("--reuse_final_prototypes", type=str, default="",
+                   help="Path to an existing final_prototypes_<timestamp>.json "
+                        "from a previous run of prototype_proposing_loop. When "
+                        "set, Phase 1 is skipped — all --clustering_num / "
+                        "--n_prototypes / --max_iterations / --min_match_ratio "
+                        "/ --generality_cap / --max_jaccard / --max_forecast_cv "
+                        "/ --min_constrained_dims / --random_state flags are "
+                        "ignored.")
     p.add_argument("--random_value_init", action="store_true",
                    help="Use torch.randn for prototype_value instead of the "
                         "averaged forecast curves. Recommended; pair with "
@@ -114,27 +128,62 @@ def main():
     loop_dir = os.path.join(args.output_dir, "loop_artifacts")
 
     # ==================================================================
-    # Phase 1 — propose-validate-revise loop
+    # Phase 1 — propose-validate-revise loop, OR reuse an existing JSON.
     # ==================================================================
     print("\n" + "#" * 64)
-    print("# Phase 1 — propose-validate-revise loop")
-    print("#" * 64)
-    loop_result = run_loop(
-        segments_path=args.segments_path,
-        output_dir=loop_dir,
-        clustering_num=args.clustering_num,
-        n_prototypes=args.n_prototypes,
-        top_k=args.top_k,
-        min_match_ratio=args.min_match_ratio,
-        max_iterations=args.max_iterations,
-        generality_cap=args.generality_cap,
-        max_jaccard=args.max_jaccard,
-        max_forecast_cv=args.max_forecast_cv,
-        min_constrained_dims=args.min_constrained_dims,
-        random_state=args.random_state,
-    )
-    prototypes = loop_result["prototypes"]
-    print(f"\nLoop produced {len(prototypes)} prototype specs.")
+    if args.reuse_final_prototypes:
+        print("# Phase 1 — REUSING existing final_prototypes JSON (Phase 1 skipped)")
+        print("#" * 64)
+        if not os.path.exists(args.reuse_final_prototypes):
+            raise FileNotFoundError(
+                f"--reuse_final_prototypes points to {args.reuse_final_prototypes!r} "
+                f"but no file exists at that path."
+            )
+        print(f"Loading prototypes from {args.reuse_final_prototypes}")
+        with open(args.reuse_final_prototypes) as f:
+            loop_result = json.load(f)
+
+        # Sanity checks on the saved JSON shape.
+        if "prototypes" not in loop_result:
+            raise KeyError(
+                f"{args.reuse_final_prototypes} does not contain a 'prototypes' "
+                f"key. Top-level keys: {list(loop_result.keys())}. Was this file "
+                f"produced by prototype_proposing_loop/run_loop.py?"
+            )
+        if "summary_artifacts_dir" not in loop_result:
+            raise KeyError(
+                f"{args.reuse_final_prototypes} does not contain a "
+                f"'summary_artifacts_dir' key. Phase 2 needs it to load the "
+                f"summary vectors that drive Mahalanobis typicality. The JSON "
+                f"is too old / hand-edited; rerun prototype_proposing_loop "
+                f"and pass the fresh JSON."
+            )
+        prototypes = loop_result["prototypes"]
+        print(f"Reused {len(prototypes)} prototype specs from JSON.")
+        print(f"  summary_artifacts_dir = {loop_result['summary_artifacts_dir']}")
+        print("  (--clustering_num / --n_prototypes / --max_iterations / "
+              "--min_match_ratio / --generality_cap / --max_jaccard / "
+              "--max_forecast_cv / --min_constrained_dims / --random_state "
+              "are IGNORED in reuse mode.)")
+    else:
+        print("# Phase 1 — propose-validate-revise loop")
+        print("#" * 64)
+        loop_result = run_loop(
+            segments_path=args.segments_path,
+            output_dir=loop_dir,
+            clustering_num=args.clustering_num,
+            n_prototypes=args.n_prototypes,
+            top_k=args.top_k,
+            min_match_ratio=args.min_match_ratio,
+            max_iterations=args.max_iterations,
+            generality_cap=args.generality_cap,
+            max_jaccard=args.max_jaccard,
+            max_forecast_cv=args.max_forecast_cv,
+            min_constrained_dims=args.min_constrained_dims,
+            random_state=args.random_state,
+        )
+        prototypes = loop_result["prototypes"]
+        print(f"\nLoop produced {len(prototypes)} prototype specs.")
 
     # ==================================================================
     # Phase 2 — typicality + encoder + init tensors
