@@ -45,6 +45,7 @@ from convolution_encoder.encoder import (
     ConvEmbedding_Learning,
     ConvEmbedding_WithAdapter,
 )
+from ts2vecEncoder.ts2vec_embedding import TS2VecEmbedding_Learning
 
 
 # --------------------------------------------------------------------------
@@ -132,17 +133,21 @@ class MixerEmbedding_Learning(nn.Module):
 
 
 # --------------------------------------------------------------------------
-# Mode switch — flip ONE of these three lines.
+# Mode switch — flip ONE of these four lines.
 # ADAPTER_MODE below is derived automatically from your choice.
 # --------------------------------------------------------------------------
 Embedding_Learning = ConvEmbedding_Learning        # Mode A: no adapter (default)
 # Embedding_Learning = ConvEmbedding_WithAdapter   # Mode B: matching_head adapter
 # Embedding_Learning = MixerEmbedding_Learning     # Mode C: original ProtoTS
+# Embedding_Learning = TS2VecEmbedding_Learning    # Mode D: TS2Vec contrastive encoder
 
 # Derived adapter mode — do not edit; flip the alias above instead.
+# TS2Vec returns the same (B, output_length, mid_dim) per-timestep shape as
+# Mixer, so it pairs with the patch_embedding adapter for prototype routing.
 _ADAPTER_BY_ENCODER = {
     ConvEmbedding_Learning:    "none",
     ConvEmbedding_WithAdapter: "matching_head",
     MixerEmbedding_Learning:   "patch_embedding",
+    TS2VecEmbedding_Learning:  "patch_embedding",
 }
 ADAPTER_MODE = _ADAPTER_BY_ENCODER[Embedding_Learning]
