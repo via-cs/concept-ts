@@ -48,7 +48,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from CBM.model import ConceptBottleneckModel
+from CBM.concept_bottleneck import ConceptBottleneckModel
 from CBM.concept_labels import build_window_label_table
 from dataloader.dataloader import LOF_Dataset
 
