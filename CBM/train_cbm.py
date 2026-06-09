@@ -45,8 +45,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 _ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_CBM_DIR = Path(__file__).resolve().parent
+# When launching as `python CBM/train_cbm.py`, Python silently puts the script's
+# own folder (CBM/) at sys.path[0]. That made `from model.embedding ...` inside
+# concept_bottleneck.py resolve to CBM/model.py instead of the project-root
+# `model/` package. Strip any CBM/ entries and force the project root to the
+# front before any other CBM imports run.
+sys.path[:] = [p for p in sys.path if Path(p).resolve() != _CBM_DIR]
+while str(_ROOT) in sys.path:
+    sys.path.remove(str(_ROOT))
+sys.path.insert(0, str(_ROOT))
 
 from CBM.concept_bottleneck import ConceptBottleneckModel
 from CBM.concept_labels import build_window_label_table
