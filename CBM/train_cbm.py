@@ -1,32 +1,38 @@
 """
-End-to-end training script for the Concept Bottleneck Model.
+Training entry point for the 1 + N Concept Bottleneck Model.
 
-Pipeline
---------
-  1. Load the validated concepts JSON from CBM/output/concepts_<TS>.json.
-  2. Apply each concept's match function to the Part-A training segments,
-     and map the per-segment labels to per-window labels using the same
-     stride convention as exp/cluster_supervision.py.
-  3. Build the ConceptBottleneckModel (encoder + concept layer + forecast
-     decoder) and train it jointly with:
-        loss = α_forecast · L1(y_hat, y) + α_concept · BCE(c_logits, labels)
-  4. Evaluate on the test set:
-        - forecast MAE / MSE
-        - per-concept AUROC + a 5-segment case study showing concept
-          activations alongside the predicted forecast.
+Loss
+----
+
+    loss = alpha_forecast        * L1(y_hat, y)
+         + alpha_lookback        * BCE(lb_logits, lb_labels)
+         + alpha_forecast_concept * BCE(fc_logits, fc_labels)
+
+  - lb_logits has shape (B, K_lb); lb_labels matches.
+  - fc_logits has shape (B, N, K_fc); fc_labels matches. BCEWithLogitsLoss
+    averages elementwise so weighting by (1 / (N * K_fc)) is built in.
+
+Concept labels are built by ``concept_labels.build_window_label_tables``
+which loads the two-set concepts JSON, applies the rules to every Part-A
+segment, and broadcasts to dataset windows.
+
+Validation/test concept labels default to all zeros (the same caveat as
+before; build val/test segment JSONs if you want real concept AUROC on
+those splits). Forecast MAE on val/test is unaffected.
 
 Run
 ---
 
     PYTHONPATH=. python -u CBM/train_cbm.py \\
-        --dataset ./dataset/LOF/RE.csv \\
-        --concepts_path ./CBM/output/concepts_<TS>.json \\
+        --dataset       ./dataset/LOF/RE.csv \\
+        --concepts_path ./CBM/output/concepts_validated_<TS>.json \\
         --segments_path ./preprocessing/output/RE/RE_full_segments.json \\
         --epoch 30 --batch_size 16 \\
         --input_length 384 --output_length 96 \\
         --input_dim 23 --output_dim 1 \\
         --num_layer 4 --dropout 0.5 --embed_dim 128 \\
-        --alpha_concept 1.0 --alpha_forecast 0.3 \\
+        --n_subwindows 4 \\
+        --alpha_forecast 0.3 --alpha_lookback 1.0 --alpha_forecast_concept 1.0 \\
         --case_studies 5
 """
 
@@ -46,18 +52,13 @@ from torch.utils.data import DataLoader, Dataset
 
 _ROOT = Path(__file__).resolve().parent.parent
 _CBM_DIR = Path(__file__).resolve().parent
-# When launching as `python CBM/train_cbm.py`, Python silently puts the script's
-# own folder (CBM/) at sys.path[0]. That made `from model.embedding ...` inside
-# concept_bottleneck.py resolve to CBM/model.py instead of the project-root
-# `model/` package. Strip any CBM/ entries and force the project root to the
-# front before any other CBM imports run.
 sys.path[:] = [p for p in sys.path if Path(p).resolve() != _CBM_DIR]
 while str(_ROOT) in sys.path:
     sys.path.remove(str(_ROOT))
 sys.path.insert(0, str(_ROOT))
 
 from CBM.concept_bottleneck import ConceptBottleneckModel
-from CBM.concept_labels import build_window_label_table
+from CBM.concept_labels import build_window_label_tables
 from dataloader.dataloader import LOF_Dataset
 
 
@@ -66,18 +67,20 @@ from dataloader.dataloader import LOF_Dataset
 # ---------------------------------------------------------------------------
 
 class CBMDataset(Dataset):
-    def __init__(self, base: Dataset, labels: np.ndarray):
-        assert len(base) == len(labels), \
-            f"len(base)={len(base)} != len(labels)={len(labels)}"
-        self.base = base
-        self.labels = torch.from_numpy(labels).float()
+    def __init__(self, base: Dataset, lb_labels: np.ndarray, fc_labels: np.ndarray):
+        assert len(base) == len(lb_labels) == len(fc_labels), (
+            f"len(base)={len(base)} vs lb={len(lb_labels)} vs fc={len(fc_labels)}"
+        )
+        self.base      = base
+        self.lb_labels = torch.from_numpy(lb_labels).float()    # (N, K_lb)
+        self.fc_labels = torch.from_numpy(fc_labels).float()    # (N, K_sw, K_fc)
 
     def __len__(self) -> int:
         return len(self.base)
 
     def __getitem__(self, idx: int):
         x, y = self.base[idx]
-        return x, y, self.labels[idx]
+        return x, y, self.lb_labels[idx], self.fc_labels[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +90,8 @@ class CBMDataset(Dataset):
 def get_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset",        type=str, required=True)
-    p.add_argument("--concepts_path",  type=str, required=True)
+    p.add_argument("--concepts_path",  type=str, required=True,
+                   help="Two-set concepts JSON from CBM/concept_proposer/propose_concepts.py.")
     p.add_argument("--segments_path",  type=str, required=True)
     p.add_argument("--epoch",          type=int, required=True)
     p.add_argument("--batch_size",     type=int, default=16)
@@ -100,23 +104,23 @@ def get_args():
     p.add_argument("--embed_dim",      type=int, default=128)
     p.add_argument("--bottle_dim_p",   type=float, default=0.1)
 
+    p.add_argument("--n_subwindows",   type=int, default=4,
+                   help="Forecast-side bottlenecks (must equal preprocessing's --n_subwindows).")
+    p.add_argument("--decoder_hidden", type=int, default=256)
+    p.add_argument("--sw_id_dim",      type=int, default=16,
+                   help="Width of the sub-window-id embedding fed to the shared sub-decoder.")
+
     p.add_argument("--lr",             type=float, default=1e-3)
     p.add_argument("--lr_decay",       type=float, default=0.5)
     p.add_argument("--lr_decay_step",  type=int,   default=5)
     p.add_argument("--seed",           type=int,   default=0)
 
-    # CBM-specific
-    p.add_argument("--alpha_concept",  type=float, default=1.0,
-                   help="Weight on the BCE concept loss.")
-    p.add_argument("--alpha_forecast", type=float, default=0.3,
-                   help="Weight on the L1 forecast loss. Keep < alpha_concept "
-                        "for the first ~10 epochs to prevent the concept layer "
-                        "from being corrupted by forecast pressure.")
-    p.add_argument("--decoder_hidden", type=int, default=256,
-                   help="Hidden width of the forecast decoder MLP.")
+    p.add_argument("--alpha_forecast",         type=float, default=0.3)
+    p.add_argument("--alpha_lookback",         type=float, default=1.0)
+    p.add_argument("--alpha_forecast_concept", type=float, default=1.0)
+
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/cbm")
-    p.add_argument("--case_studies",   type=int, default=5,
-                   help="Number of test segments to print case studies for.")
+    p.add_argument("--case_studies",   type=int, default=5)
     return p.parse_args()
 
 
@@ -127,74 +131,89 @@ def set_seed(seed: int = 0):
 
 
 # ---------------------------------------------------------------------------
-# Training step
+# Train / eval loops
 # ---------------------------------------------------------------------------
 
 def train_one_epoch(model, loader, optimizer, device,
-                    alpha_forecast, alpha_concept):
+                    alpha_forecast, alpha_lookback, alpha_forecast_concept):
     model.train()
-    cum_f, cum_c, n = 0.0, 0.0, 0
+    cum_f, cum_lb, cum_fc, n = 0.0, 0.0, 0.0, 0
     l1_fn  = nn.L1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
 
-    for x, y, lab in loader:
-        x, y, lab = x.to(device), y.to(device), lab.to(device)
+    for x, y, lb_lab, fc_lab in loader:
+        x      = x.to(device)
+        y      = y.to(device)
+        lb_lab = lb_lab.to(device)
+        fc_lab = fc_lab.to(device)
         out = model(x)
 
-        loss_f = l1_fn(out["y_hat"], y)
-        loss_c = bce_fn(out["c_logits"], lab)
-        loss = alpha_forecast * loss_f + alpha_concept * loss_c
+        loss_f  = l1_fn(out["y_hat"],     y)
+        loss_lb = bce_fn(out["lb_logits"], lb_lab)
+        loss_fc = bce_fn(out["fc_logits"], fc_lab)
+        loss = (alpha_forecast        * loss_f
+                + alpha_lookback         * loss_lb
+                + alpha_forecast_concept * loss_fc)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        cum_f += loss_f.item(); cum_c += loss_c.item(); n += 1
+        cum_f  += loss_f.item()
+        cum_lb += loss_lb.item()
+        cum_fc += loss_fc.item()
+        n      += 1
 
-    return cum_f / max(1, n), cum_c / max(1, n)
+    return cum_f / max(1, n), cum_lb / max(1, n), cum_fc / max(1, n)
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    """Run forward over a dataset; return MAE, MSE, all concept logits,
-    all concept labels, all predictions, all targets."""
+    """Run forward over a dataset. Returns:
+        (mae, mse,
+         all lb_logits   (N, K_lb),
+         all lb_labels   (N, K_lb),
+         all fc_logits   (N, N_sw, K_fc),
+         all fc_labels   (N, N_sw, K_fc),
+         all y_hat       (N, T_out, O),
+         all y_true      (N, T_out, O))
+    """
     model.eval()
-    all_logits, all_labels = [], []
-    all_y_hat,  all_y_true = [], []
-    mse_sum, mae_sum, denom = 0.0, 0.0, 0
+    all_lb_lg, all_lb_la = [], []
+    all_fc_lg, all_fc_la = [], []
+    all_yh, all_yt = [], []
+    mae_sum, mse_sum, denom = 0.0, 0.0, 0
 
-    for x, y, lab in loader:
-        x, y, lab = x.to(device), y.to(device), lab.to(device)
+    for x, y, lb_lab, fc_lab in loader:
+        x = x.to(device); y = y.to(device)
         out = model(x)
         y_hat = out["y_hat"]
-        mse_sum += ((y_hat - y) ** 2).sum().item()
         mae_sum += (y_hat - y).abs().sum().item()
+        mse_sum += ((y_hat - y) ** 2).sum().item()
         denom   += y.numel()
-        all_logits.append(out["c_logits"].cpu())
-        all_labels.append(lab.cpu())
-        all_y_hat.append(y_hat.cpu())
-        all_y_true.append(y.cpu())
+        all_lb_lg.append(out["lb_logits"].cpu()); all_lb_la.append(lb_lab)
+        all_fc_lg.append(out["fc_logits"].cpu()); all_fc_la.append(fc_lab)
+        all_yh.append(y_hat.cpu());                all_yt.append(y.cpu())
 
-    mse, mae = mse_sum / denom, mae_sum / denom
-    return (mse, mae,
-            torch.cat(all_logits), torch.cat(all_labels),
-            torch.cat(all_y_hat),  torch.cat(all_y_true))
+    return (mse_sum / denom, mae_sum / denom,
+            torch.cat(all_lb_lg), torch.cat(all_lb_la),
+            torch.cat(all_fc_lg), torch.cat(all_fc_la),
+            torch.cat(all_yh),    torch.cat(all_yt))
 
 
-def per_concept_auroc(logits: torch.Tensor, labels: torch.Tensor) -> list[float]:
-    """Compute AUROC per concept. Returns NaN for concepts with no positive
-    or no negative examples in the eval set."""
+def per_concept_auroc(logits_2d: torch.Tensor, labels_2d: torch.Tensor) -> list[float]:
+    """AUROC per concept over a (N, K) tensor pair. NaN for degenerate labels."""
     from sklearn.metrics import roc_auc_score
-    K = logits.shape[1]
-    aurocs = []
-    L = labels.numpy(); S = logits.numpy()
+    K = logits_2d.shape[1]
+    L = labels_2d.numpy(); S = logits_2d.numpy()
+    out = []
     for k in range(K):
         y_true = L[:, k]
         if y_true.sum() == 0 or y_true.sum() == len(y_true):
-            aurocs.append(float("nan"))
+            out.append(float("nan"))
         else:
-            aurocs.append(float(roc_auc_score(y_true, S[:, k])))
-    return aurocs
+            out.append(float(roc_auc_score(y_true, S[:, k])))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -220,48 +239,34 @@ def main():
     print(f"  vali  windows = {len(val_data)}")
     print(f"  test  windows = {len(test_data)}")
 
-    # ----- Concept labels for TRAIN (the segments JSON covers train) -----
-    print("\n── Building concept labels ──")
-    win_labels_train, accepted_concepts = build_window_label_table(
+    # ----- Concept labels for TRAIN -----
+    print("\n── Building concept labels (train) ──")
+    lb_train, fc_train, lb_meta, fc_meta = build_window_label_tables(
         concepts_path=args.concepts_path,
         segments_path=args.segments_path,
         n_windows=len(train_data),
         only_ok=True,
     )
-    K = win_labels_train.shape[1]
-    print(f"  K = {K} accepted concepts; "
-          f"train label matrix shape = {win_labels_train.shape}")
+    K_lb = lb_train.shape[1]
+    K_sw = fc_train.shape[1] if fc_train.ndim == 3 else 0
+    K_fc = fc_train.shape[2] if fc_train.ndim == 3 else 0
+    print(f"  K_lookback = {K_lb}, K_subwindows = {K_sw}, K_forecast = {K_fc}")
+    if K_sw != args.n_subwindows:
+        print(f"  WARNING: --n_subwindows={args.n_subwindows} != K_sw={K_sw} from segments file. "
+              f"Using {K_sw} (taken from preprocessing).")
+        args.n_subwindows = K_sw
 
-    # For val/test we still need labels for the per-concept AUROC report.
-    # We re-use the same concept match functions on the val/test windows.
-    # We piggyback on the segments_path's filter functions but assume the
-    # window indexing maps cleanly to its segments at the same stride.
-    # If you have separate val/test segments JSONs, swap them in here.
-    # For LOF/RE this works because train segments JSON covers the same
-    # filter logic — predictions for val/test concepts come from the
-    # model's c_logits, ground truth comes from running the same filter
-    # functions against the per-row metadata of val/test windows.
-    print("  building concept labels for val/test windows ...")
-    from CBM.concept_labels import load_concepts, compute_segment_labels, segments_to_window_labels
-    accepted, match_fns = load_concepts(args.concepts_path, only_ok=True)
-    import json
-    with open(args.segments_path) as f:
-        segs = json.load(f)
-    stride = int(segs["segments"][1]["start_idx"] - segs["segments"][0]["start_idx"])
-    seg_labels_all = compute_segment_labels(segs["segments"], match_fns)
-    # Val/test windows live in disjoint row ranges from train, so naive stride
-    # mapping doesn't apply — we approximate with per-window labels using the
-    # closest train-segment by start row. For an accurate val/test concept
-    # AUROC, build a val/test segments JSON via preprocessing/data_preprocessing.py
-    # and load it here.
-    win_labels_val  = np.zeros((len(val_data),  K), dtype=np.float32)
-    win_labels_test = np.zeros((len(test_data), K), dtype=np.float32)
-    print("  (val/test labels initialized as zeros — concept AUROC on those"
-          " splits is unreliable until you also build val/test segments JSONs.)")
+    # ----- Placeholder val/test labels (zeros) — for AUROC we still need shape match -----
+    lb_val  = np.zeros((len(val_data),  K_lb),       dtype=np.float32)
+    fc_val  = np.zeros((len(val_data),  K_sw, K_fc), dtype=np.float32)
+    lb_test = np.zeros((len(test_data), K_lb),       dtype=np.float32)
+    fc_test = np.zeros((len(test_data), K_sw, K_fc), dtype=np.float32)
+    print("  (val/test concept labels initialized as zeros — build val/test segments JSONs"
+          " for real concept AUROC on those splits.)")
 
-    train_ds = CBMDataset(train_data, win_labels_train)
-    val_ds   = CBMDataset(val_data,   win_labels_val)
-    test_ds  = CBMDataset(test_data,  win_labels_test)
+    train_ds = CBMDataset(train_data, lb_train, fc_train)
+    val_ds   = CBMDataset(val_data,   lb_val,   fc_val)
+    test_ds  = CBMDataset(test_data,  lb_test,  fc_test)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                shuffle=True, drop_last=True)
@@ -280,8 +285,11 @@ def main():
         output_length= args.output_length,
         num_blocks   = args.num_layer,
         dropout      = args.dropout,
-        n_concepts   = K,
-        decoder_hidden = args.decoder_hidden,
+        n_lookback_concepts = K_lb,
+        n_forecast_concepts = K_fc,
+        n_subwindows        = args.n_subwindows,
+        decoder_hidden      = args.decoder_hidden,
+        sub_window_id_dim   = args.sw_id_dim,
         use_rev_in   = 1,
         norm_type    = "B",
     ).to(device)
@@ -296,20 +304,19 @@ def main():
     best_val_mae = float("inf")
     print("\n── Training ──")
     for epoch in range(args.epoch):
-        f_loss, c_loss = train_one_epoch(
+        l_f, l_lb, l_fc = train_one_epoch(
             model, train_loader, optimizer, device,
-            args.alpha_forecast, args.alpha_concept,
+            args.alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
         print(f"  [epoch {epoch+1:>3d}/{args.epoch}]  "
-              f"train_forecast L1={f_loss:.4f}  "
-              f"train_concept BCE={c_loss:.4f}  "
+              f"train_L1={l_f:.4f}  "
+              f"train_lb_BCE={l_lb:.4f}  "
+              f"train_fc_BCE={l_fc:.4f}  "
               f"val MAE={val_mae:.4f}")
-
         if val_mae < best_val_mae:
             best_val_mae = val_mae
             torch.save(model.state_dict(), ckpt_path)
-
         if (epoch + 1) % args.lr_decay_step == 0:
             for g in optimizer.param_groups:
                 g["lr"] *= args.lr_decay
@@ -319,51 +326,66 @@ def main():
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
 
     print("\n── Test forecast results ──")
-    test_mse, test_mae, t_logits, t_labels, t_yhat, t_ytrue = \
-        evaluate(model, test_loader, device)
+    test_mse, test_mae, t_lb_lg, _, t_fc_lg, _, t_yh, t_yt = evaluate(model, test_loader, device)
     print(f"  test MSE = {test_mse:.6f}")
     print(f"  test MAE = {test_mae:.6f}")
 
-    # Per-concept AUROC computed on TRAIN labels (since val/test labels
-    # are missing). For a proper test-set AUROC, see note above.
-    print("\n── Per-concept activation magnitude (train labels OK; val/test concept-AUROC requires segment JSONs for those splits) ──")
-    train_logits = []
-    train_labels = []
+    # ----- Per-concept AUROC computed on TRAIN labels -----
+    # (val/test labels are placeholder zeros; for real val/test AUROC, build
+    # val/test segment JSONs and load them analogously.)
+    print("\n── Per-concept AUROC (train labels) ──")
+    tr_lb_lg, tr_lb_la, tr_fc_lg, tr_fc_la = [], [], [], []
+    model.eval()
     with torch.no_grad():
-        model.eval()
-        for x, y, lab in train_loader:
+        for x, _, lb_lab, fc_lab in train_loader:
             x = x.to(device)
             out = model(x)
-            train_logits.append(out["c_logits"].cpu())
-            train_labels.append(lab)
-    train_logits = torch.cat(train_logits); train_labels = torch.cat(train_labels)
-    aurocs = per_concept_auroc(train_logits, train_labels)
-    for c, auc in zip(accepted_concepts, aurocs):
-        flag = " " if (auc != auc or auc > 0.7) else "⚠"
+            tr_lb_lg.append(out["lb_logits"].cpu()); tr_lb_la.append(lb_lab)
+            tr_fc_lg.append(out["fc_logits"].cpu()); tr_fc_la.append(fc_lab)
+    tr_lb_lg = torch.cat(tr_lb_lg); tr_lb_la = torch.cat(tr_lb_la)
+    tr_fc_lg = torch.cat(tr_fc_lg); tr_fc_la = torch.cat(tr_fc_la)
+
+    lb_aurocs = per_concept_auroc(tr_lb_lg, tr_lb_la)
+    print("\n  LOOKBACK concepts:")
+    for c, auc in zip(lb_meta, lb_aurocs):
+        flag = " " if (auc != auc or auc > 0.7) else "?"
         auc_s = "  nan " if auc != auc else f"{auc:.3f}"
-        print(f"  {flag} [{c['id']:>2}] {c['name']:30s}  train AUROC = {auc_s}")
+        print(f"   {flag} [{c['id']:>2}] {c['name']:32s}  train AUROC = {auc_s}")
+
+    print("\n  FORECAST concepts (AUROC per concept, per sub-window):")
+    print(f"   {'name':32s}  " + "  ".join(f"sw{k}" for k in range(args.n_subwindows)))
+    for j, c in enumerate(fc_meta):
+        per_sw = []
+        for k in range(args.n_subwindows):
+            aur = per_concept_auroc(tr_fc_lg[:, k, j:j+1], tr_fc_la[:, k, j:j+1])[0]
+            per_sw.append(f"{aur:.2f}" if aur == aur else " nan")
+        print(f"   [{c['id']:>2}] {c['name']:32s}  " + "  ".join(per_sw))
 
     # ----- Case studies -----
     if args.case_studies > 0:
         print(f"\n── Case studies: {args.case_studies} random test windows ──")
-        n_test = t_yhat.shape[0]
+        t_lb_acts = torch.sigmoid(t_lb_lg)
+        t_fc_acts = torch.sigmoid(t_fc_lg)
+        n_test = t_yh.shape[0]
         rng = np.random.RandomState(args.seed)
         idx = rng.choice(n_test, min(args.case_studies, n_test), replace=False)
 
-        # Convert test concept logits to activations
-        t_acts = torch.sigmoid(t_logits)
-
         for k_idx, w in enumerate(idx):
             print(f"\n  Case {k_idx+1} (test window {w}):")
-            # Top-5 active concepts for this window
-            acts = t_acts[w]
-            top5 = torch.topk(acts, k=min(5, K))
-            print(f"    top concepts active:")
-            for s, j in zip(top5.values, top5.indices):
-                cm = accepted_concepts[j.item()]
+            lb_top = torch.topk(t_lb_acts[w], k=min(5, K_lb))
+            print(f"    top lookback concepts active:")
+            for s, j in zip(lb_top.values, lb_top.indices):
+                cm = lb_meta[j.item()]
                 print(f"      {s.item():.3f}  {cm['name']}  ({cm['description'][:60]})")
-            # Forecast comparison
-            mae_here = (t_yhat[w] - t_ytrue[w]).abs().mean().item()
+            print(f"    top forecast concepts per sub-window:")
+            for sw in range(args.n_subwindows):
+                top = torch.topk(t_fc_acts[w, sw], k=min(3, K_fc))
+                names = ", ".join(
+                    f"{s.item():.2f}*{fc_meta[j.item()]['name']}"
+                    for s, j in zip(top.values, top.indices)
+                )
+                print(f"      sw{sw}: {names}")
+            mae_here = (t_yh[w] - t_yt[w]).abs().mean().item()
             print(f"    per-window MAE = {mae_here:.4f}")
 
 

@@ -232,11 +232,74 @@ def compute_global_statistics(df: pd.DataFrame, channel_meta: dict) -> dict:
 # Segmentation
 # ============================================================
 
+def _season_from_month(month: int) -> str:
+    if month in (3, 4, 5):   return "spring"
+    if month in (6, 7, 8):   return "summer"
+    if month in (9, 10, 11): return "autumn"
+    return "winter"
+
+
+def _extract_subwindow_time_context(sw_df: pd.DataFrame, sw_idx: int) -> dict:
+    """Time context for a forecast sub-window. The 'month' column in this
+    dataset stores the HOUR-OF-DAY, kept consistent with _extract_time_context."""
+    sw_start = sw_df.iloc[0]
+    sw_end = sw_df.iloc[-1]
+    return {
+        "subwindow_idx": int(sw_idx),
+        "start": {
+            "solar_month": int(sw_start.get("solar_month", 0)),
+            "solar_day":   int(sw_start.get("solar_day", 0)),
+            "hour":        int(sw_start.get("month", 0)),
+            "minute":      int(sw_start.get("minute", 0)),
+        },
+        "end": {
+            "solar_month": int(sw_end.get("solar_month", 0)),
+            "solar_day":   int(sw_end.get("solar_day", 0)),
+            "hour":        int(sw_end.get("month", 0)),
+            "minute":      int(sw_end.get("minute", 0)),
+        },
+        "season": _season_from_month(int(sw_start.get("solar_month", 1))),
+    }
+
+
+def build_subwindow_blocks(forecast_df: pd.DataFrame,
+                           n_subwindows: int) -> list:
+    """Slice the forecast window into ``n_subwindows`` equal chunks and
+    compute per-chunk per-channel stats + a local time_context.
+
+    Each returned block has shape:
+        {
+          "subwindow_idx":      int,
+          "stats":              {channel -> {mean, std, slope, ...}},
+          "time_context":       {subwindow_idx, start{...}, end{...}, season},
+        }
+
+    The forecast concept rules consume these blocks (one rule × four blocks
+    = four labels per segment per concept). See CBM/concept_labels.py.
+    """
+    out_len = len(forecast_df)
+    if out_len % n_subwindows != 0:
+        raise ValueError(
+            f"forecast length {out_len} not divisible by n_subwindows={n_subwindows}"
+        )
+    sw_len = out_len // n_subwindows
+    blocks = []
+    for k in range(n_subwindows):
+        sw_df = forecast_df.iloc[k * sw_len : (k + 1) * sw_len]
+        blocks.append({
+            "subwindow_idx": int(k),
+            "stats":         extract_segment_stats(sw_df, CHANNEL_META),
+            "time_context":  _extract_subwindow_time_context(sw_df, k),
+        })
+    return blocks
+
+
 def segment_time_series(
     df: pd.DataFrame,
     input_length: int = 384,
     output_length: int = 96,
     stride: int = 96,
+    n_subwindows: int = 4,
 ) -> list:
     """Segment the time series into non-overlapping (or strided) windows.
 
@@ -284,12 +347,17 @@ def segment_time_series(
         # Cross-channel statistics on full window
         cross_stats = extract_cross_channel_stats(window_df)
 
+        # Per-sub-window stats over the forecast window — consumed by the
+        # forecast-side concept layers in the CBM (one rule per sub-window).
+        subwindow_blocks = build_subwindow_blocks(forecast_df, n_subwindows=n_subwindows)
+
         segments.append({
             "segment_id": seg_id,
             "start_idx": int(start),
             "end_idx": int(end),
             "lookback_stats": lookback_stats,
             "forecast_stats": forecast_stats,
+            "subwindow_stats": subwindow_blocks,
             "cross_channel_stats": cross_stats,
             "time_context": time_context,
         })
@@ -467,6 +535,7 @@ def run_preprocessing(
     output_length: int = 96,
     stride: int = 96,
     max_segments_for_llm: int = 300,
+    n_subwindows: int = 4,
 ):
     """Run the full Part A preprocessing pipeline.
 
@@ -502,6 +571,7 @@ def run_preprocessing(
         input_length=input_length,
         output_length=output_length,
         stride=stride,
+        n_subwindows=n_subwindows,
     )
     print(f"  Total segments: {len(all_segments)}")
 
@@ -522,6 +592,8 @@ def run_preprocessing(
         "input_length": input_length,
         "output_length": output_length,
         "stride": stride,
+        "n_subwindows": n_subwindows,
+        "subwindow_length": output_length // n_subwindows,
         "total_segments": len(all_segments),
         "sampled_segments": len(sampled_segments),
         "target_variable": "load",
@@ -622,6 +694,11 @@ def main():
                         help="Stride between segments (default: 96 = 1 day)")
     parser.add_argument("--max_segments", type=int, default=300,
                         help="Max segments for LLM context (default: 300)")
+    parser.add_argument("--n_subwindows", type=int, default=4,
+                        help="Forecast window split into this many equal sub-windows. "
+                             "Each sub-window gets its own per-channel stats block "
+                             "used by the CBM's forecast concept layers. Default 4 "
+                             "(96 forecast steps -> 4 x 24-step sub-windows = 4 x 6h).")
     args = parser.parse_args()
 
     run_preprocessing(
@@ -631,6 +708,7 @@ def main():
         output_length=args.output_length,
         stride=args.stride,
         max_segments_for_llm=args.max_segments,
+        n_subwindows=args.n_subwindows,
     )
 
 
