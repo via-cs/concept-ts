@@ -32,7 +32,8 @@ Run
         --input_dim 23 --output_dim 1 \\
         --num_layer 4 --dropout 0.5 --embed_dim 128 \\
         --n_subwindows 4 \\
-        --alpha_forecast 0.3 --alpha_lookback 1.0 --alpha_forecast_concept 1.0 \\
+        --alpha_forecast 1.0 --alpha_lookback 1.0 --alpha_forecast_concept 1.0 \\
+        --lr 3e-4 --weight_decay 1e-4 --patience 5 \\
         --case_studies 5
 """
 
@@ -92,7 +93,17 @@ def get_args():
     p.add_argument("--dataset",        type=str, required=True)
     p.add_argument("--concepts_path",  type=str, required=True,
                    help="Two-set concepts JSON from CBM/concept_proposer/propose_concepts.py.")
-    p.add_argument("--segments_path",  type=str, required=True)
+    p.add_argument("--segments_path",  type=str, required=True,
+                   help="Train segments JSON from preprocessing --split train.")
+    p.add_argument("--val_segments_path",  type=str, default=None,
+                   help="Optional. Validation segments JSON from preprocessing "
+                        "--split vali. If provided, val concept labels are "
+                        "real (not zeros) and val AUROC + accuracy are reported.")
+    p.add_argument("--test_segments_path", type=str, default=None,
+                   help="Optional. Test segments JSON from preprocessing "
+                        "--split test. If provided, test concept labels are "
+                        "real and a test-set per-concept accuracy + AUROC "
+                        "table is printed at the end.")
     p.add_argument("--epoch",          type=int, required=True)
     p.add_argument("--batch_size",     type=int, default=16)
     p.add_argument("--input_length",   type=int, default=96 * 4)
@@ -110,14 +121,38 @@ def get_args():
     p.add_argument("--sw_id_dim",      type=int, default=16,
                    help="Width of the sub-window-id embedding fed to the shared sub-decoder.")
 
-    p.add_argument("--lr",             type=float, default=1e-3)
+    p.add_argument("--lr",             type=float, default=3e-4,
+                   help="Initial learning rate. Lowered from 1e-3 to stabilize "
+                        "training in the 1+N architecture (concept and forecast "
+                        "gradients pull harder against each other now).")
+    p.add_argument("--weight_decay",   type=float, default=1e-4,
+                   help="L2 weight decay on the Adam optimizer. Default 1e-4 "
+                        "to dampen decoder overfit.")
     p.add_argument("--lr_decay",       type=float, default=0.5)
-    p.add_argument("--lr_decay_step",  type=int,   default=5)
+    p.add_argument("--lr_decay_step",  type=int,   default=999,
+                   help="Multiply lr by --lr_decay every this many epochs. "
+                        "Default 999 effectively disables the schedule and "
+                        "lets early stopping drive termination.")
+    p.add_argument("--patience",       type=int,   default=5,
+                   help="Early-stopping patience: stop if val MAE has not "
+                        "improved for this many epochs. Default 5. Set to 0 "
+                        "to disable early stopping (run all --epoch epochs).")
     p.add_argument("--seed",           type=int,   default=0)
 
-    p.add_argument("--alpha_forecast",         type=float, default=0.3)
+    p.add_argument("--alpha_forecast",         type=float, default=1.0,
+                   help="Weight on L1 forecast loss. Default 1.0 — equal to the "
+                        "two BCE weights. With K_lb + N*K_fc concept outputs (110 "
+                        "by default) vs 96 forecast outputs, equal weighting is "
+                        "already slightly concept-dominant; lowering this further "
+                        "tends to leave the decoder undersupervised.")
     p.add_argument("--alpha_lookback",         type=float, default=1.0)
     p.add_argument("--alpha_forecast_concept", type=float, default=1.0)
+    p.add_argument("--concept_warmup_epochs",  type=int,   default=0,
+                   help="If > 0, train with alpha_forecast = 0 for this many "
+                        "epochs before switching to the user-supplied value. "
+                        "Lets the concept predictors fit cleanly before forecast "
+                        "pressure is applied. Recommended: 3-5 if you suspect "
+                        "concept hijacking; 0 for the standard run.")
 
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/cbm")
     p.add_argument("--case_studies",   type=int, default=5)
@@ -216,6 +251,79 @@ def per_concept_auroc(logits_2d: torch.Tensor, labels_2d: torch.Tensor) -> list[
     return out
 
 
+def per_concept_accuracy(logits_2d: torch.Tensor,
+                         labels_2d: torch.Tensor,
+                         threshold: float = 0.5) -> list[float]:
+    """Threshold-0.5 binary accuracy per concept on (N, K) tensors.
+
+    For each concept k, compute the fraction of inputs whose
+    (sigmoid(logit_k) >= 0.5) prediction matches label_k. Unlike AUROC,
+    accuracy is well-defined even when labels are all-zero or all-one --
+    a concept that's True in 0% of inputs gets accuracy = fraction of
+    inputs where the model also predicts False.
+    """
+    probs = torch.sigmoid(logits_2d)
+    preds = (probs >= threshold).float()
+    correct = (preds == labels_2d).float().mean(dim=0)
+    return [float(a) for a in correct.tolist()]
+
+
+def _print_lookback_table(title: str,
+                          logits: torch.Tensor,
+                          labels: torch.Tensor,
+                          meta: list[dict]) -> None:
+    """Print a (id, name, positive_rate_in_eval, accuracy, AUROC) table."""
+    aurocs    = per_concept_auroc(logits, labels)
+    accs      = per_concept_accuracy(logits, labels)
+    pos_rates = labels.float().mean(dim=0).tolist()
+    bar = "─" * 92
+    print(f"\n  {title}")
+    print(bar)
+    print(f"   {'id':>3}  {'name':32s}  {'pos%':>6}  {'acc':>5}   {'AUROC':>5}")
+    print(bar)
+    for c, auc, acc, pr in zip(meta, aurocs, accs, pos_rates):
+        auc_s = "  nan" if auc != auc else f"{auc:.3f}"
+        print(f"   [{c['id']:>2}] {c['name']:32s}  "
+              f"{pr*100:>5.1f}%  {acc*100:>4.1f}%   {auc_s}")
+    print(bar)
+
+
+def _print_forecast_table(title: str,
+                          logits: torch.Tensor,
+                          labels: torch.Tensor,
+                          meta: list[dict],
+                          n_subwindows: int) -> None:
+    """Print TWO sub-tables for forecast concepts:
+    one with per-sub-window AUROC, one with per-sub-window accuracy.
+    Logits / labels have shape (N, n_subwindows, K_fc)."""
+    print(f"\n  {title}")
+    sws_hdr = "  ".join(f"sw{k}" for k in range(n_subwindows))
+    bar = "─" * 100
+    # AUROC sub-table
+    print(bar)
+    print(f"   {'id':>3}  {'name':32s}  AUROC per sub-window:  {sws_hdr}")
+    print(bar)
+    for j, c in enumerate(meta):
+        per_sw = []
+        for k in range(n_subwindows):
+            aur = per_concept_auroc(logits[:, k, j:j+1], labels[:, k, j:j+1])[0]
+            per_sw.append(f"{aur:.2f}" if aur == aur else " nan")
+        print(f"   [{c['id']:>2}] {c['name']:32s}                         "
+              + "  ".join(per_sw))
+    print(bar)
+    # Accuracy sub-table
+    print(f"   {'id':>3}  {'name':32s}  Accuracy@0.5 per sub-window: {sws_hdr}")
+    print(bar)
+    for j, c in enumerate(meta):
+        per_sw = []
+        for k in range(n_subwindows):
+            acc = per_concept_accuracy(logits[:, k, j:j+1], labels[:, k, j:j+1])[0]
+            per_sw.append(f"{acc*100:.1f}")
+        print(f"   [{c['id']:>2}] {c['name']:32s}                          "
+              + "  ".join(per_sw))
+    print(bar)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -256,13 +364,37 @@ def main():
               f"Using {K_sw} (taken from preprocessing).")
         args.n_subwindows = K_sw
 
-    # ----- Placeholder val/test labels (zeros) — for AUROC we still need shape match -----
-    lb_val  = np.zeros((len(val_data),  K_lb),       dtype=np.float32)
-    fc_val  = np.zeros((len(val_data),  K_sw, K_fc), dtype=np.float32)
-    lb_test = np.zeros((len(test_data), K_lb),       dtype=np.float32)
-    fc_test = np.zeros((len(test_data), K_sw, K_fc), dtype=np.float32)
-    print("  (val/test concept labels initialized as zeros — build val/test segments JSONs"
-          " for real concept AUROC on those splits.)")
+    # ----- Build val/test concept labels if their segments JSONs were provided -----
+    def _load_split_labels(name: str, path: str | None, n_windows: int):
+        """Return (lb_labels, fc_labels, is_real) for a split."""
+        if path is None:
+            print(f"  {name}: NO segments path supplied -> labels are placeholder zeros, "
+                  "per-concept stats will not be reported for this split.")
+            return (np.zeros((n_windows, K_lb),       dtype=np.float32),
+                    np.zeros((n_windows, K_sw, K_fc), dtype=np.float32),
+                    False)
+        lb, fc, _, _ = build_window_label_tables(
+            concepts_path=args.concepts_path,
+            segments_path=path,
+            n_windows=n_windows,
+            only_ok=True,
+        )
+        if fc.shape[1] != K_sw or fc.shape[2] != K_fc:
+            raise ValueError(
+                f"{name} segments at {path} produced fc-label shape {fc.shape}; "
+                f"train produced (W, {K_sw}, {K_fc}). n_subwindows mismatch?"
+            )
+        print(f"  {name}: REAL concept labels loaded "
+              f"(lb {lb.shape}, fc {fc.shape}).")
+        return lb.astype(np.float32), fc.astype(np.float32), True
+
+    print("\n── Building concept labels (val / test) ──")
+    lb_val,  fc_val,  val_labels_real  = _load_split_labels(
+        "val",  args.val_segments_path,  len(val_data),
+    )
+    lb_test, fc_test, test_labels_real = _load_split_labels(
+        "test", args.test_segments_path, len(test_data),
+    )
 
     train_ds = CBMDataset(train_data, lb_train, fc_train)
     val_ds   = CBMDataset(val_data,   lb_val,   fc_val)
@@ -296,70 +428,102 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  total trainable params: {n_params/1e6:.2f} M")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+    )
 
     # ----- Train loop -----
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     ckpt_path = os.path.join(args.checkpoint_dir, "cbm.pth")
-    best_val_mae = float("inf")
+    best_val_mae    = float("inf")
+    best_val_epoch  = -1
+    epochs_no_improve = 0
     print("\n── Training ──")
+    if args.concept_warmup_epochs > 0:
+        print(f"  (concept warmup: alpha_forecast=0 for first "
+              f"{args.concept_warmup_epochs} epochs)")
+    if args.patience > 0:
+        print(f"  (early stopping: stop if val MAE has not improved for "
+              f"{args.patience} epochs)")
     for epoch in range(args.epoch):
+        # Concept-only warmup: zero alpha_forecast while the concept predictors fit.
+        eff_alpha_forecast = (0.0
+                              if epoch < args.concept_warmup_epochs
+                              else args.alpha_forecast)
         l_f, l_lb, l_fc = train_one_epoch(
             model, train_loader, optimizer, device,
-            args.alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
+            eff_alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
+        improved = val_mae < best_val_mae
+        marker = " *" if improved else ""
         print(f"  [epoch {epoch+1:>3d}/{args.epoch}]  "
               f"train_L1={l_f:.4f}  "
               f"train_lb_BCE={l_lb:.4f}  "
               f"train_fc_BCE={l_fc:.4f}  "
-              f"val MAE={val_mae:.4f}")
-        if val_mae < best_val_mae:
-            best_val_mae = val_mae
+              f"val MAE={val_mae:.4f}{marker}")
+        if improved:
+            best_val_mae      = val_mae
+            best_val_epoch    = epoch + 1
+            epochs_no_improve = 0
             torch.save(model.state_dict(), ckpt_path)
+        else:
+            epochs_no_improve += 1
+        # Optional scheduled lr decay (default off — lr_decay_step=999).
         if (epoch + 1) % args.lr_decay_step == 0:
             for g in optimizer.param_groups:
                 g["lr"] *= args.lr_decay
+        # Early stopping.
+        if args.patience > 0 and epochs_no_improve >= args.patience:
+            print(f"  Early stop: no improvement for {args.patience} epochs. "
+                  f"Best val MAE = {best_val_mae:.4f} at epoch {best_val_epoch}.")
+            break
+
+    print(f"\n  Best val MAE = {best_val_mae:.4f} achieved at epoch {best_val_epoch}.")
 
     # ----- Test -----
     print(f"\n── Loading best checkpoint ({ckpt_path}) ──")
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
 
     print("\n── Test forecast results ──")
-    test_mse, test_mae, t_lb_lg, _, t_fc_lg, _, t_yh, t_yt = evaluate(model, test_loader, device)
+    test_mse, test_mae, t_lb_lg, t_lb_la, t_fc_lg, t_fc_la, t_yh, t_yt = evaluate(
+        model, test_loader, device,
+    )
     print(f"  test MSE = {test_mse:.6f}")
     print(f"  test MAE = {test_mae:.6f}")
 
-    # ----- Per-concept AUROC computed on TRAIN labels -----
-    # (val/test labels are placeholder zeros; for real val/test AUROC, build
-    # val/test segment JSONs and load them analogously.)
-    print("\n── Per-concept AUROC (train labels) ──")
-    tr_lb_lg, tr_lb_la, tr_fc_lg, tr_fc_la = [], [], [], []
-    model.eval()
-    with torch.no_grad():
-        for x, _, lb_lab, fc_lab in train_loader:
-            x = x.to(device)
-            out = model(x)
-            tr_lb_lg.append(out["lb_logits"].cpu()); tr_lb_la.append(lb_lab)
-            tr_fc_lg.append(out["fc_logits"].cpu()); tr_fc_la.append(fc_lab)
-    tr_lb_lg = torch.cat(tr_lb_lg); tr_lb_la = torch.cat(tr_lb_la)
-    tr_fc_lg = torch.cat(tr_fc_lg); tr_fc_la = torch.cat(tr_fc_la)
-
-    lb_aurocs = per_concept_auroc(tr_lb_lg, tr_lb_la)
-    print("\n  LOOKBACK concepts:")
-    for c, auc in zip(lb_meta, lb_aurocs):
-        flag = " " if (auc != auc or auc > 0.7) else "?"
-        auc_s = "  nan " if auc != auc else f"{auc:.3f}"
-        print(f"   {flag} [{c['id']:>2}] {c['name']:32s}  train AUROC = {auc_s}")
-
-    print("\n  FORECAST concepts (AUROC per concept, per sub-window):")
-    print(f"   {'name':32s}  " + "  ".join(f"sw{k}" for k in range(args.n_subwindows)))
-    for j, c in enumerate(fc_meta):
-        per_sw = []
-        for k in range(args.n_subwindows):
-            aur = per_concept_auroc(tr_fc_lg[:, k, j:j+1], tr_fc_la[:, k, j:j+1])[0]
-            per_sw.append(f"{aur:.2f}" if aur == aur else " nan")
-        print(f"   [{c['id']:>2}] {c['name']:32s}  " + "  ".join(per_sw))
+    # ----- Per-concept TEST stats (real labels if --test_segments_path was given) -----
+    # Falls back to a TRAIN evaluation when the user didn't supply test segments,
+    # noting that the table's labels are training-set labels and therefore
+    # overstate generalization.
+    if test_labels_real:
+        print("\n── Per-concept TEST stats (against REAL test labels) ──")
+        _print_lookback_table(
+            "LOOKBACK concepts on TEST", t_lb_lg, t_lb_la, lb_meta,
+        )
+        _print_forecast_table(
+            "FORECAST concepts on TEST", t_fc_lg, t_fc_la, fc_meta, args.n_subwindows,
+        )
+    else:
+        print("\n── Per-concept stats: TEST labels not provided, falling back to TRAIN ──")
+        print("    Pass --test_segments_path to get the REAL test-set tables.")
+        tr_lb_lg, tr_lb_la, tr_fc_lg, tr_fc_la = [], [], [], []
+        model.eval()
+        with torch.no_grad():
+            for x, _, lb_lab, fc_lab in train_loader:
+                x = x.to(device)
+                out = model(x)
+                tr_lb_lg.append(out["lb_logits"].cpu()); tr_lb_la.append(lb_lab)
+                tr_fc_lg.append(out["fc_logits"].cpu()); tr_fc_la.append(fc_lab)
+        tr_lb_lg = torch.cat(tr_lb_lg); tr_lb_la = torch.cat(tr_lb_la)
+        tr_fc_lg = torch.cat(tr_fc_lg); tr_fc_la = torch.cat(tr_fc_la)
+        _print_lookback_table(
+            "LOOKBACK concepts on TRAIN (fallback)", tr_lb_lg, tr_lb_la, lb_meta,
+        )
+        _print_forecast_table(
+            "FORECAST concepts on TRAIN (fallback)", tr_fc_lg, tr_fc_la, fc_meta,
+            args.n_subwindows,
+        )
 
     # ----- Case studies -----
     if args.case_studies > 0:

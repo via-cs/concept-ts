@@ -536,6 +536,7 @@ def run_preprocessing(
     stride: int = 96,
     max_segments_for_llm: int = 300,
     n_subwindows: int = 4,
+    split: str = "train",
 ):
     """Run the full Part A preprocessing pipeline.
 
@@ -554,26 +555,45 @@ def run_preprocessing(
     df = pd.read_csv(data_path)
     print(f"  Shape: {df.shape}")
 
-    # Use training split only (first 70%)
-    train_end = int(0.7 * len(df))
+    # Slice the dataframe according to --split. Matches the legacy 70/10/20
+    # chronological split used by dataloader/dataloader.py when
+    # USE_LAST_YEAR_SPLIT is False (the active default).
+    N = len(df)
+    train_end = int(0.7 * N)
+    val_end   = int(0.8 * N)
+    if split == "train":
+        slice_df = df.iloc[:train_end].copy()
+        split_desc = f"training set (first 70%): rows [0, {train_end})"
+    elif split == "vali":
+        slice_df = df.iloc[train_end:val_end].copy()
+        split_desc = f"validation set (70%-80%): rows [{train_end}, {val_end})"
+    elif split == "test":
+        slice_df = df.iloc[val_end:].copy()
+        split_desc = f"test set (last 20%): rows [{val_end}, {N})"
+    else:
+        raise ValueError(f"Unknown --split {split!r}. Expected train | vali | test.")
+    print(f"  Split: {split_desc} -> {len(slice_df)} rows "
+          f"({len(slice_df)/96:.1f} days)")
+    suffix = "" if split == "train" else f"_{split}"
+    # Always compute global statistics on TRAIN only -- val/test must not
+    # leak into the reference distribution used by the LLM prompt.
     train_df = df.iloc[:train_end].copy()
-    print(f"  Training set: {len(train_df)} rows ({len(train_df)/96:.0f} days)")
 
     # Step 1: Global statistics
-    print("\nComputing global statistics...")
+    print("\nComputing global statistics (always on train slice)...")
     global_stats = compute_global_statistics(train_df, CHANNEL_META)
     print(f"  Computed for {len(global_stats)} channels")
 
-    # Step 2: Segmentation and per-segment extraction
-    print(f"\nSegmenting (window={input_length}+{output_length}, stride={stride})...")
+    # Step 2: Segmentation and per-segment extraction (on the requested split)
+    print(f"\nSegmenting {split} slice (window={input_length}+{output_length}, stride={stride})...")
     all_segments = segment_time_series(
-        train_df,
+        slice_df,
         input_length=input_length,
         output_length=output_length,
         stride=stride,
         n_subwindows=n_subwindows,
     )
-    print(f"  Total segments: {len(all_segments)}")
+    print(f"  Total segments in {split}: {len(all_segments)}")
 
     # Step 3: Sample for LLM context budget
     print(f"\nSampling {max_segments_for_llm} segments for LLM context...")
@@ -610,7 +630,7 @@ def run_preprocessing(
         "global_statistics": global_stats,
         "segments": all_segments,
     }
-    full_path = os.path.join(output_dir, f"{dataset_name}_full_segments.json")
+    full_path = os.path.join(output_dir, f"{dataset_name}_full_segments{suffix}.json")
     print(f"\nSaving full segments to {full_path}...")
     with open(full_path, "w") as f:
         json.dump(full_output, f, indent=2)
@@ -623,7 +643,7 @@ def run_preprocessing(
         "global_statistics": global_stats,
         "segment_summaries": sampled_segments,
     }
-    llm_path = os.path.join(output_dir, f"{dataset_name}_llm_context.json")
+    llm_path = os.path.join(output_dir, f"{dataset_name}_llm_context{suffix}.json")
     print(f"Saving LLM context to {llm_path}...")
     with open(llm_path, "w") as f:
         json.dump(llm_output, f, indent=2)
@@ -658,7 +678,7 @@ def run_preprocessing(
         "global_statistics": global_stats,
         "segments": compact_segments,
     }
-    compact_path = os.path.join(output_dir, f"{dataset_name}_llm_compact.json")
+    compact_path = os.path.join(output_dir, f"{dataset_name}_llm_compact{suffix}.json")
     print(f"Saving compact LLM context to {compact_path}...")
     with open(compact_path, "w") as f:
         json.dump(compact_output, f, indent=2)
@@ -699,6 +719,14 @@ def main():
                              "Each sub-window gets its own per-channel stats block "
                              "used by the CBM's forecast concept layers. Default 4 "
                              "(96 forecast steps -> 4 x 24-step sub-windows = 4 x 6h).")
+    parser.add_argument("--split", type=str, default="train",
+                        choices=["train", "vali", "test"],
+                        help="Which slice of the CSV to segment. Output filename "
+                             "gains a _<split> suffix (no suffix for train). The "
+                             "70/10/20 boundaries match dataloader/dataloader.py "
+                             "(legacy chronological split). Global statistics are "
+                             "ALWAYS computed on the train slice -- val/test data "
+                             "never leaks into the LLM-facing distribution.")
     args = parser.parse_args()
 
     run_preprocessing(
@@ -709,6 +737,7 @@ def main():
         stride=args.stride,
         max_segments_for_llm=args.max_segments,
         n_subwindows=args.n_subwindows,
+        split=args.split,
     )
 
 

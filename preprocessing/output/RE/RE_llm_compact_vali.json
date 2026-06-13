@@ -1,0 +1,7670 @@
+{
+  "metadata": {
+    "dataset_name": "RE",
+    "target_variable": "load",
+    "target_description": "Electricity load in MW",
+    "time_resolution": "15 minutes",
+    "input_length": 384,
+    "output_length": 96,
+    "total_segments": 106,
+    "sampled_segments": 106,
+    "compact_key": {
+      "lb": "lookback window stats",
+      "fc": "forecast window stats (target only)",
+      "xc": "cross-channel stats",
+      "m": "mean",
+      "s": "std",
+      "sl": "slope",
+      "ctx": "season",
+      "fc_hr": "forecast start hour"
+    },
+    "channels": {
+      "Skin_temperature": {
+        "type": "continuous",
+        "description": "Surface skin temperature (\u00b0C)"
+      },
+      "Relative_humidity": {
+        "type": "continuous",
+        "description": "Relative humidity (%)"
+      },
+      "Surface_net_solar_radiation": {
+        "type": "continuous",
+        "description": "Net solar radiation at surface (W/m\u00b2)"
+      },
+      "Total_precipitation_4h_ahead": {
+        "type": "continuous",
+        "description": "Forecasted total precipitation 4h ahead (mm)"
+      },
+      "10_metre_wind": {
+        "type": "continuous",
+        "description": "Wind speed at 10m height (m/s)"
+      },
+      "load": {
+        "type": "continuous",
+        "description": "Electricity load (target variable, MW)"
+      },
+      "solar_month": {
+        "type": "discrete",
+        "description": "Month of year (1-12)"
+      },
+      "month": {
+        "type": "discrete",
+        "description": "Hour of day (0-23, despite column name 'month')"
+      },
+      "is_holiday": {
+        "type": "discrete",
+        "description": "Whether this is a holiday (0 or 1)"
+      },
+      "is_workday": {
+        "type": "discrete",
+        "description": "Whether this is a workday (0 or 1)"
+      },
+      "day_of_week": {
+        "type": "discrete",
+        "description": "Day of week (0=Monday to 6=Sunday)"
+      },
+      "pricing": {
+        "type": "discrete",
+        "description": "Electricity pricing tier (0.1, 0.3, 1.0, 1.7, 2.0)"
+      }
+    }
+  },
+  "global_statistics": {
+    "lunar_year": {
+      "mode": 3,
+      "n_unique": 4,
+      "distribution": {
+        "3": 0.46,
+        "2": 0.46,
+        "4": 0.07,
+        "1": 0.01
+      }
+    },
+    "lunar_month": {
+      "mode": 1,
+      "n_unique": 12,
+      "distribution": {
+        "1": 0.11,
+        "2": 0.11,
+        "12": 0.09,
+        "4": 0.08,
+        "5": 0.08,
+        "6": 0.08,
+        "7": 0.08,
+        "9": 0.08,
+        "10": 0.08,
+        "11": 0.08,
+        "3": 0.07,
+        "8": 0.07
+      }
+    },
+    "lunar_day": {
+      "mode": 21,
+      "n_unique": 30,
+      "distribution": {
+        "21": 0.03,
+        "22": 0.03,
+        "23": 0.03,
+        "24": 0.03,
+        "25": 0.03,
+        "26": 0.03,
+        "27": 0.03,
+        "20": 0.03,
+        "1": 0.03,
+        "2": 0.03,
+        "3": 0.03,
+        "4": 0.03,
+        "5": 0.03,
+        "6": 0.03,
+        "7": 0.03,
+        "8": 0.03,
+        "9": 0.03,
+        "10": 0.03,
+        "11": 0.03,
+        "12": 0.03,
+        "13": 0.03,
+        "14": 0.03,
+        "15": 0.03,
+        "16": 0.03,
+        "17": 0.03,
+        "18": 0.03,
+        "19": 0.03,
+        "28": 0.03,
+        "29": 0.03,
+        "30": 0.02
+      }
+    },
+    "solar_year": {
+      "mode": 3,
+      "n_unique": 3,
+      "distribution": {
+        "3": 0.47,
+        "2": 0.43,
+        "4": 0.1
+      }
+    },
+    "solar_month": {
+      "mode": 2,
+      "n_unique": 12,
+      "distribution": {
+        "2": 0.11,
+        "3": 0.1,
+        "1": 0.08,
+        "5": 0.08,
+        "7": 0.08,
+        "8": 0.08,
+        "10": 0.08,
+        "12": 0.08,
+        "4": 0.08,
+        "6": 0.08,
+        "9": 0.08,
+        "11": 0.08
+      }
+    },
+    "solar_day": {
+      "mode": 2,
+      "n_unique": 31,
+      "distribution": {
+        "2": 0.03,
+        "3": 0.03,
+        "4": 0.03,
+        "5": 0.03,
+        "6": 0.03,
+        "7": 0.03,
+        "8": 0.03,
+        "9": 0.03,
+        "10": 0.03,
+        "11": 0.03,
+        "12": 0.03,
+        "13": 0.03,
+        "14": 0.03,
+        "15": 0.03,
+        "16": 0.03,
+        "17": 0.03,
+        "1": 0.03,
+        "18": 0.03,
+        "19": 0.03,
+        "20": 0.03,
+        "21": 0.03,
+        "22": 0.03,
+        "23": 0.03,
+        "24": 0.03,
+        "25": 0.03,
+        "26": 0.03,
+        "27": 0.03,
+        "28": 0.03,
+        "29": 0.03,
+        "30": 0.03,
+        "31": 0.02
+      }
+    },
+    "month": {
+      "mode": 9,
+      "n_unique": 24,
+      "distribution": {
+        "9": 0.04,
+        "10": 0.04,
+        "11": 0.04,
+        "12": 0.04,
+        "13": 0.04,
+        "14": 0.04,
+        "15": 0.04,
+        "16": 0.04,
+        "8": 0.04,
+        "17": 0.04,
+        "0": 0.04,
+        "1": 0.04,
+        "2": 0.04,
+        "3": 0.04,
+        "4": 0.04,
+        "5": 0.04,
+        "6": 0.04,
+        "7": 0.04,
+        "18": 0.04,
+        "19": 0.04,
+        "20": 0.04,
+        "21": 0.04,
+        "22": 0.04,
+        "23": 0.04
+      }
+    },
+    "minute": {
+      "mode": 0,
+      "n_unique": 4,
+      "distribution": {
+        "0": 0.25,
+        "30": 0.25,
+        "45": 0.25,
+        "15": 0.25
+      }
+    },
+    "Skin_temperature": {
+      "mean": 11.33,
+      "median": 11.7,
+      "std": 12.81,
+      "min": -29.42,
+      "max": 38.77,
+      "range": 68.19,
+      "skewness": -0.1,
+      "kurtosis": -1.05,
+      "slope": -0.0001,
+      "volume": 15045.54,
+      "p5": -8.9,
+      "p10": -5.9,
+      "p25": 0.48,
+      "p75": 22.32,
+      "p90": 28.21,
+      "p95": 30.47
+    },
+    "Surface_pressure": {
+      "mean": 101.04,
+      "median": 101.05,
+      "std": 0.98,
+      "min": 98.45,
+      "max": 103.47,
+      "range": 5.02,
+      "skewness": 0.02,
+      "kurtosis": -0.87,
+      "slope": 0.0,
+      "volume": 742.16,
+      "p5": 99.49,
+      "p10": 99.72,
+      "p25": 100.26,
+      "p75": 101.8,
+      "p90": 102.33,
+      "p95": 102.59
+    },
+    "Surface_sensible_heat_flux": {
+      "mean": -34.77,
+      "median": 1.78,
+      "std": 80.63,
+      "min": -407.57,
+      "max": 604.89,
+      "range": 1012.46,
+      "skewness": -1.55,
+      "kurtosis": 1.89,
+      "slope": 0.0001,
+      "volume": 378521.11,
+      "p5": -214.31,
+      "p10": -161.28,
+      "p25": -68.06,
+      "p75": 14.6,
+      "p90": 30.39,
+      "p95": 40.27
+    },
+    "Total_cloud_cover": {
+      "mean": 53.05,
+      "median": 56.73,
+      "std": 49.38,
+      "min": 0.0,
+      "max": 730.25,
+      "range": 730.25,
+      "skewness": 2.18,
+      "kurtosis": 24.92,
+      "slope": -0.0001,
+      "volume": 212575.57,
+      "p5": 0.0,
+      "p10": 0.0,
+      "p25": 0.46,
+      "p75": 100.0,
+      "p90": 100.0,
+      "p95": 100.11
+    },
+    "Surface_net_solar_radiation": {
+      "mean": 151.9,
+      "median": 5.61,
+      "std": 216.31,
+      "min": 0.0,
+      "max": 802.31,
+      "range": 802.31,
+      "skewness": 1.26,
+      "kurtosis": 0.28,
+      "slope": -0.0007,
+      "volume": 932275.13,
+      "p5": 0.0,
+      "p10": 0.0,
+      "p25": 0.0,
+      "p75": 278.8,
+      "p90": 520.18,
+      "p95": 629.22
+    },
+    "Total_precipitation_4h_ahead": {
+      "mean": 0.0,
+      "median": -0.0,
+      "std": 0.0,
+      "min": -0.0,
+      "max": 0.05,
+      "range": 0.05,
+      "skewness": 10.37,
+      "kurtosis": 142.5,
+      "slope": -0.0,
+      "volume": 2.4,
+      "p5": -0.0,
+      "p10": -0.0,
+      "p25": -0.0,
+      "p75": 0.0,
+      "p90": 0.0,
+      "p95": 0.0
+    },
+    "10_metre_wind": {
+      "mean": 3.69,
+      "median": 3.41,
+      "std": 1.95,
+      "min": 0.01,
+      "max": 11.07,
+      "range": 11.06,
+      "skewness": 0.62,
+      "kurtosis": -0.07,
+      "slope": -0.0,
+      "volume": 9484.92,
+      "p5": 0.99,
+      "p10": 1.39,
+      "p25": 2.16,
+      "p75": 4.98,
+      "p90": 6.4,
+      "p95": 7.23
+    },
+    "Relative_humidity": {
+      "mean": 69.11,
+      "median": 71.16,
+      "std": 20.85,
+      "min": 10.3,
+      "max": 323.78,
+      "range": 313.47,
+      "skewness": 0.57,
+      "kurtosis": 9.52,
+      "slope": -0.0,
+      "volume": 70925.49,
+      "p5": 32.96,
+      "p10": 40.73,
+      "p25": 54.68,
+      "p75": 85.76,
+      "p90": 93.42,
+      "p95": 95.74
+    },
+    "is_special_workday": {
+      "mode": 0,
+      "n_unique": 2,
+      "distribution": {
+        "0": 0.98,
+        "1": 0.02
+      }
+    },
+    "is_special_holiday": {
+      "mode": 0,
+      "n_unique": 2,
+      "distribution": {
+        "0": 0.92,
+        "1": 0.08
+      }
+    },
+    "is_holiday": {
+      "mode": 0,
+      "n_unique": 2,
+      "distribution": {
+        "0": 0.68,
+        "1": 0.32
+      }
+    },
+    "is_workday": {
+      "mode": 1,
+      "n_unique": 2,
+      "distribution": {
+        "1": 0.68,
+        "0": 0.32
+      }
+    },
+    "day_of_week": {
+      "mode": 2,
+      "n_unique": 7,
+      "distribution": {
+        "2": 0.14,
+        "3": 0.14,
+        "4": 0.14,
+        "5": 0.14,
+        "6": 0.14,
+        "1": 0.14,
+        "0": 0.14
+      }
+    },
+    "pricing": {
+      "mode": 1,
+      "n_unique": 5,
+      "distribution": {
+        "1": 0.06,
+        "0": 0.05,
+        "2": 0.06
+      }
+    },
+    "load": {
+      "mean": 2427.81,
+      "median": 2186.86,
+      "std": 978.03,
+      "min": 825.0,
+      "max": 8374.48,
+      "range": 7549.48,
+      "skewness": 2.72,
+      "kurtosis": 8.42,
+      "slope": 0.0234,
+      "volume": 2433155.94,
+      "p5": 1584.58,
+      "p10": 1722.98,
+      "p25": 1928.24,
+      "p75": 2544.25,
+      "p90": 3189.62,
+      "p95": 4769.3
+    }
+  },
+  "segments": [
+    {
+      "id": 0,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 2.47,
+          "s": 2.83,
+          "sl": 0.0006
+        },
+        "Relative_humidity": {
+          "m": 48.75,
+          "s": 20.84,
+          "sl": -0.0141
+        },
+        "Surface_net_solar_radiation": {
+          "m": 188.49,
+          "s": 247.01,
+          "sl": 0.5512
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.39,
+          "s": 2.1,
+          "sl": 0.0061
+        },
+        "load": {
+          "m": 4417.52,
+          "s": 1040.24,
+          "sl": 1.6734
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4405.49,
+        "s": 951.26,
+        "sl": 12.5222
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.53,
+        "load_corr_Relative_humidity": -0.51,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 1,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 3.85,
+          "s": 4.38,
+          "sl": 0.0142
+        },
+        "Relative_humidity": {
+          "m": 49.44,
+          "s": 20.75,
+          "sl": 0.0838
+        },
+        "Surface_net_solar_radiation": {
+          "m": 194.68,
+          "s": 250.91,
+          "sl": 0.3585
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 5.1,
+          "s": 2.02,
+          "sl": 0.0037
+        },
+        "load": {
+          "m": 4442.37,
+          "s": 987.84,
+          "sl": 0.9172
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4232.57,
+        "s": 847.22,
+        "sl": 11.959
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.47,
+        "load_corr_Relative_humidity": -0.45,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 2,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 5.28,
+          "s": 5.44,
+          "sl": 0.0308
+        },
+        "Relative_humidity": {
+          "m": 50.12,
+          "s": 19.08,
+          "sl": 0.0282
+        },
+        "Surface_net_solar_radiation": {
+          "m": 189.52,
+          "s": 244.62,
+          "sl": 0.3254
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.4,
+          "s": 2.05,
+          "sl": -0.0003
+        },
+        "load": {
+          "m": 4389.28,
+          "s": 949.05,
+          "sl": 0.2445
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3939.98,
+        "s": 739.13,
+        "sl": 6.0726
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.41,
+        "load_corr_Relative_humidity": -0.35,
+        "load_corr_Surface_net_solar_radiation": 0.72,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 3,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 7.11,
+          "s": 5.54,
+          "sl": 0.0338
+        },
+        "Relative_humidity": {
+          "m": 53.65,
+          "s": 17.64,
+          "sl": -0.0964
+        },
+        "Surface_net_solar_radiation": {
+          "m": 186.09,
+          "s": 243.57,
+          "sl": 0.3893
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.36,
+          "s": 2.04,
+          "sl": -0.0079
+        },
+        "load": {
+          "m": 4267.16,
+          "s": 908.34,
+          "sl": -1.0541
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4231.38,
+        "s": 1223.13,
+        "sl": 27.3343
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.29,
+        "load_corr_Relative_humidity": -0.06,
+        "load_corr_Surface_net_solar_radiation": 0.6,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 4,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.32,
+          "s": 4.75,
+          "sl": 0.0024
+        },
+        "Relative_humidity": {
+          "m": 55.32,
+          "s": 20.22,
+          "sl": 0.0149
+        },
+        "Surface_net_solar_radiation": {
+          "m": 144.08,
+          "s": 218.76,
+          "sl": -0.107
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.1,
+          "s": 1.8,
+          "sl": -0.0058
+        },
+        "load": {
+          "m": 4202.35,
+          "s": 968.05,
+          "sl": 0.1086
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4350.16,
+        "s": 962.12,
+        "sl": 15.2784
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.41,
+        "load_corr_Relative_humidity": -0.1,
+        "load_corr_Surface_net_solar_radiation": 0.59,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 5,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 7.39,
+          "s": 4.93,
+          "sl": -0.0174
+        },
+        "Relative_humidity": {
+          "m": 57.73,
+          "s": 23.5,
+          "sl": 0.1034
+        },
+        "Surface_net_solar_radiation": {
+          "m": 150.55,
+          "s": 231.08,
+          "sl": 0.2435
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.55,
+          "s": 1.1,
+          "sl": 0.0042
+        },
+        "load": {
+          "m": 4188.52,
+          "s": 968.1,
+          "sl": 1.5765
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4413.22,
+        "s": 1038.69,
+        "sl": 19.1553
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.33,
+        "load_corr_Relative_humidity": -0.01,
+        "load_corr_Surface_net_solar_radiation": 0.56,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 6,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 5.99,
+          "s": 4.41,
+          "sl": -0.0184
+        },
+        "Relative_humidity": {
+          "m": 63.75,
+          "s": 22.0,
+          "sl": 0.0622
+        },
+        "Surface_net_solar_radiation": {
+          "m": 130.39,
+          "s": 207.91,
+          "sl": 0.1887
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.18,
+          "s": 1.23,
+          "sl": 0.0072
+        },
+        "load": {
+          "m": 4233.68,
+          "s": 1018.28,
+          "sl": 2.5623
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4344.95,
+        "s": 946.07,
+        "sl": 13.139
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.31,
+        "load_corr_Relative_humidity": -0.08,
+        "load_corr_Surface_net_solar_radiation": 0.56,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 7,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 5.47,
+          "s": 4.37,
+          "sl": 0.0084
+        },
+        "Relative_humidity": {
+          "m": 72.61,
+          "s": 20.42,
+          "sl": 0.0129
+        },
+        "Surface_net_solar_radiation": {
+          "m": 125.23,
+          "s": 196.96,
+          "sl": 0.5868
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.23,
+          "s": 1.34,
+          "sl": 0.0
+        },
+        "load": {
+          "m": 4334.93,
+          "s": 1046.23,
+          "sl": 1.5646
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4199.05,
+        "s": 895.34,
+        "sl": 13.6552
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.35,
+        "load_corr_Relative_humidity": -0.28,
+        "load_corr_Surface_net_solar_radiation": 0.61,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 8,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 6.37,
+          "s": 4.82,
+          "sl": 0.0293
+        },
+        "Relative_humidity": {
+          "m": 70.37,
+          "s": 24.16,
+          "sl": -0.0553
+        },
+        "Surface_net_solar_radiation": {
+          "m": 170.29,
+          "s": 231.41,
+          "sl": 0.4664
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.5,
+          "s": 1.43,
+          "sl": 0.0018
+        },
+        "load": {
+          "m": 4326.84,
+          "s": 961.37,
+          "sl": 0.4472
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4058.72,
+        "s": 833.47,
+        "sl": 11.9618
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.5,
+        "load_corr_Relative_humidity": -0.44,
+        "load_corr_Surface_net_solar_radiation": 0.69,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 9,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 7.98,
+          "s": 4.58,
+          "sl": 0.0261
+        },
+        "Relative_humidity": {
+          "m": 62.55,
+          "s": 25.77,
+          "sl": -0.1154
+        },
+        "Surface_net_solar_radiation": {
+          "m": 172.02,
+          "s": 232.82,
+          "sl": 0.7428
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.68,
+          "s": 1.68,
+          "sl": -0.0003
+        },
+        "load": {
+          "m": 4253.99,
+          "s": 937.82,
+          "sl": -0.2763
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3801.87,
+        "s": 728.0,
+        "sl": 7.7071
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.53,
+        "load_corr_Relative_humidity": -0.35,
+        "load_corr_Surface_net_solar_radiation": 0.64,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 10,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.78,
+          "s": 4.36,
+          "sl": 0.0035
+        },
+        "Relative_humidity": {
+          "m": 56.02,
+          "s": 28.27,
+          "sl": -0.161
+        },
+        "Surface_net_solar_radiation": {
+          "m": 200.33,
+          "s": 258.55,
+          "sl": 0.5733
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.31,
+          "s": 1.61,
+          "sl": 0.0013
+        },
+        "load": {
+          "m": 4101.15,
+          "s": 874.54,
+          "sl": -1.0022
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3982.28,
+        "s": 971.2,
+        "sl": 18.5633
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.75,
+        "load_corr_Relative_humidity": -0.48,
+        "load_corr_Surface_net_solar_radiation": 0.72,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 11,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.77,
+          "s": 4.08,
+          "sl": -0.0034
+        },
+        "Relative_humidity": {
+          "m": 51.04,
+          "s": 23.08,
+          "sl": -0.0285
+        },
+        "Surface_net_solar_radiation": {
+          "m": 210.34,
+          "s": 266.37,
+          "sl": 0.4609
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.5,
+          "s": 1.39,
+          "sl": -0.0019
+        },
+        "load": {
+          "m": 4010.48,
+          "s": 870.15,
+          "sl": -0.0752
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4182.8,
+        "s": 1023.76,
+        "sl": 19.1476
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.82,
+        "load_corr_Relative_humidity": -0.47,
+        "load_corr_Surface_net_solar_radiation": 0.68,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 12,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.49,
+          "s": 4.11,
+          "sl": 0.0031
+        },
+        "Relative_humidity": {
+          "m": 55.11,
+          "s": 21.83,
+          "sl": 0.1201
+        },
+        "Surface_net_solar_radiation": {
+          "m": 177.31,
+          "s": 243.76,
+          "sl": -0.0102
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.29,
+          "s": 1.41,
+          "sl": -0.0001
+        },
+        "load": {
+          "m": 4006.42,
+          "s": 903.77,
+          "sl": 1.4362
+        },
+        "solar_month": {
+          "mode": 3
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4113.17,
+        "s": 970.17,
+        "sl": 14.6441
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.44,
+        "load_corr_Surface_net_solar_radiation": 0.65,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 13,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.32,
+          "s": 3.54,
+          "sl": 0.0124
+        },
+        "Relative_humidity": {
+          "m": 62.54,
+          "s": 23.98,
+          "sl": 0.0952
+        },
+        "Surface_net_solar_radiation": {
+          "m": 158.1,
+          "s": 223.72,
+          "sl": -0.0144
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.52,
+          "s": 1.19,
+          "sl": 0.0046
+        },
+        "load": {
+          "m": 4020.03,
+          "s": 938.06,
+          "sl": 2.0462
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3431.43,
+        "s": 576.65,
+        "sl": -4.4845
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.63,
+        "load_corr_Relative_humidity": -0.16,
+        "load_corr_Surface_net_solar_radiation": 0.53,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 14,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.66,
+          "s": 3.66,
+          "sl": 0.0076
+        },
+        "Relative_humidity": {
+          "m": 58.44,
+          "s": 26.97,
+          "sl": -0.1241
+        },
+        "Surface_net_solar_radiation": {
+          "m": 152.95,
+          "s": 219.64,
+          "sl": 0.3422
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.91,
+          "s": 1.2,
+          "sl": 0.0046
+        },
+        "load": {
+          "m": 3927.42,
+          "s": 947.25,
+          "sl": -0.9339
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3374.51,
+        "s": 786.65,
+        "sl": 15.5352
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.63,
+        "load_corr_Relative_humidity": -0.04,
+        "load_corr_Surface_net_solar_radiation": 0.53,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 15,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.69,
+          "s": 3.9,
+          "sl": 0.0017
+        },
+        "Relative_humidity": {
+          "m": 51.97,
+          "s": 28.73,
+          "sl": -0.1875
+        },
+        "Surface_net_solar_radiation": {
+          "m": 153.27,
+          "s": 220.48,
+          "sl": 0.785
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.48,
+          "s": 1.65,
+          "sl": -0.0055
+        },
+        "load": {
+          "m": 3775.48,
+          "s": 932.49,
+          "sl": -2.3332
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3683.69,
+        "s": 839.25,
+        "sl": 14.514
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.61,
+        "load_corr_Relative_humidity": 0.03,
+        "load_corr_Surface_net_solar_radiation": 0.5,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 16,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 8.76,
+          "s": 3.93,
+          "sl": 0.0039
+        },
+        "Relative_humidity": {
+          "m": 43.96,
+          "s": 23.66,
+          "sl": -0.084
+        },
+        "Surface_net_solar_radiation": {
+          "m": 184.33,
+          "s": 247.6,
+          "sl": 0.635
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.31,
+          "s": 1.6,
+          "sl": -0.0077
+        },
+        "load": {
+          "m": 3650.7,
+          "s": 853.93,
+          "sl": -0.6856
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3857.5,
+        "s": 927.65,
+        "sl": 16.0942
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.63,
+        "load_corr_Relative_humidity": -0.13,
+        "load_corr_Surface_net_solar_radiation": 0.62,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 17,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 9.13,
+          "s": 4.35,
+          "sl": 0.0143
+        },
+        "Relative_humidity": {
+          "m": 40.73,
+          "s": 15.67,
+          "sl": 0.1088
+        },
+        "Surface_net_solar_radiation": {
+          "m": 201.6,
+          "s": 260.96,
+          "sl": 0.4645
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.88,
+          "s": 1.56,
+          "sl": -0.004
+        },
+        "load": {
+          "m": 3586.78,
+          "s": 813.75,
+          "sl": 2.2011
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3933.31,
+        "s": 959.7,
+        "sl": 17.3893
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.75,
+        "load_corr_Relative_humidity": -0.18,
+        "load_corr_Surface_net_solar_radiation": 0.69,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 18,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 10.1,
+          "s": 4.87,
+          "sl": 0.0209
+        },
+        "Relative_humidity": {
+          "m": 49.01,
+          "s": 15.06,
+          "sl": 0.0721
+        },
+        "Surface_net_solar_radiation": {
+          "m": 200.87,
+          "s": 256.01,
+          "sl": 0.3748
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.25,
+          "s": 1.31,
+          "sl": 0.0017
+        },
+        "load": {
+          "m": 3712.25,
+          "s": 903.57,
+          "sl": 2.7995
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3998.33,
+        "s": 934.56,
+        "sl": 15.6521
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.84,
+        "load_corr_Relative_humidity": -0.42,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 19,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 10.91,
+          "s": 4.51,
+          "sl": 0.0143
+        },
+        "Relative_humidity": {
+          "m": 50.42,
+          "s": 14.91,
+          "sl": -0.0357
+        },
+        "Surface_net_solar_radiation": {
+          "m": 201.85,
+          "s": 256.18,
+          "sl": 0.4643
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.36,
+          "s": 1.26,
+          "sl": -0.0026
+        },
+        "load": {
+          "m": 3868.21,
+          "s": 920.39,
+          "sl": 1.9903
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3981.22,
+        "s": 911.84,
+        "sl": 14.4637
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.57,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 20,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 10.69,
+          "s": 4.53,
+          "sl": -0.0022
+        },
+        "Relative_humidity": {
+          "m": 50.7,
+          "s": 15.48,
+          "sl": -0.0719
+        },
+        "Surface_net_solar_radiation": {
+          "m": 200.32,
+          "s": 252.55,
+          "sl": 0.4382
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.68,
+          "s": 1.38,
+          "sl": 0.0036
+        },
+        "load": {
+          "m": 3942.59,
+          "s": 931.54,
+          "sl": 1.4196
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4001.01,
+        "s": 883.89,
+        "sl": 14.1668
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.76,
+        "load_corr_Relative_humidity": -0.57,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 21,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 10.49,
+          "s": 4.37,
+          "sl": -0.0036
+        },
+        "Relative_humidity": {
+          "m": 53.81,
+          "s": 17.57,
+          "sl": 0.0278
+        },
+        "Surface_net_solar_radiation": {
+          "m": 202.84,
+          "s": 254.98,
+          "sl": 0.4882
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.17,
+          "s": 1.5,
+          "sl": 0.0098
+        },
+        "load": {
+          "m": 3978.47,
+          "s": 919.7,
+          "sl": 1.1452
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3983.59,
+        "s": 911.8,
+        "sl": 15.0462
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.42,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": true,
+        "uniform_day_type": "workday",
+        "contains_holiday": false,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 22,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 9.93,
+          "s": 3.44,
+          "sl": 0.0021
+        },
+        "Relative_humidity": {
+          "m": 59.9,
+          "s": 20.43,
+          "sl": 0.1356
+        },
+        "Surface_net_solar_radiation": {
+          "m": 191.9,
+          "s": 242.65,
+          "sl": 0.2207
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.66,
+          "s": 1.26,
+          "sl": 0.007
+        },
+        "load": {
+          "m": 3991.04,
+          "s": 907.17,
+          "sl": 0.903
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4028.66,
+        "s": 874.35,
+        "sl": 7.157
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.32,
+        "load_corr_Surface_net_solar_radiation": 0.73,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 23,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 9.85,
+          "s": 2.98,
+          "sl": 0.0129
+        },
+        "Relative_humidity": {
+          "m": 72.67,
+          "s": 18.8,
+          "sl": 0.1287
+        },
+        "Surface_net_solar_radiation": {
+          "m": 170.25,
+          "s": 220.69,
+          "sl": 0.1013
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 5.07,
+          "s": 0.67,
+          "sl": -0.0017
+        },
+        "load": {
+          "m": 3998.62,
+          "s": 892.31,
+          "sl": 0.9162
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3713.58,
+        "s": 776.29,
+        "sl": 10.1074
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.73,
+        "load_corr_Relative_humidity": -0.37,
+        "load_corr_Surface_net_solar_radiation": 0.7,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 24,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 10.5,
+          "s": 2.63,
+          "sl": 0.0075
+        },
+        "Relative_humidity": {
+          "m": 83.12,
+          "s": 11.63,
+          "sl": 0.0503
+        },
+        "Surface_net_solar_radiation": {
+          "m": 138.17,
+          "s": 191.39,
+          "sl": -0.149
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 5.06,
+          "s": 0.7,
+          "sl": -0.0028
+        },
+        "load": {
+          "m": 3931.71,
+          "s": 869.06,
+          "sl": -0.0719
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3760.45,
+        "s": 982.73,
+        "sl": 18.3583
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.64,
+        "load_corr_Relative_humidity": -0.61,
+        "load_corr_Surface_net_solar_radiation": 0.7,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 25,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 11.54,
+          "s": 3.1,
+          "sl": 0.0162
+        },
+        "Relative_humidity": {
+          "m": 86.77,
+          "s": 10.97,
+          "sl": -0.0048
+        },
+        "Surface_net_solar_radiation": {
+          "m": 123.86,
+          "s": 167.36,
+          "sl": 0.2327
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.57,
+          "s": 0.86,
+          "sl": -0.0028
+        },
+        "load": {
+          "m": 3871.57,
+          "s": 896.41,
+          "sl": -0.1698
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3864.59,
+        "s": 860.14,
+        "sl": 13.7342
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.58,
+        "load_corr_Relative_humidity": -0.54,
+        "load_corr_Surface_net_solar_radiation": 0.68,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 26,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 12.93,
+          "s": 3.56,
+          "sl": 0.021
+        },
+        "Relative_humidity": {
+          "m": 82.93,
+          "s": 18.49,
+          "sl": -0.0985
+        },
+        "Surface_net_solar_radiation": {
+          "m": 144.07,
+          "s": 205.12,
+          "sl": 0.6845
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.82,
+          "s": 1.42,
+          "sl": -0.0079
+        },
+        "load": {
+          "m": 3841.82,
+          "s": 881.38,
+          "sl": 0.3362
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3854.88,
+        "s": 857.74,
+        "sl": 13.561
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.64,
+        "load_corr_Relative_humidity": -0.45,
+        "load_corr_Surface_net_solar_radiation": 0.69,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 27,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.3,
+          "s": 3.53,
+          "sl": 0.0104
+        },
+        "Relative_humidity": {
+          "m": 72.81,
+          "s": 22.14,
+          "sl": -0.1567
+        },
+        "Surface_net_solar_radiation": {
+          "m": 162.87,
+          "s": 223.9,
+          "sl": 0.8122
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.33,
+          "s": 1.45,
+          "sl": -0.0071
+        },
+        "load": {
+          "m": 3798.37,
+          "s": 871.26,
+          "sl": 1.3869
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3861.4,
+        "s": 876.46,
+        "sl": 14.4216
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.74,
+        "load_corr_Relative_humidity": -0.5,
+        "load_corr_Surface_net_solar_radiation": 0.74,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 28,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.97,
+          "s": 4.19,
+          "sl": 0.0013
+        },
+        "Relative_humidity": {
+          "m": 64.97,
+          "s": 20.59,
+          "sl": -0.1235
+        },
+        "Surface_net_solar_radiation": {
+          "m": 202.39,
+          "s": 253.36,
+          "sl": 0.6189
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 2.82,
+          "s": 1.21,
+          "sl": -0.001
+        },
+        "load": {
+          "m": 3835.33,
+          "s": 893.3,
+          "sl": 1.2249
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3853.85,
+        "s": 887.66,
+        "sl": 14.0199
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.75,
+        "load_corr_Relative_humidity": -0.59,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 29,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.98,
+          "s": 4.05,
+          "sl": 0.0024
+        },
+        "Relative_humidity": {
+          "m": 58.28,
+          "s": 16.87,
+          "sl": -0.0358
+        },
+        "Surface_net_solar_radiation": {
+          "m": 211.53,
+          "s": 257.69,
+          "sl": 0.3653
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 2.88,
+          "s": 1.19,
+          "sl": 0.0068
+        },
+        "load": {
+          "m": 3858.68,
+          "s": 867.18,
+          "sl": 0.8457
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3782.78,
+        "s": 824.29,
+        "sl": 11.7942
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.75,
+        "load_corr_Relative_humidity": -0.67,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 30,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.41,
+          "s": 3.72,
+          "sl": 0.0081
+        },
+        "Relative_humidity": {
+          "m": 57.04,
+          "s": 13.04,
+          "sl": 0.0272
+        },
+        "Surface_net_solar_radiation": {
+          "m": 197.24,
+          "s": 238.82,
+          "sl": 0.2755
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.18,
+          "s": 1.05,
+          "sl": 0.0034
+        },
+        "load": {
+          "m": 3838.23,
+          "s": 859.09,
+          "sl": 0.6219
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3545.14,
+        "s": 684.94,
+        "sl": 6.5781
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.71,
+        "load_corr_Surface_net_solar_radiation": 0.76,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 31,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.65,
+          "s": 3.96,
+          "sl": 0.0046
+        },
+        "Relative_humidity": {
+          "m": 63.21,
+          "s": 15.64,
+          "sl": 0.0432
+        },
+        "Surface_net_solar_radiation": {
+          "m": 193.1,
+          "s": 233.55,
+          "sl": 0.2633
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.07,
+          "s": 1.18,
+          "sl": -0.0021
+        },
+        "load": {
+          "m": 3760.79,
+          "s": 829.08,
+          "sl": -0.2646
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3695.7,
+        "s": 947.95,
+        "sl": 18.3577
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.78,
+        "load_corr_Relative_humidity": -0.76,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 32,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.58,
+          "s": 3.22,
+          "sl": 0.0018
+        },
+        "Relative_humidity": {
+          "m": 68.02,
+          "s": 16.82,
+          "sl": 0.0516
+        },
+        "Surface_net_solar_radiation": {
+          "m": 192.6,
+          "s": 232.72,
+          "sl": 0.5095
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.17,
+          "s": 1.15,
+          "sl": -0.0021
+        },
+        "load": {
+          "m": 3719.37,
+          "s": 846.48,
+          "sl": 0.0975
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3866.93,
+        "s": 901.81,
+        "sl": 15.7473
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.73,
+        "load_corr_Relative_humidity": -0.67,
+        "load_corr_Surface_net_solar_radiation": 0.74,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 33,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 12.86,
+          "s": 3.13,
+          "sl": -0.0019
+        },
+        "Relative_humidity": {
+          "m": 74.26,
+          "s": 15.31,
+          "sl": 0.0597
+        },
+        "Surface_net_solar_radiation": {
+          "m": 179.78,
+          "s": 230.05,
+          "sl": 0.3193
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.3,
+          "s": 1.35,
+          "sl": 0.0059
+        },
+        "load": {
+          "m": 3722.64,
+          "s": 850.72,
+          "sl": 1.2134
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3852.6,
+        "s": 888.95,
+        "sl": 14.3989
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.74,
+        "load_corr_Relative_humidity": -0.63,
+        "load_corr_Surface_net_solar_radiation": 0.74,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 34,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 12.65,
+          "s": 3.75,
+          "sl": 0.0001
+        },
+        "Relative_humidity": {
+          "m": 76.41,
+          "s": 15.32,
+          "sl": -0.0238
+        },
+        "Surface_net_solar_radiation": {
+          "m": 195.64,
+          "s": 251.56,
+          "sl": 0.4563
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.44,
+          "s": 1.38,
+          "sl": 0.0066
+        },
+        "load": {
+          "m": 3740.09,
+          "s": 868.46,
+          "sl": 1.9286
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3880.41,
+        "s": 877.71,
+        "sl": 14.3427
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.75,
+        "load_corr_Relative_humidity": -0.69,
+        "load_corr_Surface_net_solar_radiation": 0.75,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 35,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 12.47,
+          "s": 3.54,
+          "sl": 0.0047
+        },
+        "Relative_humidity": {
+          "m": 74.67,
+          "s": 14.92,
+          "sl": -0.0575
+        },
+        "Surface_net_solar_radiation": {
+          "m": 205.51,
+          "s": 263.1,
+          "sl": 0.5205
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.23,
+          "s": 1.29,
+          "sl": 0.0062
+        },
+        "load": {
+          "m": 3823.91,
+          "s": 904.05,
+          "sl": 1.509
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3914.75,
+        "s": 887.43,
+        "sl": 15.2729
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.79,
+        "load_corr_Relative_humidity": -0.66,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 36,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 12.44,
+          "s": 3.43,
+          "sl": 0.0105
+        },
+        "Relative_humidity": {
+          "m": 71.33,
+          "s": 14.84,
+          "sl": -0.0784
+        },
+        "Surface_net_solar_radiation": {
+          "m": 209.34,
+          "s": 267.18,
+          "sl": 0.7134
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.7,
+          "s": 1.12,
+          "sl": 0.0041
+        },
+        "load": {
+          "m": 3878.67,
+          "s": 885.83,
+          "sl": 1.1009
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3843.55,
+        "s": 839.27,
+        "sl": 13.2223
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.8,
+        "load_corr_Relative_humidity": -0.63,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 37,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 12.73,
+          "s": 3.69,
+          "sl": 0.0063
+        },
+        "Relative_humidity": {
+          "m": 70.0,
+          "s": 14.37,
+          "sl": 0.0022
+        },
+        "Surface_net_solar_radiation": {
+          "m": 233.08,
+          "s": 279.39,
+          "sl": 0.5096
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.74,
+          "s": 0.98,
+          "sl": 0.0029
+        },
+        "load": {
+          "m": 3872.83,
+          "s": 870.59,
+          "sl": 0.9013
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3882.42,
+        "s": 872.94,
+        "sl": 13.9772
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.81,
+        "load_corr_Relative_humidity": -0.73,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 38,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.36,
+          "s": 3.7,
+          "sl": 0.0119
+        },
+        "Relative_humidity": {
+          "m": 71.39,
+          "s": 14.79,
+          "sl": 0.0205
+        },
+        "Surface_net_solar_radiation": {
+          "m": 224.57,
+          "s": 271.02,
+          "sl": 0.3826
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.43,
+          "s": 1.36,
+          "sl": -0.009
+        },
+        "load": {
+          "m": 3880.28,
+          "s": 866.48,
+          "sl": 0.824
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3824.21,
+        "s": 890.37,
+        "sl": 14.7929
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.78,
+        "load_corr_Relative_humidity": -0.79,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 39,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.14,
+          "s": 4.14,
+          "sl": 0.0165
+        },
+        "Relative_humidity": {
+          "m": 70.42,
+          "s": 17.23,
+          "sl": -0.0228
+        },
+        "Surface_net_solar_radiation": {
+          "m": 226.68,
+          "s": 274.38,
+          "sl": 0.4253
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.84,
+          "s": 1.47,
+          "sl": -0.0079
+        },
+        "load": {
+          "m": 3866.23,
+          "s": 870.02,
+          "sl": 0.6674
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3795.52,
+        "s": 829.71,
+        "sl": 12.6935
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.74,
+        "load_corr_Relative_humidity": -0.69,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 40,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.29,
+          "s": 4.73,
+          "sl": -0.0012
+        },
+        "Relative_humidity": {
+          "m": 67.14,
+          "s": 20.39,
+          "sl": -0.1216
+        },
+        "Surface_net_solar_radiation": {
+          "m": 199.18,
+          "s": 249.17,
+          "sl": 0.1347
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.95,
+          "s": 1.59,
+          "sl": 0.0032
+        },
+        "load": {
+          "m": 3836.42,
+          "s": 855.64,
+          "sl": 0.6568
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3022.47,
+        "s": 538.48,
+        "sl": -4.8943
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.58,
+        "load_corr_Relative_humidity": -0.4,
+        "load_corr_Surface_net_solar_radiation": 0.59,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 41,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.68,
+          "s": 5.34,
+          "sl": -0.0017
+        },
+        "Relative_humidity": {
+          "m": 58.04,
+          "s": 22.47,
+          "sl": -0.139
+        },
+        "Surface_net_solar_radiation": {
+          "m": 199.99,
+          "s": 251.2,
+          "sl": 0.4306
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.42,
+          "s": 1.63,
+          "sl": 0.0026
+        },
+        "load": {
+          "m": 3631.15,
+          "s": 867.83,
+          "sl": -1.9761
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 2830.94,
+        "s": 633.69,
+        "sl": 9.9838
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.48,
+        "load_corr_Relative_humidity": -0.23,
+        "load_corr_Surface_net_solar_radiation": 0.51,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 42,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.07,
+          "s": 5.56,
+          "sl": 0.0128
+        },
+        "Relative_humidity": {
+          "m": 47.75,
+          "s": 19.58,
+          "sl": -0.1148
+        },
+        "Surface_net_solar_radiation": {
+          "m": 211.52,
+          "s": 263.81,
+          "sl": 0.5763
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.35,
+          "s": 1.72,
+          "sl": -0.0046
+        },
+        "load": {
+          "m": 3368.29,
+          "s": 859.72,
+          "sl": -3.156
+        },
+        "solar_month": {
+          "mode": 4
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3073.47,
+        "s": 709.68,
+        "sl": 12.3077
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.46,
+        "load_corr_Relative_humidity": -0.36,
+        "load_corr_Surface_net_solar_radiation": 0.52,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 43,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.54,
+          "s": 5.25,
+          "sl": 0.0207
+        },
+        "Relative_humidity": {
+          "m": 45.81,
+          "s": 15.76,
+          "sl": -0.0054
+        },
+        "Surface_net_solar_radiation": {
+          "m": 213.61,
+          "s": 265.97,
+          "sl": 0.7829
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.46,
+          "s": 1.58,
+          "sl": -0.0066
+        },
+        "load": {
+          "m": 3180.6,
+          "s": 775.74,
+          "sl": -1.8323
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3329.87,
+        "s": 813.84,
+        "sl": 15.448
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.42,
+        "load_corr_Relative_humidity": -0.47,
+        "load_corr_Surface_net_solar_radiation": 0.51,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 44,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.6,
+          "s": 4.74,
+          "sl": 0.0039
+        },
+        "Relative_humidity": {
+          "m": 48.04,
+          "s": 18.27,
+          "sl": 0.0501
+        },
+        "Surface_net_solar_radiation": {
+          "m": 229.01,
+          "s": 276.3,
+          "sl": 0.3299
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 2.84,
+          "s": 0.98,
+          "sl": 0.0035
+        },
+        "load": {
+          "m": 3064.19,
+          "s": 701.8,
+          "sl": 1.6506
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3520.13,
+        "s": 854.74,
+        "sl": 15.2211
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.46,
+        "load_corr_Relative_humidity": -0.19,
+        "load_corr_Surface_net_solar_radiation": 0.47,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 45,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.5,
+          "s": 3.72,
+          "sl": -0.0042
+        },
+        "Relative_humidity": {
+          "m": 57.78,
+          "s": 21.91,
+          "sl": 0.1276
+        },
+        "Surface_net_solar_radiation": {
+          "m": 184.36,
+          "s": 249.64,
+          "sl": -0.2147
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 2.87,
+          "s": 1.09,
+          "sl": 0.0019
+        },
+        "load": {
+          "m": 3188.6,
+          "s": 798.73,
+          "sl": 3.0969
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3722.15,
+        "s": 1003.1,
+        "sl": 19.3444
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.43,
+        "load_corr_Relative_humidity": -0.12,
+        "load_corr_Surface_net_solar_radiation": 0.53,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 46,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 13.65,
+          "s": 2.66,
+          "sl": 0.0008
+        },
+        "Relative_humidity": {
+          "m": 67.97,
+          "s": 17.89,
+          "sl": 0.0662
+        },
+        "Surface_net_solar_radiation": {
+          "m": 155.52,
+          "s": 218.42,
+          "sl": -0.138
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.26,
+          "s": 1.24,
+          "sl": 0.0021
+        },
+        "load": {
+          "m": 3411.41,
+          "s": 881.74,
+          "sl": 3.0599
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3802.26,
+        "s": 911.61,
+        "sl": 16.2787
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.65,
+        "load_corr_Relative_humidity": -0.48,
+        "load_corr_Surface_net_solar_radiation": 0.65,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 47,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.1,
+          "s": 2.76,
+          "sl": 0.0068
+        },
+        "Relative_humidity": {
+          "m": 70.48,
+          "s": 20.14,
+          "sl": -0.0053
+        },
+        "Surface_net_solar_radiation": {
+          "m": 151.64,
+          "s": 207.95,
+          "sl": 0.4896
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.33,
+          "s": 1.61,
+          "sl": 0.005
+        },
+        "load": {
+          "m": 3593.6,
+          "s": 913.81,
+          "sl": 2.6169
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3826.55,
+        "s": 915.47,
+        "sl": 16.3697
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.69,
+        "load_corr_Relative_humidity": -0.63,
+        "load_corr_Surface_net_solar_radiation": 0.73,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 48,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.38,
+          "s": 3.35,
+          "sl": 0.0095
+        },
+        "Relative_humidity": {
+          "m": 68.84,
+          "s": 20.19,
+          "sl": -0.1077
+        },
+        "Surface_net_solar_radiation": {
+          "m": 165.36,
+          "s": 229.39,
+          "sl": 0.9895
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.23,
+          "s": 1.69,
+          "sl": 0.0023
+        },
+        "load": {
+          "m": 3717.77,
+          "s": 927.02,
+          "sl": 2.026
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3876.84,
+        "s": 925.16,
+        "sl": 16.7852
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.68,
+        "load_corr_Relative_humidity": -0.61,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 49,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 14.93,
+          "s": 3.72,
+          "sl": 0.0128
+        },
+        "Relative_humidity": {
+          "m": 60.96,
+          "s": 18.8,
+          "sl": -0.1079
+        },
+        "Surface_net_solar_radiation": {
+          "m": 211.67,
+          "s": 261.12,
+          "sl": 0.8016
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.55,
+          "s": 1.75,
+          "sl": 0.0014
+        },
+        "load": {
+          "m": 3806.95,
+          "s": 937.57,
+          "sl": 1.5515
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3939.25,
+        "s": 928.78,
+        "sl": 16.5235
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.78,
+        "load_corr_Relative_humidity": -0.65,
+        "load_corr_Surface_net_solar_radiation": 0.8,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 50,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 15.1,
+          "s": 3.72,
+          "sl": 0.0008
+        },
+        "Relative_humidity": {
+          "m": 59.5,
+          "s": 17.83,
+          "sl": -0.0115
+        },
+        "Surface_net_solar_radiation": {
+          "m": 241.46,
+          "s": 281.85,
+          "sl": 0.5581
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.16,
+          "s": 1.95,
+          "sl": 0.0101
+        },
+        "load": {
+          "m": 3861.22,
+          "s": 918.18,
+          "sl": 1.4809
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3956.52,
+        "s": 904.17,
+        "sl": 15.808
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.67,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": true,
+        "uniform_day_type": "workday",
+        "contains_holiday": false,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 51,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 15.25,
+          "s": 3.59,
+          "sl": 0.006
+        },
+        "Relative_humidity": {
+          "m": 59.75,
+          "s": 17.7,
+          "sl": 0.0435
+        },
+        "Surface_net_solar_radiation": {
+          "m": 225.31,
+          "s": 273.6,
+          "sl": 0.234
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.5,
+          "s": 1.82,
+          "sl": 0.0097
+        },
+        "load": {
+          "m": 3899.79,
+          "s": 916.3,
+          "sl": 1.4649
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3741.95,
+        "s": 733.06,
+        "sl": 8.5565
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.71,
+        "load_corr_Relative_humidity": -0.6,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 52,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 15.74,
+          "s": 3.46,
+          "sl": 0.0103
+        },
+        "Relative_humidity": {
+          "m": 59.03,
+          "s": 18.71,
+          "sl": -0.0236
+        },
+        "Surface_net_solar_radiation": {
+          "m": 226.04,
+          "s": 273.74,
+          "sl": 0.3989
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.28,
+          "s": 2.02,
+          "sl": -0.0062
+        },
+        "load": {
+          "m": 3878.64,
+          "s": 877.19,
+          "sl": 0.5227
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3888.61,
+        "s": 1021.06,
+        "sl": 21.7044
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.66,
+        "load_corr_Relative_humidity": -0.5,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 53,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 16.28,
+          "s": 3.62,
+          "sl": 0.0182
+        },
+        "Relative_humidity": {
+          "m": 57.46,
+          "s": 19.81,
+          "sl": -0.1147
+        },
+        "Surface_net_solar_radiation": {
+          "m": 227.67,
+          "s": 275.54,
+          "sl": 0.5696
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.82,
+          "s": 2.29,
+          "sl": -0.0142
+        },
+        "load": {
+          "m": 3881.58,
+          "s": 903.2,
+          "sl": 0.62
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4076.92,
+        "s": 963.95,
+        "sl": 17.7471
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.66,
+        "load_corr_Relative_humidity": -0.53,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 54,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 16.86,
+          "s": 3.65,
+          "sl": 0.0066
+        },
+        "Relative_humidity": {
+          "m": 55.62,
+          "s": 19.01,
+          "sl": -0.0424
+        },
+        "Surface_net_solar_radiation": {
+          "m": 227.07,
+          "s": 274.46,
+          "sl": 0.7206
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.7,
+          "s": 2.15,
+          "sl": 0.0029
+        },
+        "load": {
+          "m": 3916.0,
+          "s": 916.42,
+          "sl": 1.493
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4064.69,
+        "s": 935.55,
+        "sl": 15.0142
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.62,
+        "load_corr_Relative_humidity": -0.56,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 55,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 16.57,
+          "s": 3.65,
+          "sl": -0.0037
+        },
+        "Relative_humidity": {
+          "m": 50.88,
+          "s": 17.74,
+          "sl": -0.008
+        },
+        "Surface_net_solar_radiation": {
+          "m": 248.0,
+          "s": 292.34,
+          "sl": 0.5012
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.04,
+          "s": 2.51,
+          "sl": 0.0185
+        },
+        "load": {
+          "m": 3943.04,
+          "s": 926.58,
+          "sl": 2.114
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4107.91,
+        "s": 950.22,
+        "sl": 17.5306
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.71,
+        "load_corr_Relative_humidity": -0.54,
+        "load_corr_Surface_net_solar_radiation": 0.8,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 56,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 16.39,
+          "s": 4.12,
+          "sl": -0.0011
+        },
+        "Relative_humidity": {
+          "m": 47.36,
+          "s": 17.08,
+          "sl": -0.0533
+        },
+        "Surface_net_solar_radiation": {
+          "m": 247.29,
+          "s": 292.18,
+          "sl": 0.4879
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.39,
+          "s": 2.34,
+          "sl": 0.0061
+        },
+        "load": {
+          "m": 4034.53,
+          "s": 968.25,
+          "sl": 1.7554
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4109.79,
+        "s": 977.38,
+        "sl": 17.338
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.73,
+        "load_corr_Relative_humidity": -0.48,
+        "load_corr_Surface_net_solar_radiation": 0.82,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 57,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 16.4,
+          "s": 4.08,
+          "sl": 0.0121
+        },
+        "Relative_humidity": {
+          "m": 51.29,
+          "s": 17.54,
+          "sl": -0.0332
+        },
+        "Surface_net_solar_radiation": {
+          "m": 238.63,
+          "s": 283.98,
+          "sl": 0.3967
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 5.26,
+          "s": 1.77,
+          "sl": -0.0023
+        },
+        "load": {
+          "m": 4089.83,
+          "s": 953.35,
+          "sl": 1.1951
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4070.79,
+        "s": 893.13,
+        "sl": 14.001
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.72,
+        "load_corr_Relative_humidity": -0.47,
+        "load_corr_Surface_net_solar_radiation": 0.81,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 58,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 17.17,
+          "s": 4.0,
+          "sl": 0.0178
+        },
+        "Relative_humidity": {
+          "m": 52.83,
+          "s": 18.42,
+          "sl": 0.0697
+        },
+        "Surface_net_solar_radiation": {
+          "m": 235.62,
+          "s": 280.6,
+          "sl": 0.4112
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 5.36,
+          "s": 1.8,
+          "sl": 0.0025
+        },
+        "load": {
+          "m": 4088.3,
+          "s": 936.11,
+          "sl": 1.0178
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3689.53,
+        "s": 729.83,
+        "sl": 8.0762
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.69,
+        "load_corr_Relative_humidity": -0.48,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 59,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 17.6,
+          "s": 3.81,
+          "sl": 0.0073
+        },
+        "Relative_humidity": {
+          "m": 59.68,
+          "s": 17.32,
+          "sl": 0.1218
+        },
+        "Surface_net_solar_radiation": {
+          "m": 234.98,
+          "s": 275.57,
+          "sl": 0.4824
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 5.45,
+          "s": 1.62,
+          "sl": 0.0117
+        },
+        "load": {
+          "m": 3994.5,
+          "s": 906.76,
+          "sl": -0.3741
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3815.62,
+        "s": 1084.98,
+        "sl": 24.3051
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.53,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 60,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.3,
+          "s": 2.92,
+          "sl": 0.0045
+        },
+        "Relative_humidity": {
+          "m": 70.33,
+          "s": 12.68,
+          "sl": 0.0512
+        },
+        "Surface_net_solar_radiation": {
+          "m": 228.26,
+          "s": 269.5,
+          "sl": 0.4784
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 5.38,
+          "s": 1.74,
+          "sl": -0.0065
+        },
+        "load": {
+          "m": 3921.43,
+          "s": 943.23,
+          "sl": -0.2386
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4103.92,
+        "s": 917.34,
+        "sl": 16.6669
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.83,
+        "load_corr_Relative_humidity": -0.69,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 61,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.32,
+          "s": 2.69,
+          "sl": 0.0033
+        },
+        "Relative_humidity": {
+          "m": 76.13,
+          "s": 12.43,
+          "sl": 0.0273
+        },
+        "Surface_net_solar_radiation": {
+          "m": 220.73,
+          "s": 263.47,
+          "sl": 0.298
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.81,
+          "s": 1.96,
+          "sl": -0.0114
+        },
+        "load": {
+          "m": 3919.97,
+          "s": 927.86,
+          "sl": 1.2053
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4126.56,
+        "s": 938.73,
+        "sl": 16.6305
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.8,
+        "load_corr_Relative_humidity": -0.74,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 62,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 17.85,
+          "s": 2.63,
+          "sl": 0.0046
+        },
+        "Relative_humidity": {
+          "m": 80.25,
+          "s": 12.16,
+          "sl": 0.014
+        },
+        "Surface_net_solar_radiation": {
+          "m": 213.93,
+          "s": 258.01,
+          "sl": 0.3094
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.42,
+          "s": 1.84,
+          "sl": -0.0058
+        },
+        "load": {
+          "m": 3933.91,
+          "s": 941.51,
+          "sl": 2.5881
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4154.48,
+        "s": 977.75,
+        "sl": 18.0853
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.81,
+        "load_corr_Relative_humidity": -0.81,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 63,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.13,
+          "s": 2.92,
+          "sl": 0.0001
+        },
+        "Relative_humidity": {
+          "m": 81.48,
+          "s": 12.64,
+          "sl": -0.0099
+        },
+        "Surface_net_solar_radiation": {
+          "m": 214.76,
+          "s": 258.58,
+          "sl": 0.5542
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.92,
+          "s": 1.29,
+          "sl": 0.0072
+        },
+        "load": {
+          "m": 4050.15,
+          "s": 987.49,
+          "sl": 2.1974
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4154.24,
+        "s": 936.44,
+        "sl": 16.4952
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.8,
+        "load_corr_Relative_humidity": -0.88,
+        "load_corr_Surface_net_solar_radiation": 0.82,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 64,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.27,
+          "s": 3.08,
+          "sl": 0.0097
+        },
+        "Relative_humidity": {
+          "m": 81.23,
+          "s": 12.01,
+          "sl": -0.0373
+        },
+        "Surface_net_solar_radiation": {
+          "m": 215.78,
+          "s": 255.95,
+          "sl": 0.5924
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.9,
+          "s": 1.24,
+          "sl": -0.0004
+        },
+        "load": {
+          "m": 4134.8,
+          "s": 939.36,
+          "sl": 1.2352
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3981.82,
+        "s": 845.96,
+        "sl": 11.736
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.78,
+        "load_corr_Relative_humidity": -0.88,
+        "load_corr_Surface_net_solar_radiation": 0.8,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 65,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.07,
+          "s": 2.96,
+          "sl": 0.0065
+        },
+        "Relative_humidity": {
+          "m": 82.15,
+          "s": 11.44,
+          "sl": -0.0164
+        },
+        "Surface_net_solar_radiation": {
+          "m": 205.72,
+          "s": 247.86,
+          "sl": 0.2295
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.02,
+          "s": 1.25,
+          "sl": -0.0036
+        },
+        "load": {
+          "m": 4104.27,
+          "s": 925.13,
+          "sl": 0.5592
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3684.54,
+        "s": 720.81,
+        "sl": 8.0718
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.72,
+        "load_corr_Relative_humidity": -0.8,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 66,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.19,
+          "s": 3.26,
+          "sl": 0.0026
+        },
+        "Relative_humidity": {
+          "m": 82.99,
+          "s": 12.52,
+          "sl": 0.0141
+        },
+        "Surface_net_solar_radiation": {
+          "m": 181.09,
+          "s": 230.87,
+          "sl": -0.1003
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.09,
+          "s": 1.43,
+          "sl": 0.0007
+        },
+        "load": {
+          "m": 3993.77,
+          "s": 893.28,
+          "sl": -0.6954
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3863.21,
+        "s": 1019.07,
+        "sl": 22.0808
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.75,
+        "load_corr_Relative_humidity": -0.61,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 67,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.55,
+          "s": 3.4,
+          "sl": 0.0044
+        },
+        "Relative_humidity": {
+          "m": 77.0,
+          "s": 17.85,
+          "sl": -0.0746
+        },
+        "Surface_net_solar_radiation": {
+          "m": 176.48,
+          "s": 223.96,
+          "sl": 0.3513
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.5,
+          "s": 1.64,
+          "sl": -0.0004
+        },
+        "load": {
+          "m": 3920.95,
+          "s": 900.5,
+          "sl": -0.2308
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4034.53,
+        "s": 988.38,
+        "sl": 17.7088
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.59,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 68,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.43,
+          "s": 3.63,
+          "sl": 0.0121
+        },
+        "Relative_humidity": {
+          "m": 71.13,
+          "s": 21.4,
+          "sl": -0.145
+        },
+        "Surface_net_solar_radiation": {
+          "m": 184.56,
+          "s": 237.27,
+          "sl": 0.822
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.33,
+          "s": 1.73,
+          "sl": -0.0063
+        },
+        "load": {
+          "m": 3891.03,
+          "s": 907.96,
+          "sl": 1.26
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4096.84,
+        "s": 952.49,
+        "sl": 17.4424
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.76,
+        "load_corr_Relative_humidity": -0.58,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 69,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.75,
+          "s": 3.8,
+          "sl": 0.0088
+        },
+        "Relative_humidity": {
+          "m": 63.3,
+          "s": 20.24,
+          "sl": -0.1191
+        },
+        "Surface_net_solar_radiation": {
+          "m": 210.18,
+          "s": 264.37,
+          "sl": 0.8711
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.46,
+          "s": 1.75,
+          "sl": -0.0014
+        },
+        "load": {
+          "m": 3919.78,
+          "s": 937.89,
+          "sl": 2.3955
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4065.48,
+        "s": 935.58,
+        "sl": 16.7826
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.55,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 70,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.71,
+          "s": 3.49,
+          "sl": -0.0007
+        },
+        "Relative_humidity": {
+          "m": 60.09,
+          "s": 15.92,
+          "sl": 0.0438
+        },
+        "Surface_net_solar_radiation": {
+          "m": 212.42,
+          "s": 263.1,
+          "sl": 0.1004
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.55,
+          "s": 1.69,
+          "sl": 0.0107
+        },
+        "load": {
+          "m": 4015.01,
+          "s": 974.8,
+          "sl": 1.8098
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4034.01,
+        "s": 950.32,
+        "sl": 17.0474
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.79,
+        "load_corr_Relative_humidity": -0.62,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 71,
+      "ctx": "spring",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 18.9,
+          "s": 3.92,
+          "sl": 0.0073
+        },
+        "Relative_humidity": {
+          "m": 64.35,
+          "s": 18.52,
+          "sl": 0.0606
+        },
+        "Surface_net_solar_radiation": {
+          "m": 216.33,
+          "s": 267.29,
+          "sl": 0.2828
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.05,
+          "s": 1.58,
+          "sl": 0.0079
+        },
+        "load": {
+          "m": 4057.71,
+          "s": 953.49,
+          "sl": 1.0456
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3854.55,
+        "s": 766.14,
+        "sl": 11.405
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.77,
+        "load_corr_Relative_humidity": -0.52,
+        "load_corr_Surface_net_solar_radiation": 0.76,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 72,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 19.0,
+          "s": 3.85,
+          "sl": 0.0106
+        },
+        "Relative_humidity": {
+          "m": 62.09,
+          "s": 18.98,
+          "sl": -0.045
+        },
+        "Surface_net_solar_radiation": {
+          "m": 214.2,
+          "s": 264.56,
+          "sl": 0.5555
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.34,
+          "s": 1.38,
+          "sl": -0.0033
+        },
+        "load": {
+          "m": 4012.72,
+          "s": 905.87,
+          "sl": 0.2387
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3723.69,
+        "s": 615.87,
+        "sl": 8.3016
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.66,
+        "load_corr_Relative_humidity": -0.39,
+        "load_corr_Surface_net_solar_radiation": 0.74,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 73,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 19.88,
+          "s": 4.23,
+          "sl": 0.0193
+        },
+        "Relative_humidity": {
+          "m": 60.06,
+          "s": 19.86,
+          "sl": -0.1251
+        },
+        "Surface_net_solar_radiation": {
+          "m": 202.11,
+          "s": 245.83,
+          "sl": 0.6587
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.0,
+          "s": 1.52,
+          "sl": -0.0078
+        },
+        "load": {
+          "m": 3919.43,
+          "s": 836.71,
+          "sl": -0.3402
+        },
+        "solar_month": {
+          "mode": 5
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3946.46,
+        "s": 880.38,
+        "sl": 19.1653
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.67,
+        "load_corr_Relative_humidity": -0.42,
+        "load_corr_Surface_net_solar_radiation": 0.74,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 74,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 21.33,
+          "s": 4.61,
+          "sl": 0.019
+        },
+        "Relative_humidity": {
+          "m": 52.3,
+          "s": 19.57,
+          "sl": -0.1048
+        },
+        "Surface_net_solar_radiation": {
+          "m": 236.03,
+          "s": 271.53,
+          "sl": 0.4547
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.6,
+          "s": 1.44,
+          "sl": -0.0032
+        },
+        "load": {
+          "m": 3889.68,
+          "s": 818.03,
+          "sl": 0.4894
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4101.75,
+        "s": 782.69,
+        "sl": 14.3801
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.79,
+        "load_corr_Relative_humidity": -0.58,
+        "load_corr_Surface_net_solar_radiation": 0.8,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 75,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 21.44,
+          "s": 4.13,
+          "sl": 0.0096
+        },
+        "Relative_humidity": {
+          "m": 45.26,
+          "s": 10.73,
+          "sl": -0.0112
+        },
+        "Surface_net_solar_radiation": {
+          "m": 229.91,
+          "s": 263.62,
+          "sl": 0.4282
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.17,
+          "s": 1.32,
+          "sl": -0.001
+        },
+        "load": {
+          "m": 3906.61,
+          "s": 776.46,
+          "sl": 1.7737
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4107.21,
+        "s": 744.43,
+        "sl": 13.0269
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.72,
+        "load_corr_Relative_humidity": -0.5,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 76,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 21.3,
+          "s": 3.67,
+          "sl": -0.0077
+        },
+        "Relative_humidity": {
+          "m": 52.62,
+          "s": 16.49,
+          "sl": 0.0705
+        },
+        "Surface_net_solar_radiation": {
+          "m": 207.83,
+          "s": 242.23,
+          "sl": 0.2512
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": -0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.32,
+          "s": 1.21,
+          "sl": 0.0037
+        },
+        "load": {
+          "m": 3969.78,
+          "s": 774.7,
+          "sl": 2.1326
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4149.9,
+        "s": 783.28,
+        "sl": 14.8443
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.66,
+        "load_corr_Relative_humidity": -0.42,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 77,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 20.69,
+          "s": 3.38,
+          "sl": -0.0083
+        },
+        "Relative_humidity": {
+          "m": 60.23,
+          "s": 20.02,
+          "sl": 0.1078
+        },
+        "Surface_net_solar_radiation": {
+          "m": 215.74,
+          "s": 255.23,
+          "sl": 0.3126
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.66,
+          "s": 1.17,
+          "sl": 0.0044
+        },
+        "load": {
+          "m": 4076.33,
+          "s": 799.89,
+          "sl": 1.5609
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4108.86,
+        "s": 747.53,
+        "sl": 13.0094
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.69,
+        "load_corr_Relative_humidity": -0.5,
+        "load_corr_Surface_net_solar_radiation": 0.8,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 78,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 19.55,
+          "s": 2.48,
+          "sl": -0.0009
+        },
+        "Relative_humidity": {
+          "m": 69.08,
+          "s": 18.71,
+          "sl": 0.0863
+        },
+        "Surface_net_solar_radiation": {
+          "m": 202.26,
+          "s": 240.45,
+          "sl": 0.4231
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.89,
+          "s": 1.15,
+          "sl": 0.0065
+        },
+        "load": {
+          "m": 4116.93,
+          "s": 761.95,
+          "sl": 0.9259
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4020.65,
+        "s": 693.23,
+        "sl": 11.4708
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.69,
+        "load_corr_Relative_humidity": -0.61,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 79,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 19.98,
+          "s": 3.41,
+          "sl": 0.0137
+        },
+        "Relative_humidity": {
+          "m": 76.51,
+          "s": 15.59,
+          "sl": -0.0175
+        },
+        "Surface_net_solar_radiation": {
+          "m": 204.7,
+          "s": 245.1,
+          "sl": 0.5971
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.18,
+          "s": 0.91,
+          "sl": 0.0001
+        },
+        "load": {
+          "m": 4096.66,
+          "s": 741.4,
+          "sl": 0.5242
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3868.68,
+        "s": 656.85,
+        "sl": 8.9705
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.52,
+        "load_corr_Relative_humidity": -0.72,
+        "load_corr_Surface_net_solar_radiation": 0.75,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 80,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 21.53,
+          "s": 4.53,
+          "sl": 0.0257
+        },
+        "Relative_humidity": {
+          "m": 73.32,
+          "s": 18.01,
+          "sl": -0.0796
+        },
+        "Surface_net_solar_radiation": {
+          "m": 223.4,
+          "s": 263.43,
+          "sl": 0.4927
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.16,
+          "s": 0.9,
+          "sl": -0.0016
+        },
+        "load": {
+          "m": 4037.02,
+          "s": 727.09,
+          "sl": -0.1555
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 3683.82,
+        "s": 644.58,
+        "sl": 8.3253
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.38,
+        "load_corr_Relative_humidity": -0.57,
+        "load_corr_Surface_net_solar_radiation": 0.73,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 81,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 23.48,
+          "s": 5.32,
+          "sl": 0.0356
+        },
+        "Relative_humidity": {
+          "m": 67.63,
+          "s": 18.99,
+          "sl": -0.1145
+        },
+        "Surface_net_solar_radiation": {
+          "m": 224.74,
+          "s": 262.8,
+          "sl": 0.5747
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.0,
+          "s": 1.17,
+          "sl": -0.0026
+        },
+        "load": {
+          "m": 3920.5,
+          "s": 702.85,
+          "sl": -0.741
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4247.6,
+        "s": 1176.82,
+        "sl": 27.0884
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.42,
+        "load_corr_Relative_humidity": -0.58,
+        "load_corr_Surface_net_solar_radiation": 0.73,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 82,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 25.07,
+          "s": 4.58,
+          "sl": 0.0173
+        },
+        "Relative_humidity": {
+          "m": 62.94,
+          "s": 16.88,
+          "sl": -0.0728
+        },
+        "Surface_net_solar_radiation": {
+          "m": 232.02,
+          "s": 267.92,
+          "sl": 0.4596
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.13,
+          "s": 1.31,
+          "sl": 0.0029
+        },
+        "load": {
+          "m": 3955.19,
+          "s": 845.95,
+          "sl": 1.357
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4437.07,
+        "s": 912.09,
+        "sl": 17.0152
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.43,
+        "load_corr_Relative_humidity": -0.43,
+        "load_corr_Surface_net_solar_radiation": 0.69,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 83,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.96,
+          "s": 4.05,
+          "sl": -0.0069
+        },
+        "Relative_humidity": {
+          "m": 65.39,
+          "s": 17.22,
+          "sl": 0.0573
+        },
+        "Surface_net_solar_radiation": {
+          "m": 217.37,
+          "s": 257.56,
+          "sl": 0.2464
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.59,
+          "s": 1.46,
+          "sl": 0.0069
+        },
+        "load": {
+          "m": 4059.29,
+          "s": 921.43,
+          "sl": 3.1751
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 1
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4446.07,
+        "s": 887.96,
+        "sl": 16.3675
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.36,
+        "load_corr_Relative_humidity": -0.32,
+        "load_corr_Surface_net_solar_radiation": 0.7,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 84,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.22,
+          "s": 3.72,
+          "sl": -0.0145
+        },
+        "Relative_humidity": {
+          "m": 70.88,
+          "s": 17.64,
+          "sl": 0.0915
+        },
+        "Surface_net_solar_radiation": {
+          "m": 216.1,
+          "s": 255.54,
+          "sl": 0.3473
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 5.02,
+          "s": 1.45,
+          "sl": 0.0071
+        },
+        "load": {
+          "m": 4203.64,
+          "s": 972.16,
+          "sl": 3.493
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4393.41,
+        "s": 803.8,
+        "sl": 12.786
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.3,
+        "load_corr_Relative_humidity": -0.26,
+        "load_corr_Surface_net_solar_radiation": 0.66,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 85,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 22.83,
+          "s": 2.59,
+          "sl": -0.0056
+        },
+        "Relative_humidity": {
+          "m": 79.29,
+          "s": 14.53,
+          "sl": 0.064
+        },
+        "Surface_net_solar_radiation": {
+          "m": 180.18,
+          "s": 227.76,
+          "sl": 0.0118
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 5.4,
+          "s": 1.27,
+          "sl": 0.0006
+        },
+        "load": {
+          "m": 4381.04,
+          "s": 955.01,
+          "sl": 1.5805
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4342.79,
+        "s": 897.45,
+        "sl": 18.1962
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.56,
+        "load_corr_Relative_humidity": -0.57,
+        "load_corr_Surface_net_solar_radiation": 0.76,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 86,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 22.9,
+          "s": 3.02,
+          "sl": 0.015
+        },
+        "Relative_humidity": {
+          "m": 84.93,
+          "s": 10.96,
+          "sl": -0.0158
+        },
+        "Surface_net_solar_radiation": {
+          "m": 174.73,
+          "s": 222.16,
+          "sl": 0.3171
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 4.78,
+          "s": 1.89,
+          "sl": -0.0107
+        },
+        "load": {
+          "m": 4404.84,
+          "s": 873.87,
+          "sl": 0.678
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4292.89,
+        "s": 701.09,
+        "sl": 8.5296
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.6,
+        "load_corr_Relative_humidity": -0.75,
+        "load_corr_Surface_net_solar_radiation": 0.71,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 87,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 23.79,
+          "s": 3.29,
+          "sl": 0.0167
+        },
+        "Relative_humidity": {
+          "m": 83.7,
+          "s": 13.86,
+          "sl": -0.033
+        },
+        "Surface_net_solar_radiation": {
+          "m": 189.57,
+          "s": 238.73,
+          "sl": 0.4892
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.8,
+          "s": 2.18,
+          "sl": -0.0141
+        },
+        "load": {
+          "m": 4368.79,
+          "s": 825.1,
+          "sl": 0.3748
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4465.57,
+        "s": 1073.3,
+        "sl": 24.4761
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.67,
+        "load_corr_Relative_humidity": -0.78,
+        "load_corr_Surface_net_solar_radiation": 0.75,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 88,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.18,
+          "s": 3.35,
+          "sl": 0.0098
+        },
+        "Relative_humidity": {
+          "m": 81.3,
+          "s": 15.74,
+          "sl": -0.0663
+        },
+        "Surface_net_solar_radiation": {
+          "m": 195.07,
+          "s": 246.14,
+          "sl": 0.865
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.32,
+          "s": 1.93,
+          "sl": -0.0053
+        },
+        "load": {
+          "m": 4373.67,
+          "s": 878.51,
+          "sl": 1.1624
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4729.13,
+        "s": 1029.49,
+        "sl": 20.5642
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.7,
+        "load_corr_Relative_humidity": -0.77,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 89,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.69,
+          "s": 3.41,
+          "sl": -0.0003
+        },
+        "Relative_humidity": {
+          "m": 74.98,
+          "s": 18.99,
+          "sl": -0.0966
+        },
+        "Surface_net_solar_radiation": {
+          "m": 234.89,
+          "s": 273.64,
+          "sl": 0.6353
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.1,
+          "s": 1.59,
+          "sl": 0.0073
+        },
+        "load": {
+          "m": 4457.59,
+          "s": 948.11,
+          "sl": 2.4217
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4678.58,
+        "s": 941.36,
+        "sl": 17.4009
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.72,
+        "load_corr_Relative_humidity": -0.78,
+        "load_corr_Surface_net_solar_radiation": 0.82,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 90,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 23.97,
+          "s": 3.2,
+          "sl": -0.0039
+        },
+        "Relative_humidity": {
+          "m": 71.31,
+          "s": 18.25,
+          "sl": -0.0639
+        },
+        "Surface_net_solar_radiation": {
+          "m": 237.03,
+          "s": 270.1,
+          "sl": 0.4294
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.72,
+          "s": 1.57,
+          "sl": 0.011
+        },
+        "load": {
+          "m": 4541.54,
+          "s": 959.59,
+          "sl": 2.4962
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4718.94,
+        "s": 966.68,
+        "sl": 18.6508
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.76,
+        "load_corr_Relative_humidity": -0.74,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 91,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 23.99,
+          "s": 3.15,
+          "sl": 0.0087
+        },
+        "Relative_humidity": {
+          "m": 71.42,
+          "s": 16.58,
+          "sl": 0.0076
+        },
+        "Surface_net_solar_radiation": {
+          "m": 215.13,
+          "s": 250.69,
+          "sl": 0.0746
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.93,
+          "s": 1.28,
+          "sl": -0.0023
+        },
+        "load": {
+          "m": 4648.06,
+          "s": 1005.84,
+          "sl": 1.9599
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4897.9,
+        "s": 1013.32,
+        "sl": 19.2966
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.79,
+        "load_corr_Relative_humidity": -0.67,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 92,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.65,
+          "s": 3.05,
+          "sl": 0.0143
+        },
+        "Relative_humidity": {
+          "m": 74.06,
+          "s": 15.97,
+          "sl": 0.0616
+        },
+        "Surface_net_solar_radiation": {
+          "m": 188.99,
+          "s": 224.27,
+          "sl": -0.0266
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.61,
+          "s": 1.48,
+          "sl": -0.0072
+        },
+        "load": {
+          "m": 4756.14,
+          "s": 988.05,
+          "sl": 1.7199
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4892.8,
+        "s": 981.35,
+        "sl": 17.9828
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.73,
+        "load_corr_Relative_humidity": -0.65,
+        "load_corr_Surface_net_solar_radiation": 0.79,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 93,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 25.56,
+          "s": 3.27,
+          "sl": 0.0204
+        },
+        "Relative_humidity": {
+          "m": 78.04,
+          "s": 15.11,
+          "sl": 0.019
+        },
+        "Surface_net_solar_radiation": {
+          "m": 180.38,
+          "s": 212.72,
+          "sl": 0.3623
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.36,
+          "s": 1.44,
+          "sl": -0.0043
+        },
+        "load": {
+          "m": 4797.06,
+          "s": 977.27,
+          "sl": 1.948
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4830.14,
+        "s": 872.39,
+        "sl": 11.1043
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.65,
+        "load_corr_Relative_humidity": -0.69,
+        "load_corr_Surface_net_solar_radiation": 0.76,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 94,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 27.31,
+          "s": 3.25,
+          "sl": 0.018
+        },
+        "Relative_humidity": {
+          "m": 78.73,
+          "s": 14.68,
+          "sl": -0.0514
+        },
+        "Surface_net_solar_radiation": {
+          "m": 181.51,
+          "s": 217.87,
+          "sl": 0.6467
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 2.61,
+          "s": 1.17,
+          "sl": -0.0007
+        },
+        "load": {
+          "m": 4834.95,
+          "s": 958.82,
+          "sl": 1.3681
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4754.81,
+        "s": 1035.33,
+        "sl": 17.9609
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.71,
+        "load_corr_Relative_humidity": -0.71,
+        "load_corr_Surface_net_solar_radiation": 0.76,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 95,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 27.35,
+          "s": 3.53,
+          "sl": 0.0028
+        },
+        "Relative_humidity": {
+          "m": 73.38,
+          "s": 18.57,
+          "sl": -0.1032
+        },
+        "Surface_net_solar_radiation": {
+          "m": 205.09,
+          "s": 240.77,
+          "sl": 0.6721
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 2.81,
+          "s": 1.26,
+          "sl": 0.0024
+        },
+        "load": {
+          "m": 4843.91,
+          "s": 975.49,
+          "sl": 0.5561
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4871.65,
+        "s": 989.99,
+        "sl": 18.5244
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.7,
+        "load_corr_Relative_humidity": -0.75,
+        "load_corr_Surface_net_solar_radiation": 0.78,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 96,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 26.85,
+          "s": 3.86,
+          "sl": -0.0096
+        },
+        "Relative_humidity": {
+          "m": 69.83,
+          "s": 19.47,
+          "sl": -0.0642
+        },
+        "Surface_net_solar_radiation": {
+          "m": 231.36,
+          "s": 262.52,
+          "sl": 0.5752
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 2.93,
+          "s": 1.3,
+          "sl": 0.0012
+        },
+        "load": {
+          "m": 4837.35,
+          "s": 969.23,
+          "sl": 0.8889
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4864.03,
+        "s": 999.87,
+        "sl": 19.0169
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.68,
+        "load_corr_Relative_humidity": -0.84,
+        "load_corr_Surface_net_solar_radiation": 0.81,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 97,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 25.89,
+          "s": 3.9,
+          "sl": -0.0146
+        },
+        "Relative_humidity": {
+          "m": 67.51,
+          "s": 18.27,
+          "sl": -0.0203
+        },
+        "Surface_net_solar_radiation": {
+          "m": 240.98,
+          "s": 271.89,
+          "sl": 0.6061
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.11,
+          "s": 1.44,
+          "sl": 0.0061
+        },
+        "load": {
+          "m": 4830.16,
+          "s": 973.59,
+          "sl": 1.254
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4805.99,
+        "s": 960.9,
+        "sl": 17.8144
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.69,
+        "load_corr_Relative_humidity": -0.87,
+        "load_corr_Surface_net_solar_radiation": 0.82,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 98,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.54,
+          "s": 3.3,
+          "sl": -0.0014
+        },
+        "Relative_humidity": {
+          "m": 66.7,
+          "s": 20.76,
+          "sl": -0.0045
+        },
+        "Surface_net_solar_radiation": {
+          "m": 250.81,
+          "s": 281.69,
+          "sl": 0.5706
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.49,
+          "s": 1.32,
+          "sl": 0.0022
+        },
+        "load": {
+          "m": 4824.12,
+          "s": 994.1,
+          "sl": 1.288
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4785.29,
+        "s": 982.39,
+        "sl": 18.784
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.82,
+        "load_corr_Relative_humidity": -0.88,
+        "load_corr_Surface_net_solar_radiation": 0.84,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 99,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.23,
+          "s": 2.7,
+          "sl": 0.0042
+        },
+        "Relative_humidity": {
+          "m": 71.25,
+          "s": 20.13,
+          "sl": -0.0074
+        },
+        "Surface_net_solar_radiation": {
+          "m": 254.25,
+          "s": 287.57,
+          "sl": 0.5134
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 3.46,
+          "s": 1.42,
+          "sl": 0.0016
+        },
+        "load": {
+          "m": 4831.74,
+          "s": 980.23,
+          "sl": 0.8486
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 1
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4598.55,
+        "s": 764.55,
+        "sl": 10.2456
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.81,
+        "load_corr_Relative_humidity": -0.87,
+        "load_corr_Surface_net_solar_radiation": 0.82,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 100,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 24.37,
+          "s": 2.74,
+          "sl": 0.0083
+        },
+        "Relative_humidity": {
+          "m": 75.06,
+          "s": 19.25,
+          "sl": 0.0321
+        },
+        "Surface_net_solar_radiation": {
+          "m": 218.56,
+          "s": 269.11,
+          "sl": -0.0229
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.76,
+          "s": 1.33,
+          "sl": 0.0002
+        },
+        "load": {
+          "m": 4763.46,
+          "s": 933.43,
+          "sl": 0.231
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 2
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4248.74,
+        "s": 807.86,
+        "sl": 13.4045
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.64,
+        "load_corr_Relative_humidity": -0.85,
+        "load_corr_Surface_net_solar_radiation": 0.77,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 101,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 25.2,
+          "s": 3.05,
+          "sl": 0.0141
+        },
+        "Relative_humidity": {
+          "m": 77.94,
+          "s": 19.33,
+          "sl": 0.0184
+        },
+        "Surface_net_solar_radiation": {
+          "m": 215.57,
+          "s": 269.2,
+          "sl": 0.2506
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.33,
+          "s": 1.36,
+          "sl": -0.0027
+        },
+        "load": {
+          "m": 4609.64,
+          "s": 908.49,
+          "sl": -0.8737
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 3
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4714.09,
+        "s": 1200.14,
+        "sl": 25.6287
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.69,
+        "load_corr_Relative_humidity": -0.77,
+        "load_corr_Surface_net_solar_radiation": 0.74,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 102,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 26.04,
+          "s": 3.18,
+          "sl": 0.0161
+        },
+        "Relative_humidity": {
+          "m": 80.39,
+          "s": 14.83,
+          "sl": -0.0191
+        },
+        "Surface_net_solar_radiation": {
+          "m": 195.13,
+          "s": 245.28,
+          "sl": 0.2964
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.0,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.21,
+          "s": 1.35,
+          "sl": -0.0025
+        },
+        "load": {
+          "m": 4586.67,
+          "s": 972.69,
+          "sl": 0.5132
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 4
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4625.0,
+        "s": 780.66,
+        "sl": 8.4148
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.56,
+        "load_corr_Relative_humidity": -0.71,
+        "load_corr_Surface_net_solar_radiation": 0.68,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 103,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 26.07,
+          "s": 3.44,
+          "sl": 0.0018
+        },
+        "Relative_humidity": {
+          "m": 82.84,
+          "s": 12.53,
+          "sl": -0.0091
+        },
+        "Surface_net_solar_radiation": {
+          "m": 153.04,
+          "s": 207.57,
+          "sl": 0.1552
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.01,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.65,
+          "s": 1.91,
+          "sl": 0.0037
+        },
+        "load": {
+          "m": 4546.59,
+          "s": 920.21,
+          "sl": 1.4333
+        },
+        "solar_month": {
+          "mode": 6
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 0
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4590.44,
+        "s": 1046.65,
+        "sl": 23.6496
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.6,
+        "load_corr_Relative_humidity": -0.67,
+        "load_corr_Surface_net_solar_radiation": 0.68,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 104,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 25.79,
+          "s": 3.69,
+          "sl": -0.0091
+        },
+        "Relative_humidity": {
+          "m": 81.73,
+          "s": 12.36,
+          "sl": -0.0045
+        },
+        "Surface_net_solar_radiation": {
+          "m": 183.18,
+          "s": 235.2,
+          "sl": 0.2319
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.01,
+          "sl": 0.0
+        },
+        "10_metre_wind": {
+          "m": 3.62,
+          "s": 2.1,
+          "sl": 0.0073
+        },
+        "load": {
+          "m": 4544.57,
+          "s": 986.57,
+          "sl": 2.0249
+        },
+        "solar_month": {
+          "mode": 7
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4741.73,
+        "s": 834.76,
+        "sl": 12.6954
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.53,
+        "load_corr_Relative_humidity": -0.61,
+        "load_corr_Surface_net_solar_radiation": 0.66,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    },
+    {
+      "id": 105,
+      "ctx": "summer",
+      "fc_hr": 17,
+      "lb": {
+        "Skin_temperature": {
+          "m": 25.26,
+          "s": 3.29,
+          "sl": -0.0055
+        },
+        "Relative_humidity": {
+          "m": 83.15,
+          "s": 8.88,
+          "sl": 0.0143
+        },
+        "Surface_net_solar_radiation": {
+          "m": 145.26,
+          "s": 196.11,
+          "sl": 0.1913
+        },
+        "Total_precipitation_4h_ahead": {
+          "m": 0.0,
+          "s": 0.01,
+          "sl": -0.0
+        },
+        "10_metre_wind": {
+          "m": 4.31,
+          "s": 2.08,
+          "sl": 0.0049
+        },
+        "load": {
+          "m": 4667.82,
+          "s": 978.19,
+          "sl": 1.1469
+        },
+        "solar_month": {
+          "mode": 7
+        },
+        "month": {
+          "mode": 0
+        },
+        "is_holiday": {
+          "mode": 0
+        },
+        "is_workday": {
+          "mode": 1
+        },
+        "day_of_week": {
+          "mode": 0
+        },
+        "pricing": {
+          "mode": 1
+        }
+      },
+      "fc": {
+        "m": 4784.77,
+        "s": 1057.12,
+        "sl": 22.86
+      },
+      "xc": {
+        "load_corr_Skin_temperature": 0.57,
+        "load_corr_Relative_humidity": -0.64,
+        "load_corr_Surface_net_solar_radiation": 0.7,
+        "is_uniform_day_type": false,
+        "contains_holiday": true,
+        "is_all_holiday": false
+      }
+    }
+  ]
+}
