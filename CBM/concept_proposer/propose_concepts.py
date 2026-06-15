@@ -24,8 +24,8 @@ Usage
 
     export ANTHROPIC_API_KEY=...
     PYTHONPATH=. python -u CBM/concept_proposer/propose_concepts.py \\
-        --n_lookback_concepts 10 \\
-        --n_forecast_concepts 25 \\
+        --n_lookback_concepts 20 \\
+        --n_forecast_concepts 50 \\
         --n_clusters 20 \\
         --segments_path preprocessing/output/RE/RE_full_segments.json \\
         --output_dir CBM/output
@@ -380,10 +380,15 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--n_lookback_concepts", type=int, default=10,
-                   help="K_lb -- concepts for the lookback bottleneck.")
-    p.add_argument("--n_forecast_concepts", type=int, default=25,
-                   help="K_fc -- concepts shared across the forecast sub-window bottlenecks.")
+    p.add_argument("--n_lookback_concepts", type=int, default=20,
+                   help="K_lb -- concepts for the lookback bottleneck. Default 20 "
+                        "(was 10) -- a wider concept channel gives the encoder "
+                        "more legitimate concept-routed capacity.")
+    p.add_argument("--n_forecast_concepts", type=int, default=50,
+                   help="K_fc -- concepts shared across the forecast sub-window "
+                        "bottlenecks. Default 50 (was 25) -- same motivation as "
+                        "n_lookback_concepts. With N=4 sub-windows this gives "
+                        "200 forecast-side concept outputs.")
     p.add_argument("--n_clusters",          type=int, default=20,
                    help="K-means cluster count for the prompt's regime summaries.")
     p.add_argument("--segments_path",       type=str, required=True,

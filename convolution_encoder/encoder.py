@@ -170,6 +170,39 @@ class ConvEmbedding_Learning(nn.Module):
         if self.use_time_pool:
             nn.init.constant_(self.time_pool.weight, 1.0 / output_length)
 
+        # ---- Locality prior for decode_time (Gaussian banded init) ----
+        # decode_time projects N patches (covering the full input+output window)
+        # to output_length timesteps. With random init, each output timestep
+        # is a uniform mix of all N patches and has no preferred temporal
+        # locality. That makes per-sub-window slicing downstream (in the
+        # CBM's per-sub-window concept predictors) less effective because
+        # encoder_full[:, k*T_sw:(k+1)*T_sw, :] then contains essentially
+        # the same global signal at every position.
+        #
+        # We initialize decode_time with a row-stochastic Gaussian band:
+        # row t (output timestep t) is centered on patch index t * (N/T_out)
+        # with a small sigma, so at init the encoder is already temporally
+        # localized. Gradient descent is free to drift this anywhere it wants;
+        # the goal is just to provide a useful prior so locality doesn't have
+        # to be discovered from scratch.
+        self._banded_init_decode_time()
+
+    def _banded_init_decode_time(self) -> None:
+        T_out = self.decode_time.out_features      # output_length
+        N     = self.decode_time.in_features        # n_patches
+        ratio = N / T_out
+        # Sigma is set so adjacent output timesteps' bands overlap by ~half
+        # their width. A smaller sigma localizes more aggressively; a larger
+        # one is closer to uniform mixing.
+        sigma = max(2.0, ratio * 1.5)
+        positions = torch.arange(N, dtype=torch.float).unsqueeze(0)         # (1, N)
+        peaks     = torch.arange(T_out, dtype=torch.float).unsqueeze(1) * ratio  # (T, 1)
+        W = torch.exp(-0.5 * ((positions - peaks) / sigma) ** 2)            # (T, N)
+        W = W / W.sum(dim=1, keepdim=True)                                  # row-stochastic
+        with torch.no_grad():
+            self.decode_time.weight.copy_(W)
+            self.decode_time.bias.zero_()
+
     def _init_linear_weights(self):
         """Match ProtoTS's per-Linear init: N(0, 1/sqrt(fan_in)), zero biases.
         Conv1d weights keep PyTorch's default Kaiming-uniform init."""

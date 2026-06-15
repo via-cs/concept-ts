@@ -27,10 +27,15 @@ Architecture
        |     fc_ctx[k]    = Linear(K_fc, D, bias=False)(fc_acts[k])       |
        |                                                 # shared embed   |
        |                                                                  |
+       +-- Residual channel (optional, hybrid CBM) -----------------------+
+       |   residual[k] = Linear(D, residual_dim)(z_sw_k)                   |
+       |   (penalized in loss; concept-only forecast still extractable     |
+       |    by calling forward(..., disable_residual=True))                |
+       |                                                                   |
        +-- Shared sub-decoder, parameterized by sub-window id k ----------+
            for k:
              sw_emb   = Embedding(N, sw_id_dim)(k)
-             dec_in   = concat(lb_ctx, fc_ctx[k], sw_emb)
+             dec_in   = concat(lb_ctx, fc_ctx[k], sw_emb, residual[k])
              sub_y[k] = MLP(dec_in)              # (B, T_sw, output_dim)
            y_hat = concat(sub_y[0], ..., sub_y[N-1])  # (B, T_out, output_dim)
 
@@ -85,8 +90,10 @@ class ConceptBottleneckModel(nn.Module):
         n_lookback_concepts: int,
         n_forecast_concepts: int,
         n_subwindows: int = 4,
-        decoder_hidden: int = 256,
+        decoder_hidden: int = 512,
+        decoder_depth: int = 3,
         sub_window_id_dim: int = 16,
+        residual_dim: int = 16,
         use_rev_in: int = 1,
         norm_type: str = "B",
     ):
@@ -102,6 +109,7 @@ class ConceptBottleneckModel(nn.Module):
         self.output_length       = output_length
         self.output_dim          = output_dim
         self.sub_window_length   = output_length // n_subwindows
+        self.residual_dim        = int(residual_dim)
 
         # ---- Encoder backbone ----
         # We deliberately disable the encoder's internal time_pool (if it has
@@ -132,9 +140,6 @@ class ConceptBottleneckModel(nn.Module):
         enc_sig = inspect.signature(Embedding_Learning.__init__)
         if "use_time_pool" in enc_sig.parameters:
             encoder_kwargs["use_time_pool"] = False
-            self._per_timestep_enc = True
-        else:
-            self._per_timestep_enc = True   # also true for Mixer/TS2Vec (3D output)
         self.encoder = Embedding_Learning(**encoder_kwargs)
 
         # ---- Lookback concept bottleneck ----
@@ -154,16 +159,40 @@ class ConceptBottleneckModel(nn.Module):
         # ---- Sub-window id embedding ----
         self.sub_window_id_embed = nn.Embedding(n_subwindows, sub_window_id_dim)
 
+        # ---- Residual channel (hybrid CBM, optional) ----
+        # A small linear projection from the per-sub-window encoder summary
+        # straight to the decoder, BYPASSING the concept layer. The trainer
+        # adds an L2 penalty (alpha_residual_reg * ||residual||^2) so the
+        # decoder is incentivized to use it sparingly -- only for forecast
+        # detail the concept activations can't capture. Set residual_dim=0
+        # to recover the strict CBM (no residual path).
+        # The interpretability story stays intact as long as concept_only_MAE
+        # and full_MAE (reported at test time) are close: a small gap means
+        # most of the forecast is concept-driven; a big gap means the
+        # residual is doing the heavy lifting.
+        if self.residual_dim > 0:
+            self.residual_proj = nn.Linear(mid_dim, self.residual_dim)
+        else:
+            self.residual_proj = None
+
         # ---- Shared sub-decoder ----
         # Input: history context (D) + sub-window context (D) + id embed (sw_id_dim)
-        # Output: T_sw forecast values
-        dec_in_dim = 2 * mid_dim + sub_window_id_dim
-        self.sub_decoder = nn.Sequential(
-            nn.Linear(dec_in_dim, decoder_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(decoder_hidden, self.sub_window_length * output_dim),
-        )
+        # + residual (residual_dim).  Output: T_sw forecast values.
+        # decoder_depth = number of Linear layers, so depth >= 1.
+        dec_in_dim = 2 * mid_dim + sub_window_id_dim + self.residual_dim
+        if decoder_depth < 1:
+            raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
+        layers: list[nn.Module] = []
+        in_dim = dec_in_dim
+        for _ in range(decoder_depth - 1):
+            layers.extend([
+                nn.Linear(in_dim, decoder_hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ])
+            in_dim = decoder_hidden
+        layers.append(nn.Linear(in_dim, self.sub_window_length * output_dim))
+        self.sub_decoder = nn.Sequential(*layers)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -223,7 +252,16 @@ class ConceptBottleneckModel(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor) -> dict:
+    def forward(self, x: torch.Tensor, disable_residual: bool = False) -> dict:
+        """Forward pass.
+
+        Args
+        ----
+        x : (B, T_in + T_out, C) raw input from LOF_Dataset.
+        disable_residual : if True, the residual channel is zeroed before
+            entering the decoder. Used at evaluation time to compute the
+            "concept-only" MAE for interpretability attribution.
+        """
         B = x.shape[0]
         device = x.device
 
@@ -254,12 +292,27 @@ class ConceptBottleneckModel(nn.Module):
         fc_logits = torch.stack(fc_logits_list, dim=1)         # (B, N, K_fc)
         fc_acts   = torch.stack(fc_acts_list,   dim=1)         # (B, N, K_fc)
 
-        # 4) Shared sub-decoder, parameterized by sub-window id.
+        # 4) Residual channel (hybrid CBM). One projection per sub-window;
+        # the projection module itself is shared.
+        if self.residual_proj is not None:
+            residual_list = [self.residual_proj(z_per_sw[k])
+                              for k in range(self.n_subwindows)]
+            if disable_residual:
+                residual_list = [torch.zeros_like(r) for r in residual_list]
+            residual = torch.stack(residual_list, dim=1)       # (B, N, residual_dim)
+        else:
+            residual_list = [None] * self.n_subwindows
+            residual = x.new_zeros((B, self.n_subwindows, 0))
+
+        # 5) Shared sub-decoder, parameterized by sub-window id.
         sub_forecasts = []
         for k in range(self.n_subwindows):
             sw_idx = torch.full((B,), k, dtype=torch.long, device=device)
             sw_emb = self.sub_window_id_embed(sw_idx)          # (B, sw_id_dim)
-            dec_in = torch.cat([lb_ctx, fc_ctx_list[k], sw_emb], dim=-1)
+            parts = [lb_ctx, fc_ctx_list[k], sw_emb]
+            if residual_list[k] is not None:
+                parts.append(residual_list[k])                  # (B, residual_dim)
+            dec_in = torch.cat(parts, dim=-1)
             flat   = self.sub_decoder(dec_in)                  # (B, T_sw * O)
             sub_y  = flat.reshape(B, self.sub_window_length, self.output_dim)
             sub_forecasts.append(sub_y)
@@ -271,4 +324,5 @@ class ConceptBottleneckModel(nn.Module):
             "lb_acts":   lb_acts,
             "fc_logits": fc_logits,
             "fc_acts":   fc_acts,
+            "residual":  residual,   # (B, N, residual_dim) -- penalize in loss
         }

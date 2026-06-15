@@ -24,14 +24,18 @@ Run
 ---
 
     PYTHONPATH=. python -u CBM/train_cbm.py \\
-        --dataset       ./dataset/LOF/RE.csv \\
-        --concepts_path ./CBM/output/concepts_validated_<TS>.json \\
-        --segments_path ./preprocessing/output/RE/RE_full_segments.json \\
+        --dataset            ./dataset/LOF/RE.csv \\
+        --concepts_path      ./CBM/output/concepts_validated_<TS>.json \\
+        --segments_path      ./preprocessing/output/RE/RE_full_segments.json \\
+        --val_segments_path  ./preprocessing/output/RE/RE_full_segments_vali.json \\
+        --test_segments_path ./preprocessing/output/RE/RE_full_segments_test.json \\
         --epoch 30 --batch_size 16 \\
         --input_length 384 --output_length 96 \\
         --input_dim 23 --output_dim 1 \\
         --num_layer 4 --dropout 0.5 --embed_dim 128 \\
         --n_subwindows 4 \\
+        --decoder_hidden 512 --decoder_depth 3 \\
+        --residual_dim 16 --alpha_residual_reg 1e-3 \\
         --alpha_forecast 1.0 --alpha_lookback 1.0 --alpha_forecast_concept 1.0 \\
         --lr 3e-4 --weight_decay 1e-4 --patience 5 \\
         --case_studies 5
@@ -117,9 +121,21 @@ def get_args():
 
     p.add_argument("--n_subwindows",   type=int, default=4,
                    help="Forecast-side bottlenecks (must equal preprocessing's --n_subwindows).")
-    p.add_argument("--decoder_hidden", type=int, default=256)
+    p.add_argument("--decoder_hidden", type=int, default=512,
+                   help="Hidden width of the shared sub-decoder MLP (default 512).")
+    p.add_argument("--decoder_depth",  type=int, default=3,
+                   help="Number of Linear layers in the shared sub-decoder. "
+                        "1 = single-Linear projection; 2 = 1 hidden layer; "
+                        "3 = 2 hidden layers (default).")
     p.add_argument("--sw_id_dim",      type=int, default=16,
                    help="Width of the sub-window-id embedding fed to the shared sub-decoder.")
+    p.add_argument("--residual_dim",   type=int, default=16,
+                   help="Width of the regularized residual channel that bypasses "
+                        "the concept layer (hybrid CBM). 0 to disable. The decoder "
+                        "input becomes concat(lb_ctx, fc_ctx_k, sw_emb, residual_k) "
+                        "with the residual constrained by --alpha_residual_reg. "
+                        "At test time, concept-only MAE is computed with residual "
+                        "zeroed so you can see how much the residual is helping.")
 
     p.add_argument("--lr",             type=float, default=3e-4,
                    help="Initial learning rate. Lowered from 1e-3 to stabilize "
@@ -147,6 +163,12 @@ def get_args():
                         "tends to leave the decoder undersupervised.")
     p.add_argument("--alpha_lookback",         type=float, default=1.0)
     p.add_argument("--alpha_forecast_concept", type=float, default=1.0)
+    p.add_argument("--alpha_residual_reg",     type=float, default=1e-3,
+                   help="L2 penalty on the residual channel's magnitude. "
+                        "Higher = decoder must rely more on concepts. Lower = "
+                        "residual is free to carry most of the forecast signal. "
+                        "Default 1e-3 is a starting point; tune to slide along "
+                        "the interpretability/accuracy curve.")
     p.add_argument("--concept_warmup_epochs",  type=int,   default=0,
                    help="If > 0, train with alpha_forecast = 0 for this many "
                         "epochs before switching to the user-supplied value. "
@@ -170,9 +192,10 @@ def set_seed(seed: int = 0):
 # ---------------------------------------------------------------------------
 
 def train_one_epoch(model, loader, optimizer, device,
-                    alpha_forecast, alpha_lookback, alpha_forecast_concept):
+                    alpha_forecast, alpha_lookback, alpha_forecast_concept,
+                    alpha_residual_reg):
     model.train()
-    cum_f, cum_lb, cum_fc, n = 0.0, 0.0, 0.0, 0
+    cum_f, cum_lb, cum_fc, cum_res, n = 0.0, 0.0, 0.0, 0.0, 0
     l1_fn  = nn.L1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
 
@@ -183,23 +206,52 @@ def train_one_epoch(model, loader, optimizer, device,
         fc_lab = fc_lab.to(device)
         out = model(x)
 
-        loss_f  = l1_fn(out["y_hat"],     y)
-        loss_lb = bce_fn(out["lb_logits"], lb_lab)
-        loss_fc = bce_fn(out["fc_logits"], fc_lab)
+        loss_f   = l1_fn(out["y_hat"],     y)
+        loss_lb  = bce_fn(out["lb_logits"], lb_lab)
+        loss_fc  = bce_fn(out["fc_logits"], fc_lab)
+        # L2 penalty on residual norm. Mean over all (B, N, residual_dim)
+        # elements -- if residual_dim==0 the tensor is empty and contributes 0.
+        if out["residual"].numel() > 0:
+            loss_res = out["residual"].pow(2).mean()
+        else:
+            loss_res = torch.zeros((), device=device)
         loss = (alpha_forecast        * loss_f
                 + alpha_lookback         * loss_lb
-                + alpha_forecast_concept * loss_fc)
+                + alpha_forecast_concept * loss_fc
+                + alpha_residual_reg     * loss_res)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        cum_f  += loss_f.item()
-        cum_lb += loss_lb.item()
-        cum_fc += loss_fc.item()
-        n      += 1
+        cum_f   += loss_f.item()
+        cum_lb  += loss_lb.item()
+        cum_fc  += loss_fc.item()
+        cum_res += loss_res.item()
+        n       += 1
 
-    return cum_f / max(1, n), cum_lb / max(1, n), cum_fc / max(1, n)
+    return (cum_f / max(1, n), cum_lb / max(1, n),
+            cum_fc / max(1, n), cum_res / max(1, n))
+
+
+@torch.no_grad()
+def _evaluate_concept_only(model, loader, device) -> tuple[float, float]:
+    """Run forward with ``disable_residual=True`` and return (MSE, MAE).
+
+    Used at the end of training to measure how much of the forecast
+    accuracy is concept-driven vs residual-driven (interpretability
+    attribution).
+    """
+    model.eval()
+    mae_sum, mse_sum, denom = 0.0, 0.0, 0
+    for x, y, _, _ in loader:
+        x = x.to(device); y = y.to(device)
+        out = model(x, disable_residual=True)
+        y_hat = out["y_hat"]
+        mae_sum += (y_hat - y).abs().sum().item()
+        mse_sum += ((y_hat - y) ** 2).sum().item()
+        denom   += y.numel()
+    return mse_sum / max(1, denom), mae_sum / max(1, denom)
 
 
 @torch.no_grad()
@@ -421,7 +473,9 @@ def main():
         n_forecast_concepts = K_fc,
         n_subwindows        = args.n_subwindows,
         decoder_hidden      = args.decoder_hidden,
+        decoder_depth       = args.decoder_depth,
         sub_window_id_dim   = args.sw_id_dim,
+        residual_dim        = args.residual_dim,
         use_rev_in   = 1,
         norm_type    = "B",
     ).to(device)
@@ -450,9 +504,10 @@ def main():
         eff_alpha_forecast = (0.0
                               if epoch < args.concept_warmup_epochs
                               else args.alpha_forecast)
-        l_f, l_lb, l_fc = train_one_epoch(
+        l_f, l_lb, l_fc, l_res = train_one_epoch(
             model, train_loader, optimizer, device,
             eff_alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
+            args.alpha_residual_reg,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
         improved = val_mae < best_val_mae
@@ -461,6 +516,7 @@ def main():
               f"train_L1={l_f:.4f}  "
               f"train_lb_BCE={l_lb:.4f}  "
               f"train_fc_BCE={l_fc:.4f}  "
+              f"train_res={l_res:.4f}  "
               f"val MAE={val_mae:.4f}{marker}")
         if improved:
             best_val_mae      = val_mae
@@ -489,8 +545,22 @@ def main():
     test_mse, test_mae, t_lb_lg, t_lb_la, t_fc_lg, t_fc_la, t_yh, t_yt = evaluate(
         model, test_loader, device,
     )
-    print(f"  test MSE = {test_mse:.6f}")
-    print(f"  test MAE = {test_mae:.6f}")
+    print(f"  test MSE      = {test_mse:.6f}  (full model)")
+    print(f"  test MAE      = {test_mae:.6f}  (full model)")
+
+    # Concept-only test: re-evaluate with residual zeroed. If the residual
+    # was carrying real forecast signal, this MAE will be visibly higher.
+    # A small gap means the model is genuinely concept-driven; a big gap
+    # means the residual is doing most of the work.
+    if args.residual_dim > 0:
+        test_mse_co, test_mae_co = _evaluate_concept_only(model, test_loader, device)
+        print(f"  test MAE      = {test_mae_co:.6f}  (CONCEPT-ONLY, residual disabled)")
+        gap = test_mae_co - test_mae
+        rel = (gap / max(1e-9, test_mae)) * 100
+        print(f"  residual gain = {gap:+.4f}  ({rel:+.1f}% MAE improvement from residual)")
+        attr = (test_mae / max(1e-9, test_mae_co)) * 100
+        print(f"  -> concepts alone capture {attr:.1f}% of the concept-only "
+              "MAE; residual fills the remaining detail.")
 
     # ----- Per-concept TEST stats (real labels if --test_segments_path was given) -----
     # Falls back to a TRAIN evaluation when the user didn't supply test segments,
