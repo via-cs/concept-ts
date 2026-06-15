@@ -33,7 +33,7 @@ Run
         --input_length 384 --output_length 96 \\
         --input_dim 23 --output_dim 1 \\
         --num_layer 4 --dropout 0.5 --embed_dim 128 \\
-        --n_subwindows 4 \\
+        --n_subwindows 4 --concept_emb_dim 16 \\
         --decoder_hidden 512 --decoder_depth 3 \\
         --residual_dim 16 --alpha_residual_reg 1e-3 \\
         --alpha_forecast 1.0 --alpha_lookback 1.0 --alpha_forecast_concept 1.0 \\
@@ -121,6 +121,12 @@ def get_args():
 
     p.add_argument("--n_subwindows",   type=int, default=4,
                    help="Forecast-side bottlenecks (must equal preprocessing's --n_subwindows).")
+    p.add_argument("--concept_emb_dim", type=int, default=16,
+                   help="Per-concept embedding dimensionality d in the full-CEM "
+                        "design. Each concept owns two MLPs producing input-"
+                        "conditional vectors in R^d; the decoder reads K*d dims "
+                        "instead of D dims. Default 16 -- effective bottleneck "
+                        "rank K*d (much wider than the old static rank K).")
     p.add_argument("--decoder_hidden", type=int, default=512,
                    help="Hidden width of the shared sub-decoder MLP (default 512).")
     p.add_argument("--decoder_depth",  type=int, default=3,
@@ -472,6 +478,7 @@ def main():
         n_lookback_concepts = K_lb,
         n_forecast_concepts = K_fc,
         n_subwindows        = args.n_subwindows,
+        concept_emb_dim     = args.concept_emb_dim,
         decoder_hidden      = args.decoder_hidden,
         decoder_depth       = args.decoder_depth,
         sub_window_id_dim   = args.sw_id_dim,

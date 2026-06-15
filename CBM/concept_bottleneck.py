@@ -15,17 +15,27 @@ Architecture
          z_global = enc.mean(dim=1)              # (B, D) -- whole forecast window
          z_sw_k   = enc[:, k*T_sw:(k+1)*T_sw, :].mean(dim=1)   # (B, D) per sub-window
        |
-       +-- Lookback concept layer -- consumes z_global -------------------+
+       +-- Lookback concept layer (full CEM) -----------------------------+
        |   lb_logits = Linear(D, K_lb)(z_global)                          |
        |   lb_acts   = sigmoid(lb_logits)                                 |
-       |   lb_ctx    = Linear(K_lb, D, bias=False)(lb_acts)               |
+       |   lb_eplus  = MLP+(z_global) reshape (B, K_lb, d)                |
+       |   lb_eminus = MLP-(z_global) reshape (B, K_lb, d)                |
+       |   lb_ctx    = concat over i of                                   |
+       |                  a_i * lb_eplus[i] + (1-a_i) * lb_eminus[i]      |
+       |                  in R^(K_lb * d)                                 |
        |                                                                  |
-       +-- Forecast concept layers -- predictor k consumes z_sw_k --------+
+       +-- Forecast concept layers (full CEM, per sub-window) ------------+
        |   for k:                                                         |
-       |     fc_logits[k] = Linear(D, K_fc)(z_sw_k)      # K_sw distinct  |
-       |     fc_acts[k]   = sigmoid(fc_logits[k])        # predictors     |
-       |     fc_ctx[k]    = Linear(K_fc, D, bias=False)(fc_acts[k])       |
-       |                                                 # shared embed   |
+       |     fc_logits[k] = Linear(D, K_fc)(z_sw_k)  # K_sw distinct      |
+       |     fc_acts[k]   = sigmoid(fc_logits[k])    # predictors         |
+       |     fc_eplus[k]  = MLP+(z_sw_k)  shape (B, K_fc, d)              |
+       |     fc_eminus[k] = MLP-(z_sw_k)  shape (B, K_fc, d)              |
+       |     fc_ctx[k]    = concat over i of                              |
+       |                       a_i^k * fc_eplus[k][i]                     |
+       |                     + (1 - a_i^k) * fc_eminus[k][i]              |
+       |                     in R^(K_fc * d)                              |
+       |   (MLPs MLP+, MLP- are shared across sub-windows; only inputs    |
+       |    z_sw_k differ.)                                               |
        |                                                                  |
        +-- Residual channel (optional, hybrid CBM) -----------------------+
        |   residual[k] = Linear(D, residual_dim)(z_sw_k)                   |
@@ -90,6 +100,7 @@ class ConceptBottleneckModel(nn.Module):
         n_lookback_concepts: int,
         n_forecast_concepts: int,
         n_subwindows: int = 4,
+        concept_emb_dim: int = 16,
         decoder_hidden: int = 512,
         decoder_depth: int = 3,
         sub_window_id_dim: int = 16,
@@ -110,6 +121,7 @@ class ConceptBottleneckModel(nn.Module):
         self.output_dim          = output_dim
         self.sub_window_length   = output_length // n_subwindows
         self.residual_dim        = int(residual_dim)
+        self.concept_emb_dim     = int(concept_emb_dim)
 
         # ---- Encoder backbone ----
         # We deliberately disable the encoder's internal time_pool (if it has
@@ -142,19 +154,34 @@ class ConceptBottleneckModel(nn.Module):
             encoder_kwargs["use_time_pool"] = False
         self.encoder = Embedding_Learning(**encoder_kwargs)
 
-        # ---- Lookback concept bottleneck ----
-        self.lookback_concept_predictor  = nn.Linear(mid_dim, n_lookback_concepts)
-        self.lookback_concept_embeddings = nn.Linear(n_lookback_concepts, mid_dim, bias=False)
+        # ---- Lookback concept bottleneck (full CEM) ----
+        # Predictor stays the same: encoder feature -> K_lb concept logits.
+        # Embeddings are now INPUT-CONDITIONAL via two MLPs per concept set:
+        #   e_i^+(z) = "concept-present" embedding given encoder feature z
+        #   e_i^-(z) = "concept-absent"  embedding given encoder feature z
+        # Per-concept embedding handed to the decoder:
+        #   ĉ_i = a_i * e_i^+(z) + (1 - a_i) * e_i^-(z)         in R^d
+        # Concept-context for the decoder is the concatenation of all ĉ_i.
+        # We implement each branch as ONE Linear(D, K*d) and reshape to (B, K, d)
+        # -- exactly equivalent to K independent Linear(D, d) per concept, but
+        # one matmul instead of K.
+        self.lookback_concept_predictor = nn.Linear(mid_dim, n_lookback_concepts)
+        self.lookback_emb_plus  = nn.Linear(mid_dim, n_lookback_concepts * self.concept_emb_dim)
+        self.lookback_emb_minus = nn.Linear(mid_dim, n_lookback_concepts * self.concept_emb_dim)
 
-        # ---- Forecast concept bottlenecks ----
-        # K_sw separate predictors that read the encoder output. They share
-        # the embedding matrix so "is_temperature_rising" maps to the same
-        # D-dim vector regardless of which sub-window fired it.
+        # ---- Forecast concept bottlenecks (full CEM) ----
+        # K_sw separate PREDICTORS (one per sub-window). The two embedding
+        # MLPs are SHARED across sub-windows -- "is_temperature_rising"
+        # generates its embedding the same way regardless of which sub-window
+        # fired it; only the input z_per_sw[k] (and thus the resulting
+        # embedding vector) differs. This mirrors how the static embedding
+        # matrix was shared previously.
         self.forecast_concept_predictors = nn.ModuleList([
             nn.Linear(mid_dim, n_forecast_concepts)
             for _ in range(n_subwindows)
         ])
-        self.forecast_concept_embeddings = nn.Linear(n_forecast_concepts, mid_dim, bias=False)
+        self.forecast_emb_plus  = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
+        self.forecast_emb_minus = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
 
         # ---- Sub-window id embedding ----
         self.sub_window_id_embed = nn.Embedding(n_subwindows, sub_window_id_dim)
@@ -176,10 +203,15 @@ class ConceptBottleneckModel(nn.Module):
             self.residual_proj = None
 
         # ---- Shared sub-decoder ----
-        # Input: history context (D) + sub-window context (D) + id embed (sw_id_dim)
-        # + residual (residual_dim).  Output: T_sw forecast values.
-        # decoder_depth = number of Linear layers, so depth >= 1.
-        dec_in_dim = 2 * mid_dim + sub_window_id_dim + self.residual_dim
+        # Input dims (full-CEM layout):
+        #   lookback context  = K_lb * d         (input-conditional embeddings)
+        #   forecast context  = K_fc * d         (input-conditional embeddings)
+        #   sub-window id     = sw_id_dim
+        #   residual          = residual_dim
+        # Output: T_sw forecast values. decoder_depth = number of Linear layers (>=1).
+        lb_ctx_dim = n_lookback_concepts * self.concept_emb_dim
+        fc_ctx_dim = n_forecast_concepts * self.concept_emb_dim
+        dec_in_dim = lb_ctx_dim + fc_ctx_dim + sub_window_id_dim + self.residual_dim
         if decoder_depth < 1:
             raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
         layers: list[nn.Module] = []
@@ -269,26 +301,40 @@ class ConceptBottleneckModel(nn.Module):
         _, encoder_out = self.encoder(x)
         z_global, z_per_sw = self._split_encoder_features(encoder_out)
 
-        # 2) Lookback concept layer -- sees the global summary of all
-        # output-aligned encoder features (which themselves carry both lookback
-        # and forecast-window information via the decode_time mixing).
+        # 2) Lookback concept layer. Activations from the standard predictor,
+        # embeddings INPUT-CONDITIONAL via two MLP branches:
+        #     ĉ_i = a_i * e_i^+(z_global) + (1 - a_i) * e_i^-(z_global)
+        # The decoder receives concat(ĉ_0, ..., ĉ_{K_lb-1}) in R^{K_lb * d}.
         lb_logits = self.lookback_concept_predictor(z_global)  # (B, K_lb)
         lb_acts   = torch.sigmoid(lb_logits)                   # (B, K_lb)
-        lb_ctx    = self.lookback_concept_embeddings(lb_acts)  # (B, D)
+        lb_eplus  = self.lookback_emb_plus(z_global).reshape(B,
+                        self.n_lookback_concepts, self.concept_emb_dim)
+        lb_eminus = self.lookback_emb_minus(z_global).reshape(B,
+                        self.n_lookback_concepts, self.concept_emb_dim)
+        a_lb = lb_acts.unsqueeze(-1)                            # (B, K_lb, 1)
+        lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
+        lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
 
         # 3) Forecast concept layers (one per sub-window).
-        # Predictor k now sees z_per_sw[k] -- the mean over the encoder's
-        # features in sub-window k's slice of the time axis.
+        # Predictor k sees z_per_sw[k]. Embedding MLPs are shared across
+        # sub-windows but produce DIFFERENT embeddings per sub-window because
+        # their input (z_per_sw[k]) is different.
         fc_logits_list = []
         fc_acts_list   = []
         fc_ctx_list    = []
         for k in range(self.n_subwindows):
-            lg = self.forecast_concept_predictors[k](z_per_sw[k])  # (B, K_fc)
-            ac = torch.sigmoid(lg)                                  # (B, K_fc)
-            cx = self.forecast_concept_embeddings(ac)              # (B, D)
+            lg = self.forecast_concept_predictors[k](z_per_sw[k])    # (B, K_fc)
+            ac = torch.sigmoid(lg)                                    # (B, K_fc)
+            ep = self.forecast_emb_plus(z_per_sw[k]).reshape(B,
+                        self.n_forecast_concepts, self.concept_emb_dim)
+            em = self.forecast_emb_minus(z_per_sw[k]).reshape(B,
+                        self.n_forecast_concepts, self.concept_emb_dim)
+            a_k = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
+            ctx_3d_k = a_k * ep + (1.0 - a_k) * em                    # (B, K_fc, d)
+            ctx_k = ctx_3d_k.reshape(B, -1)                           # (B, K_fc * d)
             fc_logits_list.append(lg)
             fc_acts_list.append(ac)
-            fc_ctx_list.append(cx)
+            fc_ctx_list.append(ctx_k)
         fc_logits = torch.stack(fc_logits_list, dim=1)         # (B, N, K_fc)
         fc_acts   = torch.stack(fc_acts_list,   dim=1)         # (B, N, K_fc)
 
