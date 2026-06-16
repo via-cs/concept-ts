@@ -68,7 +68,9 @@ if str(_PROPOSER_DIR) not in sys.path:
 from prototype_proposing_loop.function_executor import _SAFE_BUILTINS
 
 from prompts import INITIAL_PROMPT
-from llm_caller import call_claude, extract_json_object, validate_concept_schema
+from llm_caller import (
+    call_claude, extract_json_object, validate_concept_schema, DEFAULT_MODEL,
+)
 
 
 # ===========================================================================
@@ -136,18 +138,20 @@ def _render_prompt(n_lookback_concepts: int,
 
 def _call_llm(prompt: str,
               n_lookback_concepts: int,
-              n_forecast_concepts: int) -> tuple[list[dict], list[dict]]:
+              n_forecast_concepts: int,
+              model: str = DEFAULT_MODEL) -> tuple[list[dict], list[dict]]:
     """Returns (lookback_concepts, forecast_concepts)."""
     print("\n" + "=" * 72)
     print(f"STAGE 3 — CALLING CLAUDE  "
-          f"(requesting {n_lookback_concepts} lookback + {n_forecast_concepts} forecast concepts)")
+          f"(model={model}, requesting {n_lookback_concepts} lookback + "
+          f"{n_forecast_concepts} forecast concepts)")
     print("=" * 72)
     system_prompt = (
         "You are a domain expert in time-series forecasting. You produce "
         "Python filter functions and structured JSON. Always return a valid "
         "JSON object as your entire response — no surrounding prose."
     )
-    response_text = call_claude(prompt, system_prompt=system_prompt)
+    response_text = call_claude(prompt, system_prompt=system_prompt, model=model)
     obj = extract_json_object(response_text)
 
     lb_list = obj.get("lookback_concepts")
@@ -395,6 +399,11 @@ def main():
                    help="Part-A full segments JSON (must include subwindow_stats blocks).")
     p.add_argument("--output_dir",          type=str, default="CBM/output")
     p.add_argument("--random_state",        type=int, default=0)
+    p.add_argument("--model",               type=str, default=DEFAULT_MODEL,
+                   help=f"Claude model identifier. Default '{DEFAULT_MODEL}'. "
+                        "If you get a 404 NotFoundError, the snapshot is "
+                        "probably retired or unavailable to your account -- try "
+                        "'claude-3-5-sonnet-latest' or 'claude-3-7-sonnet-latest'.")
     p.add_argument("--validate_only",       action="store_true",
                    help="Skip clustering + LLM. Re-validate an existing two-set "
                         "concepts JSON at --concepts_path.")
@@ -455,6 +464,7 @@ def main():
         prompt,
         n_lookback_concepts=args.n_lookback_concepts,
         n_forecast_concepts=args.n_forecast_concepts,
+        model=args.model,
     )
     lb_val, fc_val, _, _ = _validate_and_print(lb_raw, fc_raw, bundle["segments"])
 

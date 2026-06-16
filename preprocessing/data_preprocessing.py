@@ -775,26 +775,32 @@ def main():
                              "Each sub-window gets its own per-channel stats block "
                              "used by the CBM's forecast concept layers. Default 4 "
                              "(96 forecast steps -> 4 x 24-step sub-windows = 4 x 6h).")
-    parser.add_argument("--split", type=str, default="train",
-                        choices=["train", "vali", "test"],
+    parser.add_argument("--split", type=str, default="all",
+                        choices=["train", "vali", "test", "all"],
                         help="Which slice of the CSV to segment. Output filename "
                              "gains a _<split> suffix (no suffix for train). The "
                              "70/10/20 boundaries match dataloader/dataloader.py "
                              "(legacy chronological split). Global statistics are "
                              "ALWAYS computed on the train slice -- val/test data "
-                             "never leaks into the LLM-facing distribution.")
+                             "never leaks into the LLM-facing distribution. "
+                             "Default 'all' processes train, vali, AND test in "
+                             "sequence (three output triplets).")
     args = parser.parse_args()
 
-    run_preprocessing(
-        data_path=args.data_path,
-        output_dir=args.output_dir,
-        input_length=args.input_length,
-        output_length=args.output_length,
-        stride=args.stride,
-        max_segments_for_llm=args.max_segments,
-        n_subwindows=args.n_subwindows,
-        split=args.split,
-    )
+    splits_to_run = ["train", "vali", "test"] if args.split == "all" else [args.split]
+    for s in splits_to_run:
+        if len(splits_to_run) > 1:
+            print(f"\n{'#' * 72}\n# Split: {s}\n{'#' * 72}")
+        run_preprocessing(
+            data_path=args.data_path,
+            output_dir=args.output_dir,
+            input_length=args.input_length,
+            output_length=args.output_length,
+            stride=args.stride,
+            max_segments_for_llm=args.max_segments,
+            n_subwindows=args.n_subwindows,
+            split=s,
+        )
 
 
 if __name__ == "__main__":

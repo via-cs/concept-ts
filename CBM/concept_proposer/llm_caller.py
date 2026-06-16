@@ -40,9 +40,17 @@ def _get_client() -> "anthropic.Anthropic":
     return anthropic.Anthropic(api_key=api_key)
 
 
+# Default Claude model. Override via the --model CLI flag on
+# propose_concepts.py if your account doesn't have access (404 from the API
+# usually means the snapshot was retired or your account is on a different tier).
+# Reasonable fallbacks: "claude-sonnet-4-5", "claude-3-5-sonnet-latest",
+# "claude-3-7-sonnet-latest".
+DEFAULT_MODEL = "claude-sonnet-4-5"
+
+
 def call_claude(prompt: str,
                 system_prompt: str = "",
-                model: str = "claude-sonnet-4-20250514",
+                model: str = DEFAULT_MODEL,
                 max_tokens: int = 16384) -> str:
     """One-shot call. Returns the assistant message text."""
     client = _get_client()
