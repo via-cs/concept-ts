@@ -10,7 +10,7 @@ from layer.rev_norm import Rev_in
 # per-channel embedder at the Riverside PM2.5 schema. Keep in sync with the
 # ``DATASET`` constant in ``dataloader/dataloader.py``.
 # ---------------------------------------------------------------------------
-DATASET = "LOF"
+DATASET = "PRSA"
 
 if DATASET == "LOF":
     # 23-column LOF / ProtoTS schema (target = "load", last column).
@@ -25,6 +25,17 @@ if DATASET == "LOF":
         0, 0, 0, 0, 0,
         0, 2, 2, 2, 2,
         7, 0, 0,
+    ]
+elif DATASET == "PRSA":
+    # 15-column Beijing PRSA schema (target = "PM2.5", last column).
+    # See dataset/PRSA_data/Aotizhongxin.csv; cleaning steps documented in
+    # convolution_encoder/channel_embedding.py.
+    _CLASS_FEATURE_INDICES = [0, 1, 2, 3]
+    _CLASS_FEATURE_NUM_CLASSES = [
+        5, 13, 32, 24,     # 0-3   year, month, day, hour
+        0, 0, 0, 0, 0,     # 4-8   PM10, SO2, NO2, CO, O3
+        0, 0, 0, 0, 0,     # 9-13  TEMP, PRES, DEWP, RAIN, WSPM
+        0,                  # 14    PM2.5 (target)
     ]
 elif DATASET == "AirQuality":
     # 17-column Riverside schema (target = "pm25_poc_3", last column).
@@ -43,7 +54,7 @@ elif DATASET == "AirQuality":
 else:
     raise ValueError(
         f"Unknown DATASET={DATASET!r} in layer.channel_embedding. "
-        f"Expected 'LOF' or 'AirQuality'."
+        f"Expected 'LOF' | 'AirQuality' | 'PRSA'."
     )
 
 

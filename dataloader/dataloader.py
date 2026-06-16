@@ -47,8 +47,14 @@ USE_LAST_YEAR_SPLIT = False
 #                  (24 rows/day, ~8 760 rows/year). The CSV's
 #                  ``timestamp_utc`` column is auto-dropped since it's
 #                  non-numeric.
+#   "PRSA"       — 1-hour resolution, target column "PM2.5"
+#                  (24 rows/day, 35 064 rows for the 4-year Aotizhongxin
+#                  station). See ``dataset/PRSA_data/Aotizhongxin.csv``
+#                  (cleaned by ``preprocessing/clean_prsa.py``). Discrete
+#                  calendar columns: year (0-4), month (1-12), day (1-31),
+#                  hour (0-23).
 # ---------------------------------------------------------------------------
-DATASET = "LOF"
+DATASET = "PRSA"
 
 if DATASET == "LOF":
     TARGET_COLUMN = "load"
@@ -56,9 +62,12 @@ if DATASET == "LOF":
 elif DATASET == "AirQuality":
     TARGET_COLUMN = "pm25_poc_3"
     ROWS_PER_DAY  = 24               # 1-hour resolution: 24 rows / day
+elif DATASET == "PRSA":
+    TARGET_COLUMN = "PM2.5"
+    ROWS_PER_DAY  = 24               # 1-hour resolution: 24 rows / day
 else:
     raise ValueError(
-        f"Unknown DATASET={DATASET!r}. Expected 'LOF' or 'AirQuality'."
+        f"Unknown DATASET={DATASET!r}. Expected 'LOF' | 'AirQuality' | 'PRSA'."
     )
 
 ROWS_PER_YEAR = 365 * ROWS_PER_DAY

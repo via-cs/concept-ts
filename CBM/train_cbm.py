@@ -23,15 +23,16 @@ those splits). Forecast MAE on val/test is unaffected.
 Run
 ---
 
+    # PRSA / Beijing PM2.5 (currently active DATASET):
     PYTHONPATH=. python -u CBM/train_cbm.py \\
-        --dataset            ./dataset/LOF/RE.csv \\
+        --dataset            ./dataset/PRSA_data/Aotizhongxin.csv \\
         --concepts_path      ./CBM/output/concepts_validated_<TS>.json \\
-        --segments_path      ./preprocessing/output/RE/RE_full_segments.json \\
-        --val_segments_path  ./preprocessing/output/RE/RE_full_segments_vali.json \\
-        --test_segments_path ./preprocessing/output/RE/RE_full_segments_test.json \\
+        --segments_path      ./preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments.json \\
+        --val_segments_path  ./preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments_vali.json \\
+        --test_segments_path ./preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments_test.json \\
         --epoch 30 --batch_size 16 \\
-        --input_length 384 --output_length 96 \\
-        --input_dim 23 --output_dim 1 \\
+        --input_length 96 --output_length 24 \\
+        --input_dim 15 --output_dim 1 \\
         --num_layer 4 --dropout 0.5 --embed_dim 128 \\
         --n_subwindows 4 --concept_emb_dim 16 \\
         --decoder_hidden 512 --decoder_depth 3 \\

@@ -27,7 +27,7 @@ Usage
         --n_lookback_concepts 20 \\
         --n_forecast_concepts 50 \\
         --n_clusters 20 \\
-        --segments_path preprocessing/output/RE/RE_full_segments.json \\
+        --segments_path preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments.json \\
         --output_dir CBM/output
 
 Outputs (written to --output_dir):

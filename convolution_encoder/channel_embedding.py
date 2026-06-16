@@ -31,7 +31,7 @@ from layer.rev_norm import Rev_in
 # used by ``nn.Embedding(num_classes, embed_dim)`` for that column index.
 # Continuous columns get 0 (the Linear(1, embed_dim) path runs instead).
 # ---------------------------------------------------------------------------
-DATASET = "LOF"
+DATASET = "PRSA"
 
 if DATASET == "LOF":
     # 23-column LOF / ProtoTS schema (target = "load", last column).
@@ -61,10 +61,26 @@ elif DATASET == "AirQuality":
         13, 32, 24, 7, 2,  # 10-14 month, day, hour, day_of_week, is_weekend
         2, 0,              # 15-16 is_weekday, pm25_poc_3 (target)
     ]
+elif DATASET == "PRSA":
+    # 15-column Beijing PRSA schema (target = "PM2.5", last column).
+    # Source: dataset/PRSA_data/Aotizhongxin.csv (cleaned by
+    # preprocessing/clean_prsa.py: drop No/wd/station, linear-interpolate
+    # missing values, normalize year to 0-indexed).
+    #   0:year (0-4)   1:month (1-12)   2:day (1-31)   3:hour (0-23)
+    #   4:PM10         5:SO2            6:NO2          7:CO       8:O3
+    #   9:TEMP        10:PRES          11:DEWP        12:RAIN    13:WSPM
+    #  14:PM2.5 (target, continuous)
+    _CLASS_FEATURE_INDICES = [0, 1, 2, 3]
+    _CLASS_FEATURE_NUM_CLASSES = [
+        5, 13, 32, 24,     # 0-3   year, month, day, hour
+        0, 0, 0, 0, 0,     # 4-8   PM10, SO2, NO2, CO, O3 (continuous)
+        0, 0, 0, 0, 0,     # 9-13  TEMP, PRES, DEWP, RAIN, WSPM (continuous)
+        0,                  # 14    PM2.5 (target, continuous)
+    ]
 else:
     raise ValueError(
         f"Unknown DATASET={DATASET!r} in convolution_encoder.channel_embedding. "
-        f"Expected 'LOF' or 'AirQuality'."
+        f"Expected 'LOF' | 'AirQuality' | 'PRSA'."
     )
 
 

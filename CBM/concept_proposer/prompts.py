@@ -35,7 +35,7 @@ Forecast rules see a SUB-WINDOW dict (one of the four blocks emitted by
     }
 """
 
-DATASET = "LOF"
+DATASET = "PRSA"
 
 
 LOF_BLOCK = {
@@ -156,8 +156,138 @@ resolution that is {subwindow_hours} hours per sub-window.""",
 }
 
 
+PRSA_BLOCK = {
+    "domain_description": (
+        "domain expert in urban air-quality forecasting (PM2.5) for Beijing. "
+        "The dominant drivers of PM2.5 concentration in this region are local "
+        "emissions plus meteorological conditions that either disperse or trap "
+        "pollutants -- low wind speed (no horizontal dispersion), high pressure "
+        "and inversions (no vertical mixing), high humidity (hygroscopic particle "
+        "growth), precipitation (wet scavenging), and chemical interactions with "
+        "co-emitted pollutants (PM10, SO2, NO2, CO, O3)"
+    ),
+    "regime_label": "PM2.5 air-quality",
+
+    "lookback_schema_example": """```python
+{{
+  "lookback_stats": {{
+    "TEMP": {{
+      "mean": float, "median": float, "std": float, "min": float,
+      "max": float, "range": float, "skewness": float,
+      "kurtosis": float, "slope": float, "volume": float
+    }},
+    "hour": {{
+      "mode": int, "n_unique": int, "distribution": {{"0": float, "1": float, ...}}
+    }},
+    # 15 channels total:
+    #   discrete: year (0-4), month (1-12), day (1-31), hour (0-23)
+    #   continuous: PM10, SO2, NO2, CO, O3, TEMP, PRES, DEWP, RAIN, WSPM, PM2.5
+  }},
+  "forecast_stats": {{ ... same shape, computed over the {output_length}-step forecast window ... }},
+  "cross_channel_stats": {{
+    "target_corr_PM10":  float,   # PM10 is the most-correlated pollutant
+    "target_corr_WSPM":  float,   # wind speed (typically negative: wind disperses PM)
+    "target_corr_TEMP":  float,
+    "target_corr_DEWP":  float,   # dew point ~ humidity proxy
+    "target_corr_PRES":  float,
+    "target_corr_RAIN":  float
+  }},
+  "time_context": {{
+    "lookback_start": {{"month": int, "day": int, "hour": int}},
+    "lookback_end":   {{...}},
+    "forecast_start": {{...}},
+    "forecast_end":   {{...}},
+    "season": "spring" | "summer" | "autumn" | "winter"
+  }}
+}}
+```
+
+NOTE: this dataset has no weekday/holiday flags. Day-type rules will not work.
+Wind direction (``wd``) was dropped during cleaning, so only wind SPEED (WSPM)
+is available.""",
+
+    "subwindow_schema_example": """```python
+{{
+  "subwindow_idx": int (0..N-1, where N = {n_subwindows}),
+  "stats": {{
+    "TEMP": {{
+      "mean": float, "median": float, "std": float, "min": float,
+      "max": float, "range": float, "skewness": float,
+      "kurtosis": float, "slope": float, "volume": float
+    }},
+    "hour": {{
+      "mode": int, "n_unique": int, "distribution": {{...}}
+    }},
+    # ... same 15 channels, stats computed over this sub-window's {subwindow_length} timesteps
+  }},
+  "time_context": {{
+    "subwindow_idx": int,
+    "start": {{"month": int, "day": int, "hour": int}},
+    "end":   {{...}},
+    "season": "spring" | "summer" | "autumn" | "winter"
+  }},
+  "cross_channel_stats": {{ ... same as the parent segment ... }}
+}}
+```
+
+NOTE: with output_length = {output_length} and n_subwindows = {n_subwindows},
+each sub-window covers {subwindow_length} consecutive timesteps. At 1-hour
+resolution that is {subwindow_hours} hours per sub-window.""",
+
+    "example_lookback_concepts": """[
+  {{
+    "id": 0,
+    "name": "is_history_low_wind",
+    "description": "Lookback wind speed mean below 1.5 m/s -- stagnant air, pollutants accumulate.",
+    "category": "weather_dynamics",
+    "function": "def matches(seg):\\n    w = seg.get('lookback_stats', {{}}).get('WSPM', {{}}).get('mean')\\n    return w is not None and w < 1.5"
+  }},
+  {{
+    "id": 1,
+    "name": "is_history_winter_heating",
+    "description": "Lookback spans winter (heating season -- elevated PM2.5 baseline).",
+    "category": "season",
+    "function": "def matches(seg):\\n    return seg.get('time_context', {{}}).get('season') == 'winter'"
+  }},
+  {{
+    "id": 2,
+    "name": "is_history_pm10_correlated",
+    "description": "Strong positive correlation between PM2.5 and PM10 in the lookback (typical of dust / combustion sources).",
+    "category": "cross_channel",
+    "function": "def matches(seg):\\n    c = seg.get('cross_channel_stats', {{}}).get('target_corr_PM10')\\n    return c is not None and c > 0.7"
+  }}
+]""",
+
+    "example_forecast_concepts": """[
+  {{
+    "id": 0,
+    "name": "is_calm_block",
+    "description": "Sub-window wind speed mean below 1.5 m/s -- no horizontal dispersion.",
+    "category": "weather_dynamics",
+    "function": "def matches(sub_seg):\\n    w = sub_seg.get('stats', {{}}).get('WSPM', {{}}).get('mean')\\n    return w is not None and w < 1.5"
+  }},
+  {{
+    "id": 1,
+    "name": "is_rush_hour_block",
+    "description": "Sub-window starts in the morning rush hour (7-10).",
+    "category": "time_of_day",
+    "function": "def matches(sub_seg):\\n    h = sub_seg.get('time_context', {{}}).get('start', {{}}).get('hour')\\n    return h is not None and 7 <= h <= 10"
+  }},
+  {{
+    "id": 2,
+    "name": "is_humid_block",
+    "description": "Sub-window dew point above 10 deg C (high absolute humidity -- particle growth).",
+    "category": "weather_other",
+    "function": "def matches(sub_seg):\\n    d = sub_seg.get('stats', {{}}).get('DEWP', {{}}).get('mean')\\n    return d is not None and d > 10"
+  }}
+]""",
+}
+
+
 if DATASET == "LOF":
     _BLOCK = LOF_BLOCK
+elif DATASET == "PRSA":
+    _BLOCK = PRSA_BLOCK
 else:
     raise ValueError(f"Unknown DATASET={DATASET!r} in CBM.concept_proposer.prompts.")
 
@@ -239,7 +369,7 @@ Hard requirements for EVERY function (both sets):
    (for forecast rules this is computed across all segment*sub-window pairs).
 6. **Diversity** across categories: ``season``, ``time_of_day``, ``calendar``,
    ``weather_temperature``, ``weather_other``, ``weather_dynamics``,
-   ``load_regime``, ``cross_channel``, ``misc``.
+   ``pollutant_chemistry``, ``cross_channel``, ``regime``, ``misc``.
 7. **No compounds**. ``is_history_cold`` is good; ``is_history_cold_and_workday``
    is bad (the CBM combines them at the embedding level).
 

@@ -25,34 +25,70 @@ import pandas as pd
 # Channel Metadata
 # ============================================================
 
-CHANNEL_META = {
-    # Discrete (categorical) channels
-    "lunar_year":       {"type": "discrete", "description": "Year in Chinese lunar calendar (1-5, cyclical)"},
-    "lunar_month":      {"type": "discrete", "description": "Month in Chinese lunar calendar (1-12)"},
-    "lunar_day":        {"type": "discrete", "description": "Day in Chinese lunar calendar (1-30)"},
-    "solar_year":       {"type": "discrete", "description": "Solar calendar year index (2-5)"},
-    "solar_month":      {"type": "discrete", "description": "Month of year (1-12)"},
-    "solar_day":        {"type": "discrete", "description": "Day of month (1-31)"},
-    "month":            {"type": "discrete", "description": "Hour of day (0-23, despite column name 'month')"},
-    "minute":           {"type": "discrete", "description": "Minute within hour (0, 15, 30, 45)"},
-    "is_special_workday":  {"type": "discrete", "description": "Whether this is a special working day (0 or 1, e.g., weekend rescheduled as workday)"},
-    "is_special_holiday":  {"type": "discrete", "description": "Whether this is a special holiday (0 or 1, e.g., weekday declared as holiday)"},
-    "is_holiday":       {"type": "discrete", "description": "Whether this is a holiday (0 or 1)"},
-    "is_workday":       {"type": "discrete", "description": "Whether this is a workday (0 or 1)"},
-    "day_of_week":      {"type": "discrete", "description": "Day of week (0=Monday to 6=Sunday)"},
-    "pricing":          {"type": "discrete", "description": "Electricity pricing tier (0.1, 0.3, 1.0, 1.7, 2.0)"},
-    # Continuous channels
-    "Skin_temperature":              {"type": "continuous", "description": "Surface skin temperature (°C)"},
-    "Surface_pressure":              {"type": "continuous", "description": "Surface atmospheric pressure (kPa)"},
-    "Surface_sensible_heat_flux":    {"type": "continuous", "description": "Surface sensible heat flux (W/m²)"},
-    "Total_cloud_cover":             {"type": "continuous", "description": "Total cloud cover"},
-    "Surface_net_solar_radiation":   {"type": "continuous", "description": "Net solar radiation at surface (W/m²)"},
-    "Total_precipitation_4h_ahead":  {"type": "continuous", "description": "Forecasted total precipitation 4h ahead (mm)"},
-    "10_metre_wind":                 {"type": "continuous", "description": "Wind speed at 10m height (m/s)"},
-    "Relative_humidity":             {"type": "continuous", "description": "Relative humidity (%)"},
-    # Target
-    "load":             {"type": "continuous", "description": "Electricity load (target variable, MW)"},
-}
+# ---------------------------------------------------------------------------
+# Dataset switch — keep in sync with the DATASET constants in
+# ``dataloader/dataloader.py`` and ``convolution_encoder/channel_embedding.py``.
+# CHANNEL_META describes per-column type + a one-line semantic description
+# used by the LLM concept proposer.
+# ---------------------------------------------------------------------------
+DATASET = "PRSA"
+
+if DATASET == "LOF":
+    CHANNEL_META = {
+        # Discrete (categorical) channels
+        "lunar_year":       {"type": "discrete", "description": "Year in Chinese lunar calendar (1-5, cyclical)"},
+        "lunar_month":      {"type": "discrete", "description": "Month in Chinese lunar calendar (1-12)"},
+        "lunar_day":        {"type": "discrete", "description": "Day in Chinese lunar calendar (1-30)"},
+        "solar_year":       {"type": "discrete", "description": "Solar calendar year index (2-5)"},
+        "solar_month":      {"type": "discrete", "description": "Month of year (1-12)"},
+        "solar_day":        {"type": "discrete", "description": "Day of month (1-31)"},
+        "month":            {"type": "discrete", "description": "Hour of day (0-23, despite column name 'month')"},
+        "minute":           {"type": "discrete", "description": "Minute within hour (0, 15, 30, 45)"},
+        "is_special_workday":  {"type": "discrete", "description": "Whether this is a special working day (0 or 1, e.g., weekend rescheduled as workday)"},
+        "is_special_holiday":  {"type": "discrete", "description": "Whether this is a special holiday (0 or 1, e.g., weekday declared as holiday)"},
+        "is_holiday":       {"type": "discrete", "description": "Whether this is a holiday (0 or 1)"},
+        "is_workday":       {"type": "discrete", "description": "Whether this is a workday (0 or 1)"},
+        "day_of_week":      {"type": "discrete", "description": "Day of week (0=Monday to 6=Sunday)"},
+        "pricing":          {"type": "discrete", "description": "Electricity pricing tier (0.1, 0.3, 1.0, 1.7, 2.0)"},
+        # Continuous channels
+        "Skin_temperature":              {"type": "continuous", "description": "Surface skin temperature (°C)"},
+        "Surface_pressure":              {"type": "continuous", "description": "Surface atmospheric pressure (kPa)"},
+        "Surface_sensible_heat_flux":    {"type": "continuous", "description": "Surface sensible heat flux (W/m²)"},
+        "Total_cloud_cover":             {"type": "continuous", "description": "Total cloud cover"},
+        "Surface_net_solar_radiation":   {"type": "continuous", "description": "Net solar radiation at surface (W/m²)"},
+        "Total_precipitation_4h_ahead":  {"type": "continuous", "description": "Forecasted total precipitation 4h ahead (mm)"},
+        "10_metre_wind":                 {"type": "continuous", "description": "Wind speed at 10m height (m/s)"},
+        "Relative_humidity":             {"type": "continuous", "description": "Relative humidity (%)"},
+        # Target
+        "load":             {"type": "continuous", "description": "Electricity load (target variable, MW)"},
+    }
+elif DATASET == "PRSA":
+    CHANNEL_META = {
+        # Discrete (categorical) channels
+        "year":  {"type": "discrete", "description": "Year index 0..4 (mapped from raw 2013..2017 during cleaning)"},
+        "month": {"type": "discrete", "description": "Calendar month (1-12)"},
+        "day":   {"type": "discrete", "description": "Day of month (1-31)"},
+        "hour":  {"type": "discrete", "description": "Hour of day (0-23)"},
+        # Continuous channels — air-quality covariates
+        "PM10":  {"type": "continuous", "description": "PM10 concentration (μg/m³)"},
+        "SO2":   {"type": "continuous", "description": "SO2 concentration (μg/m³)"},
+        "NO2":   {"type": "continuous", "description": "NO2 concentration (μg/m³)"},
+        "CO":    {"type": "continuous", "description": "CO concentration (μg/m³)"},
+        "O3":    {"type": "continuous", "description": "O3 concentration (μg/m³)"},
+        # Continuous channels — meteorology
+        "TEMP":  {"type": "continuous", "description": "Surface temperature (°C)"},
+        "PRES":  {"type": "continuous", "description": "Surface atmospheric pressure (hPa)"},
+        "DEWP":  {"type": "continuous", "description": "Dew-point temperature (°C); higher = more humid air"},
+        "RAIN":  {"type": "continuous", "description": "Hourly precipitation (mm)"},
+        "WSPM":  {"type": "continuous", "description": "Wind speed (m/s) — low wind suppresses pollutant dispersion"},
+        # Target
+        "PM2.5": {"type": "continuous", "description": "PM2.5 concentration (target, μg/m³)"},
+    }
+else:
+    raise ValueError(
+        f"Unknown DATASET={DATASET!r} in preprocessing.data_preprocessing. "
+        f"Expected 'LOF' | 'PRSA'."
+    )
 
 
 # ============================================================
@@ -167,36 +203,46 @@ def extract_segment_stats(segment_df: pd.DataFrame, channel_meta: dict) -> dict:
     return stats
 
 
+if DATASET == "LOF":
+    _TARGET_COL          = "load"
+    _TARGET_CORR_COLS    = ["Skin_temperature", "Relative_humidity",
+                             "Surface_net_solar_radiation"]
+elif DATASET == "PRSA":
+    _TARGET_COL          = "PM2.5"
+    _TARGET_CORR_COLS    = ["PM10", "WSPM", "TEMP", "DEWP", "PRES", "RAIN"]
+else:
+    _TARGET_COL          = None
+    _TARGET_CORR_COLS    = []
+
+
 def extract_cross_channel_stats(segment_df: pd.DataFrame) -> dict:
     """Extract cross-channel statistics that capture variable interactions.
 
-    These capture relationships like "temperature AND weekday" that aren't
-    visible in any single channel's statistics.
+    The cross-channel block is the place where the LLM concept proposer
+    learns about target-correlated covariates and (LOF-only) day-type uniformity.
     """
     cross = {}
 
-    # Correlation between load and key continuous variables
-    if "load" in segment_df.columns:
-        load = segment_df["load"].values
-        for col in ["Skin_temperature", "Relative_humidity", "Surface_net_solar_radiation"]:
+    # Correlation between target and key continuous covariates.
+    if _TARGET_COL and _TARGET_COL in segment_df.columns:
+        tgt = segment_df[_TARGET_COL].values
+        for col in _TARGET_CORR_COLS:
             if col in segment_df.columns:
                 other = segment_df[col].values
-                if np.std(load) > 1e-8 and np.std(other) > 1e-8:
-                    corr = float(np.corrcoef(load, other)[0, 1])
-                    cross[f"load_corr_{col}"] = round(corr, 2)
+                if np.std(tgt) > 1e-8 and np.std(other) > 1e-8:
+                    corr = float(np.corrcoef(tgt, other)[0, 1])
+                    cross[f"target_corr_{col}"] = round(corr, 2)
 
-    # Is the segment entirely within one day type?
+    # LOF-only: day-type / holiday flags. These columns don't exist in PRSA.
     if "is_workday" in segment_df.columns:
         workday_vals = segment_df["is_workday"].unique()
         cross["is_uniform_day_type"] = bool(len(workday_vals) == 1)
         if len(workday_vals) == 1:
             cross["uniform_day_type"] = "workday" if workday_vals[0] == 1.0 else "non_workday"
-
-    # Is the segment entirely within one holiday state?
     if "is_holiday" in segment_df.columns:
         holiday_vals = segment_df["is_holiday"].unique()
         cross["contains_holiday"] = bool(1.0 in holiday_vals)
-        cross["is_all_holiday"] = bool(len(holiday_vals) == 1 and holiday_vals[0] == 1.0)
+        cross["is_all_holiday"]   = bool(len(holiday_vals) == 1 and holiday_vals[0] == 1.0)
 
     return cross
 
@@ -239,26 +285,47 @@ def _season_from_month(month: int) -> str:
     return "winter"
 
 
+def _row_calendar(row) -> dict:
+    """Pull a (calendar_month, day_of_month, hour) tuple out of one dataframe row,
+    handling both schemas:
+      LOF  uses solar_month / solar_day / 'month'(=hour) / minute.
+      PRSA uses month        / day        / hour.
+    """
+    if DATASET == "LOF":
+        return {
+            "solar_month": int(row.get("solar_month", 0)),
+            "solar_day":   int(row.get("solar_day", 0)),
+            "hour":        int(row.get("month", 0)),   # 'month' column is hour-of-day
+            "minute":      int(row.get("minute", 0)),
+        }
+    if DATASET == "PRSA":
+        return {
+            "month": int(row.get("month", 0)),
+            "day":   int(row.get("day", 0)),
+            "hour":  int(row.get("hour", 0)),
+        }
+    raise ValueError(f"Unknown DATASET={DATASET!r}")
+
+
+def _calendar_month_of(row) -> int:
+    """Return the CALENDAR month (1-12) of a dataframe row, regardless of schema."""
+    if DATASET == "LOF":
+        return int(row.get("solar_month", 1))
+    if DATASET == "PRSA":
+        return int(row.get("month", 1))
+    raise ValueError(f"Unknown DATASET={DATASET!r}")
+
+
 def _extract_subwindow_time_context(sw_df: pd.DataFrame, sw_idx: int) -> dict:
-    """Time context for a forecast sub-window. The 'month' column in this
-    dataset stores the HOUR-OF-DAY, kept consistent with _extract_time_context."""
+    """Time context for a forecast sub-window. Resolves the calendar/hour
+    columns through the DATASET-aware ``_row_calendar``."""
     sw_start = sw_df.iloc[0]
     sw_end = sw_df.iloc[-1]
     return {
         "subwindow_idx": int(sw_idx),
-        "start": {
-            "solar_month": int(sw_start.get("solar_month", 0)),
-            "solar_day":   int(sw_start.get("solar_day", 0)),
-            "hour":        int(sw_start.get("month", 0)),
-            "minute":      int(sw_start.get("minute", 0)),
-        },
-        "end": {
-            "solar_month": int(sw_end.get("solar_month", 0)),
-            "solar_day":   int(sw_end.get("solar_day", 0)),
-            "hour":        int(sw_end.get("month", 0)),
-            "minute":      int(sw_end.get("minute", 0)),
-        },
-        "season": _season_from_month(int(sw_start.get("solar_month", 1))),
+        "start": _row_calendar(sw_start),
+        "end":   _row_calendar(sw_end),
+        "season": _season_from_month(_calendar_month_of(sw_start)),
     }
 
 
@@ -368,52 +435,19 @@ def segment_time_series(
 
 
 def _extract_time_context(lookback_df: pd.DataFrame, forecast_df: pd.DataFrame) -> dict:
-    """Extract human-readable time context for a segment."""
-    context = {}
-
-    # Lookback window time range
+    """Extract human-readable time context for a segment. Resolves the
+    calendar columns through the DATASET-aware ``_row_calendar`` helper."""
     lb_start = lookback_df.iloc[0]
-    lb_end = lookback_df.iloc[-1]
+    lb_end   = lookback_df.iloc[-1]
     fc_start = forecast_df.iloc[0]
-    fc_end = forecast_df.iloc[-1]
-
-    context["lookback_start"] = {
-        "solar_month": int(lb_start.get("solar_month", 0)),
-        "solar_day": int(lb_start.get("solar_day", 0)),
-        "hour": int(lb_start.get("month", 0)),  # 'month' column is actually hour
-        "minute": int(lb_start.get("minute", 0)),
+    fc_end   = forecast_df.iloc[-1]
+    return {
+        "lookback_start": _row_calendar(lb_start),
+        "lookback_end":   _row_calendar(lb_end),
+        "forecast_start": _row_calendar(fc_start),
+        "forecast_end":   _row_calendar(fc_end),
+        "season":         _season_from_month(_calendar_month_of(fc_start)),
     }
-    context["lookback_end"] = {
-        "solar_month": int(lb_end.get("solar_month", 0)),
-        "solar_day": int(lb_end.get("solar_day", 0)),
-        "hour": int(lb_end.get("month", 0)),
-        "minute": int(lb_end.get("minute", 0)),
-    }
-    context["forecast_start"] = {
-        "solar_month": int(fc_start.get("solar_month", 0)),
-        "solar_day": int(fc_start.get("solar_day", 0)),
-        "hour": int(fc_start.get("month", 0)),
-        "minute": int(fc_start.get("minute", 0)),
-    }
-    context["forecast_end"] = {
-        "solar_month": int(fc_end.get("solar_month", 0)),
-        "solar_day": int(fc_end.get("solar_day", 0)),
-        "hour": int(fc_end.get("month", 0)),
-        "minute": int(fc_end.get("minute", 0)),
-    }
-
-    # Derive season from solar month (Northern Hemisphere, China)
-    month = int(fc_start.get("solar_month", 1))
-    if month in [3, 4, 5]:
-        context["season"] = "spring"
-    elif month in [6, 7, 8]:
-        context["season"] = "summer"
-    elif month in [9, 10, 11]:
-        context["season"] = "autumn"
-    else:
-        context["season"] = "winter"
-
-    return context
 
 
 # ============================================================
@@ -475,15 +509,26 @@ def sample_segments_for_llm(
 # ============================================================
 
 # Key channels to keep in the compact LLM representation.
-# Drops redundant calendar columns (keep solar_month, hour, day_of_week).
-COMPACT_CONTINUOUS_CHANNELS = [
-    "Skin_temperature", "Relative_humidity",
-    "Surface_net_solar_radiation", "Total_precipitation_4h_ahead",
-    "10_metre_wind", "load",
-]
-COMPACT_DISCRETE_CHANNELS = [
-    "solar_month", "month", "is_holiday", "is_workday", "day_of_week", "pricing",
-]
+# DATASET-aware: the compact view changes per schema.
+if DATASET == "LOF":
+    COMPACT_CONTINUOUS_CHANNELS = [
+        "Skin_temperature", "Relative_humidity",
+        "Surface_net_solar_radiation", "Total_precipitation_4h_ahead",
+        "10_metre_wind", "load",
+    ]
+    COMPACT_DISCRETE_CHANNELS = [
+        "solar_month", "month", "is_holiday", "is_workday", "day_of_week", "pricing",
+    ]
+elif DATASET == "PRSA":
+    COMPACT_CONTINUOUS_CHANNELS = [
+        "PM10", "TEMP", "PRES", "DEWP", "WSPM", "RAIN", "O3", "PM2.5",
+    ]
+    COMPACT_DISCRETE_CHANNELS = [
+        "month", "day", "hour", "year",
+    ]
+else:
+    COMPACT_CONTINUOUS_CHANNELS = []
+    COMPACT_DISCRETE_CHANNELS   = []
 # For continuous channels, keep only mean, std, slope (3 numbers instead of 10)
 # For discrete channels, keep only mode
 
@@ -513,9 +558,9 @@ def compact_segment(seg: dict) -> dict:
             lb[ch] = {"mode": s["mode"]}
     compact["lb"] = lb
 
-    # Forecast: just the target variable
-    if "load" in seg["forecast_stats"]:
-        fs = seg["forecast_stats"]["load"]
+    # Forecast: just the target variable.
+    if _TARGET_COL and _TARGET_COL in seg["forecast_stats"]:
+        fs = seg["forecast_stats"][_TARGET_COL]
         compact["fc"] = {"m": fs["mean"], "s": fs["std"], "sl": fs["slope"]}
 
     # Cross-channel: keep as-is (already small)
@@ -602,13 +647,24 @@ def run_preprocessing(
     )
     print(f"  Sampled: {len(sampled_segments)} segments")
 
+    # DATASET-specific metadata fragments shared between full and compact outputs.
+    if DATASET == "LOF":
+        _time_res, _tgt, _tgt_desc = "15 minutes", "load", "Electricity load in MW"
+    elif DATASET == "PRSA":
+        _time_res = "1 hour"
+        _tgt     = "PM2.5"
+        _tgt_desc = ("PM2.5 concentration in micrograms per cubic meter at a "
+                     "Beijing air-quality monitoring station")
+    else:
+        _time_res, _tgt, _tgt_desc = "unknown", "unknown", "unknown"
+
     # Step 4: Build metadata
     metadata = {
         "dataset_name": dataset_name,
         "data_path": data_path,
         "total_rows": len(df),
         "training_rows": len(train_df),
-        "time_resolution": "15 minutes",
+        "time_resolution": _time_res,
         "input_length": input_length,
         "output_length": output_length,
         "stride": stride,
@@ -616,8 +672,8 @@ def run_preprocessing(
         "subwindow_length": output_length // n_subwindows,
         "total_segments": len(all_segments),
         "sampled_segments": len(sampled_segments),
-        "target_variable": "load",
-        "target_description": "Electricity load in MW",
+        "target_variable": _tgt,
+        "target_description": _tgt_desc,
         "channels": {
             col: CHANNEL_META[col] for col in df.columns if col in CHANNEL_META
         },
@@ -655,9 +711,9 @@ def run_preprocessing(
     compact_output = {
         "metadata": {
             "dataset_name": dataset_name,
-            "target_variable": "load",
-            "target_description": "Electricity load in MW",
-            "time_resolution": "15 minutes",
+            "target_variable": _tgt,
+            "target_description": _tgt_desc,
+            "time_resolution": _time_res,
             "input_length": input_length,
             "output_length": output_length,
             "total_segments": len(all_segments),
