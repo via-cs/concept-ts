@@ -105,6 +105,7 @@ class ConceptBottleneckModel(nn.Module):
         decoder_depth: int = 3,
         sub_window_id_dim: int = 16,
         residual_dim: int = 16,
+        single_forecast_bottleneck: bool = False,
         use_rev_in: int = 1,
         norm_type: str = "B",
     ):
@@ -122,6 +123,7 @@ class ConceptBottleneckModel(nn.Module):
         self.sub_window_length   = output_length // n_subwindows
         self.residual_dim        = int(residual_dim)
         self.concept_emb_dim     = int(concept_emb_dim)
+        self.single_forecast_bottleneck = bool(single_forecast_bottleneck)
 
         # ---- Encoder backbone ----
         # We deliberately disable the encoder's internal time_pool (if it has
@@ -176,9 +178,13 @@ class ConceptBottleneckModel(nn.Module):
         # fired it; only the input z_per_sw[k] (and thus the resulting
         # embedding vector) differs. This mirrors how the static embedding
         # matrix was shared previously.
+        # Number of forecast predictors:
+        #   single_forecast_bottleneck=False (default): N (one per sub-window)
+        #   single_forecast_bottleneck=True            : 1 (shared across all sub-windows)
+        n_fc_predictors = 1 if self.single_forecast_bottleneck else n_subwindows
         self.forecast_concept_predictors = nn.ModuleList([
             nn.Linear(mid_dim, n_forecast_concepts)
-            for _ in range(n_subwindows)
+            for _ in range(n_fc_predictors)
         ])
         self.forecast_emb_plus  = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
         self.forecast_emb_minus = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
@@ -315,28 +321,46 @@ class ConceptBottleneckModel(nn.Module):
         lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
         lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
 
-        # 3) Forecast concept layers (one per sub-window).
-        # Predictor k sees z_per_sw[k]. Embedding MLPs are shared across
-        # sub-windows but produce DIFFERENT embeddings per sub-window because
-        # their input (z_per_sw[k]) is different.
-        fc_logits_list = []
-        fc_acts_list   = []
-        fc_ctx_list    = []
-        for k in range(self.n_subwindows):
-            lg = self.forecast_concept_predictors[k](z_per_sw[k])    # (B, K_fc)
-            ac = torch.sigmoid(lg)                                    # (B, K_fc)
-            ep = self.forecast_emb_plus(z_per_sw[k]).reshape(B,
+        # 3) Forecast concept layer(s).
+        if self.single_forecast_bottleneck:
+            # Ablation mode: ONE forecast predictor on z_global. The same
+            # concept context is reused for every sub-window's decoding.
+            lg = self.forecast_concept_predictors[0](z_global)       # (B, K_fc)
+            ac = torch.sigmoid(lg)
+            ep = self.forecast_emb_plus(z_global).reshape(B,
                         self.n_forecast_concepts, self.concept_emb_dim)
-            em = self.forecast_emb_minus(z_per_sw[k]).reshape(B,
+            em = self.forecast_emb_minus(z_global).reshape(B,
                         self.n_forecast_concepts, self.concept_emb_dim)
-            a_k = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
-            ctx_3d_k = a_k * ep + (1.0 - a_k) * em                    # (B, K_fc, d)
-            ctx_k = ctx_3d_k.reshape(B, -1)                           # (B, K_fc * d)
-            fc_logits_list.append(lg)
-            fc_acts_list.append(ac)
-            fc_ctx_list.append(ctx_k)
-        fc_logits = torch.stack(fc_logits_list, dim=1)         # (B, N, K_fc)
-        fc_acts   = torch.stack(fc_acts_list,   dim=1)         # (B, N, K_fc)
+            a_g = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
+            ctx_3d = a_g * ep + (1.0 - a_g) * em                      # (B, K_fc, d)
+            ctx_global = ctx_3d.reshape(B, -1)                        # (B, K_fc * d)
+            # Reuse this single context for all sub-window decodings.
+            fc_ctx_list = [ctx_global] * self.n_subwindows
+            # External output: (B, K_fc) -- one activation per concept, no sw axis.
+            fc_logits = lg
+            fc_acts   = ac
+        else:
+            # Standard mode: predictor k sees z_per_sw[k]. Embedding MLPs are
+            # shared across sub-windows but produce DIFFERENT embeddings per
+            # sub-window because their input (z_per_sw[k]) is different.
+            fc_logits_list = []
+            fc_acts_list   = []
+            fc_ctx_list    = []
+            for k in range(self.n_subwindows):
+                lg = self.forecast_concept_predictors[k](z_per_sw[k])    # (B, K_fc)
+                ac = torch.sigmoid(lg)                                    # (B, K_fc)
+                ep = self.forecast_emb_plus(z_per_sw[k]).reshape(B,
+                            self.n_forecast_concepts, self.concept_emb_dim)
+                em = self.forecast_emb_minus(z_per_sw[k]).reshape(B,
+                            self.n_forecast_concepts, self.concept_emb_dim)
+                a_k = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
+                ctx_3d_k = a_k * ep + (1.0 - a_k) * em                    # (B, K_fc, d)
+                ctx_k = ctx_3d_k.reshape(B, -1)                           # (B, K_fc * d)
+                fc_logits_list.append(lg)
+                fc_acts_list.append(ac)
+                fc_ctx_list.append(ctx_k)
+            fc_logits = torch.stack(fc_logits_list, dim=1)         # (B, N, K_fc)
+            fc_acts   = torch.stack(fc_acts_list,   dim=1)         # (B, N, K_fc)
 
         # 4) Residual channel (hybrid CBM). One projection per sub-window;
         # the projection module itself is shared.

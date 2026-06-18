@@ -123,50 +123,89 @@ def _safe_call(fn, x) -> int:
         return 0
 
 
+def _whole_forecast_sub_seg(seg: dict) -> dict:
+    """Build a sub_seg-shaped dict that represents the WHOLE forecast window.
+
+    Used for the single-forecast-bottleneck ablation: forecast concept rules
+    are applied to the whole-forecast stats and a single segment-level time
+    context, producing one label per (segment, concept) instead of one per
+    (segment, sub-window, concept).
+    """
+    tc = seg.get("time_context", {})
+    return {
+        "subwindow_idx":       0,            # not meaningful in this mode
+        "stats":               seg.get("forecast_stats", {}),
+        "time_context": {
+            "subwindow_idx": 0,
+            "start":  tc.get("forecast_start", {}),
+            "end":    tc.get("forecast_end",   {}),
+            "season": tc.get("season"),
+        },
+        "cross_channel_stats": seg.get("cross_channel_stats", {}),
+    }
+
+
 def compute_segment_label_tensors(
     segments: list[dict],
     lookback_match_fns: list,
     forecast_match_fns: list,
+    single_forecast_bottleneck: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply both sets of rules to every segment.
 
     Returns
     -------
     lb_labels : (N_seg, K_lb)
-    fc_labels : (N_seg, K_sw, K_fc)
+    fc_labels :
+        - shape (N_seg, K_sw, K_fc) if single_forecast_bottleneck is False
+          (default; rules applied per sub-window).
+        - shape (N_seg, K_fc)       if single_forecast_bottleneck is True
+          (ablation; rules applied once per segment on the whole forecast window).
     """
     n_seg = len(segments)
     K_lb  = len(lookback_match_fns)
     K_fc  = len(forecast_match_fns)
     if n_seg == 0:
-        return np.zeros((0, K_lb), dtype=np.float32), \
-               np.zeros((0, 0, K_fc), dtype=np.float32)
-    K_sw = len(segments[0].get("subwindow_stats") or [])
-    if K_sw == 0:
-        raise ValueError(
-            "segments[0] has no 'subwindow_stats' field. Re-run preprocessing "
-            "with --n_subwindows so each segment carries per-sub-window stats."
-        )
+        if single_forecast_bottleneck:
+            return (np.zeros((0, K_lb), dtype=np.float32),
+                    np.zeros((0, K_fc), dtype=np.float32))
+        return (np.zeros((0, K_lb), dtype=np.float32),
+                np.zeros((0, 0, K_fc), dtype=np.float32))
 
-    lb_labels = np.zeros((n_seg, K_lb),       dtype=np.float32)
-    fc_labels = np.zeros((n_seg, K_sw, K_fc), dtype=np.float32)
+    lb_labels = np.zeros((n_seg, K_lb), dtype=np.float32)
+    if single_forecast_bottleneck:
+        fc_labels = np.zeros((n_seg, K_fc), dtype=np.float32)
+    else:
+        K_sw = len(segments[0].get("subwindow_stats") or [])
+        if K_sw == 0:
+            raise ValueError(
+                "segments[0] has no 'subwindow_stats' field. Re-run preprocessing "
+                "with --n_subwindows so each segment carries per-sub-window stats."
+            )
+        fc_labels = np.zeros((n_seg, K_sw, K_fc), dtype=np.float32)
 
     for i, seg in enumerate(segments):
         # Lookback labels: rule sees the whole segment dict.
         for j, fn in enumerate(lookback_match_fns):
             lb_labels[i, j] = _safe_call(fn, seg)
 
-        # Forecast labels: rule sees a sub_seg dict per sub-window.
-        cross = seg.get("cross_channel_stats", {})
-        for k, sw in enumerate(seg.get("subwindow_stats", [])):
-            sub_seg = {
-                "subwindow_idx":       int(sw.get("subwindow_idx", k)),
-                "stats":               sw.get("stats", {}),
-                "time_context":        sw.get("time_context", {}),
-                "cross_channel_stats": cross,
-            }
+        if single_forecast_bottleneck:
+            # Forecast labels: rule sees ONE whole-window sub_seg per segment.
+            sub_seg = _whole_forecast_sub_seg(seg)
             for j, fn in enumerate(forecast_match_fns):
-                fc_labels[i, k, j] = _safe_call(fn, sub_seg)
+                fc_labels[i, j] = _safe_call(fn, sub_seg)
+        else:
+            # Forecast labels: rule sees a sub_seg dict per sub-window.
+            cross = seg.get("cross_channel_stats", {})
+            for k, sw in enumerate(seg.get("subwindow_stats", [])):
+                sub_seg = {
+                    "subwindow_idx":       int(sw.get("subwindow_idx", k)),
+                    "stats":               sw.get("stats", {}),
+                    "time_context":        sw.get("time_context", {}),
+                    "cross_channel_stats": cross,
+                }
+                for j, fn in enumerate(forecast_match_fns):
+                    fc_labels[i, k, j] = _safe_call(fn, sub_seg)
 
     return lb_labels, fc_labels
 
@@ -196,13 +235,16 @@ def build_window_label_tables(
     n_windows: int,
     segment_stride: int | None = None,
     only_ok: bool = True,
+    single_forecast_bottleneck: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[dict], list[dict]]:
     """Top-level helper used by ``train_cbm.py``.
 
     Returns
     -------
     lb_window_labels : (n_windows, K_lb)
-    fc_window_labels : (n_windows, K_sw, K_fc)
+    fc_window_labels :
+        - shape (n_windows, K_sw, K_fc) when single_forecast_bottleneck=False
+        - shape (n_windows, K_fc)       when single_forecast_bottleneck=True
     lb_accepted      : list of accepted lookback concept metadata dicts
     fc_accepted      : list of accepted forecast concept metadata dicts
     """
@@ -223,12 +265,19 @@ def build_window_label_tables(
         segment_stride = int(segments[1]["start_idx"] - segments[0]["start_idx"])
     print(f"  segment stride = {segment_stride}")
 
-    lb_seg, fc_seg = compute_segment_label_tensors(segments, lb_fns, fc_fns)
+    lb_seg, fc_seg = compute_segment_label_tensors(
+        segments, lb_fns, fc_fns,
+        single_forecast_bottleneck=single_forecast_bottleneck,
+    )
     print(f"  lookback label positive rates: "
           f"{[round(float(lb_seg[:, j].mean()), 3) for j in range(lb_seg.shape[1])]}")
     if fc_seg.size:
+        # Report along the (last) concept axis whether the fc table is 2D or 3D.
         fc_flat = fc_seg.reshape(-1, fc_seg.shape[-1])
-        print(f"  forecast label positive rates (avg across sub-windows): "
+        scope_note = ("whole forecast window"
+                       if single_forecast_bottleneck else
+                       "avg across sub-windows")
+        print(f"  forecast label positive rates ({scope_note}): "
               f"{[round(float(fc_flat[:, j].mean()), 3) for j in range(fc_flat.shape[1])]}")
 
     lb_win = _broadcast_seg_to_windows(lb_seg, n_windows, segment_stride)

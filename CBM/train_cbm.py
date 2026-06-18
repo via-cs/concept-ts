@@ -143,6 +143,16 @@ def get_args():
                         "with the residual constrained by --alpha_residual_reg. "
                         "At test time, concept-only MAE is computed with residual "
                         "zeroed so you can see how much the residual is helping.")
+    p.add_argument("--single_forecast_bottleneck", action="store_true",
+                   help="ABLATION: collapse the N per-sub-window forecast "
+                        "concept bottlenecks into a single GLOBAL forecast "
+                        "bottleneck. Concept labels are then computed on the "
+                        "whole forecast window (shape (W, K_fc)) instead of "
+                        "per sub-window (shape (W, N, K_fc)). Use to test "
+                        "whether the per-sub-window structure actually helps: "
+                        "if test MAE goes up here, the N-sub-window design is "
+                        "doing real work; if it stays the same or improves, "
+                        "the sub-window split is unnecessary on this dataset.")
 
     p.add_argument("--lr",             type=float, default=3e-4,
                    help="Initial learning rate. Lowered from 1e-3 to stabilize "
@@ -408,41 +418,63 @@ def main():
 
     # ----- Concept labels for TRAIN -----
     print("\n── Building concept labels (train) ──")
+    if args.single_forecast_bottleneck:
+        print("  [ABLATION] Single global forecast bottleneck -- "
+              "labels computed on whole forecast window.")
     lb_train, fc_train, lb_meta, fc_meta = build_window_label_tables(
         concepts_path=args.concepts_path,
         segments_path=args.segments_path,
         n_windows=len(train_data),
         only_ok=True,
+        single_forecast_bottleneck=args.single_forecast_bottleneck,
     )
     K_lb = lb_train.shape[1]
-    K_sw = fc_train.shape[1] if fc_train.ndim == 3 else 0
-    K_fc = fc_train.shape[2] if fc_train.ndim == 3 else 0
-    print(f"  K_lookback = {K_lb}, K_subwindows = {K_sw}, K_forecast = {K_fc}")
-    if K_sw != args.n_subwindows:
-        print(f"  WARNING: --n_subwindows={args.n_subwindows} != K_sw={K_sw} from segments file. "
-              f"Using {K_sw} (taken from preprocessing).")
-        args.n_subwindows = K_sw
+    if args.single_forecast_bottleneck:
+        K_sw = 0
+        K_fc = fc_train.shape[1]
+        print(f"  K_lookback = {K_lb}, K_forecast = {K_fc} (single bottleneck)")
+    else:
+        K_sw = fc_train.shape[1] if fc_train.ndim == 3 else 0
+        K_fc = fc_train.shape[2] if fc_train.ndim == 3 else 0
+        print(f"  K_lookback = {K_lb}, K_subwindows = {K_sw}, K_forecast = {K_fc}")
+        if K_sw != args.n_subwindows:
+            print(f"  WARNING: --n_subwindows={args.n_subwindows} != K_sw={K_sw} from segments file. "
+                  f"Using {K_sw} (taken from preprocessing).")
+            args.n_subwindows = K_sw
 
     # ----- Build val/test concept labels if their segments JSONs were provided -----
+    def _zero_fc(n_windows: int) -> np.ndarray:
+        if args.single_forecast_bottleneck:
+            return np.zeros((n_windows, K_fc), dtype=np.float32)
+        return np.zeros((n_windows, K_sw, K_fc), dtype=np.float32)
+
     def _load_split_labels(name: str, path: str | None, n_windows: int):
         """Return (lb_labels, fc_labels, is_real) for a split."""
         if path is None:
             print(f"  {name}: NO segments path supplied -> labels are placeholder zeros, "
                   "per-concept stats will not be reported for this split.")
-            return (np.zeros((n_windows, K_lb),       dtype=np.float32),
-                    np.zeros((n_windows, K_sw, K_fc), dtype=np.float32),
-                    False)
+            return (np.zeros((n_windows, K_lb), dtype=np.float32),
+                    _zero_fc(n_windows), False)
         lb, fc, _, _ = build_window_label_tables(
             concepts_path=args.concepts_path,
             segments_path=path,
             n_windows=n_windows,
             only_ok=True,
+            single_forecast_bottleneck=args.single_forecast_bottleneck,
         )
-        if fc.shape[1] != K_sw or fc.shape[2] != K_fc:
-            raise ValueError(
-                f"{name} segments at {path} produced fc-label shape {fc.shape}; "
-                f"train produced (W, {K_sw}, {K_fc}). n_subwindows mismatch?"
-            )
+        # Shape match check.
+        if args.single_forecast_bottleneck:
+            if fc.shape[1] != K_fc:
+                raise ValueError(
+                    f"{name} segments at {path} produced fc-label shape {fc.shape}; "
+                    f"train produced (W, {K_fc})."
+                )
+        else:
+            if fc.shape[1] != K_sw or fc.shape[2] != K_fc:
+                raise ValueError(
+                    f"{name} segments at {path} produced fc-label shape {fc.shape}; "
+                    f"train produced (W, {K_sw}, {K_fc}). n_subwindows mismatch?"
+                )
         print(f"  {name}: REAL concept labels loaded "
               f"(lb {lb.shape}, fc {fc.shape}).")
         return lb.astype(np.float32), fc.astype(np.float32), True
@@ -484,6 +516,7 @@ def main():
         decoder_depth       = args.decoder_depth,
         sub_window_id_dim   = args.sw_id_dim,
         residual_dim        = args.residual_dim,
+        single_forecast_bottleneck = args.single_forecast_bottleneck,
         use_rev_in   = 1,
         norm_type    = "B",
     ).to(device)
@@ -579,9 +612,17 @@ def main():
         _print_lookback_table(
             "LOOKBACK concepts on TEST", t_lb_lg, t_lb_la, lb_meta,
         )
-        _print_forecast_table(
-            "FORECAST concepts on TEST", t_fc_lg, t_fc_la, fc_meta, args.n_subwindows,
-        )
+        if args.single_forecast_bottleneck:
+            # Single global forecast bottleneck: report as a flat lookback-style
+            # table (no per-sub-window grid).
+            _print_lookback_table(
+                "FORECAST concepts on TEST (single global bottleneck)",
+                t_fc_lg, t_fc_la, fc_meta,
+            )
+        else:
+            _print_forecast_table(
+                "FORECAST concepts on TEST", t_fc_lg, t_fc_la, fc_meta, args.n_subwindows,
+            )
     else:
         print("\n── Per-concept stats: TEST labels not provided, falling back to TRAIN ──")
         print("    Pass --test_segments_path to get the REAL test-set tables.")
@@ -598,10 +639,16 @@ def main():
         _print_lookback_table(
             "LOOKBACK concepts on TRAIN (fallback)", tr_lb_lg, tr_lb_la, lb_meta,
         )
-        _print_forecast_table(
-            "FORECAST concepts on TRAIN (fallback)", tr_fc_lg, tr_fc_la, fc_meta,
-            args.n_subwindows,
-        )
+        if args.single_forecast_bottleneck:
+            _print_lookback_table(
+                "FORECAST concepts on TRAIN (fallback, single global bottleneck)",
+                tr_fc_lg, tr_fc_la, fc_meta,
+            )
+        else:
+            _print_forecast_table(
+                "FORECAST concepts on TRAIN (fallback)", tr_fc_lg, tr_fc_la, fc_meta,
+                args.n_subwindows,
+            )
 
     # ----- Case studies -----
     if args.case_studies > 0:
@@ -619,14 +666,23 @@ def main():
             for s, j in zip(lb_top.values, lb_top.indices):
                 cm = lb_meta[j.item()]
                 print(f"      {s.item():.3f}  {cm['name']}  ({cm['description'][:60]})")
-            print(f"    top forecast concepts per sub-window:")
-            for sw in range(args.n_subwindows):
-                top = torch.topk(t_fc_acts[w, sw], k=min(3, K_fc))
+            if args.single_forecast_bottleneck:
+                # Single global bottleneck: one set of activations to report.
+                top = torch.topk(t_fc_acts[w], k=min(5, K_fc))
                 names = ", ".join(
                     f"{s.item():.2f}*{fc_meta[j.item()]['name']}"
                     for s, j in zip(top.values, top.indices)
                 )
-                print(f"      sw{sw}: {names}")
+                print(f"    top forecast concepts (single bottleneck): {names}")
+            else:
+                print(f"    top forecast concepts per sub-window:")
+                for sw in range(args.n_subwindows):
+                    top = torch.topk(t_fc_acts[w, sw], k=min(3, K_fc))
+                    names = ", ".join(
+                        f"{s.item():.2f}*{fc_meta[j.item()]['name']}"
+                        for s, j in zip(top.values, top.indices)
+                    )
+                    print(f"      sw{sw}: {names}")
             mae_here = (t_yh[w] - t_yt[w]).abs().mean().item()
             print(f"    per-window MAE = {mae_here:.4f}")
 
