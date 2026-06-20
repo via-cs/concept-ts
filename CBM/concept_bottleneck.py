@@ -100,7 +100,6 @@ class ConceptBottleneckModel(nn.Module):
         n_lookback_concepts: int,
         n_forecast_concepts: int,
         n_subwindows: int = 4,
-        lookback_subwindow_lengths: list | None = None,
         concept_emb_dim: int = 16,
         decoder_hidden: int = 512,
         decoder_depth: int = 3,
@@ -126,30 +125,6 @@ class ConceptBottleneckModel(nn.Module):
         self.concept_emb_dim     = int(concept_emb_dim)
         self.single_forecast_bottleneck = bool(single_forecast_bottleneck)
         self.input_length = int(input_length)
-
-        # Lookback sub-window split. ``lookback_subwindow_lengths`` is either:
-        #   - None or []  ->  no split (single global lookback bottleneck, legacy)
-        #   - list[int]   ->  HIERARCHICAL split (chronological / oldest-first
-        #                     order), sum must equal input_length.
-        # Example for a 96h lookback: [48, 24, 16, 8] gives a recency-weighted
-        # 4-way split where the most recent 8 hours get a dedicated bottleneck.
-        if lookback_subwindow_lengths:
-            self.lookback_subwindow_lengths = [int(x) for x in lookback_subwindow_lengths]
-            if sum(self.lookback_subwindow_lengths) != self.input_length:
-                raise ValueError(
-                    f"sum(lookback_subwindow_lengths) = "
-                    f"{sum(self.lookback_subwindow_lengths)} != input_length "
-                    f"({input_length})"
-                )
-            if any(x <= 0 for x in self.lookback_subwindow_lengths):
-                raise ValueError(
-                    f"lookback_subwindow_lengths must all be > 0, got "
-                    f"{self.lookback_subwindow_lengths}"
-                )
-            self.n_lookback_subwindows = len(self.lookback_subwindow_lengths)
-        else:
-            self.lookback_subwindow_lengths = []
-            self.n_lookback_subwindows = 1
 
         # ---- Encoder backbone ----
         # We deliberately disable the encoder's internal time_pool (if it has
@@ -193,15 +168,13 @@ class ConceptBottleneckModel(nn.Module):
         # We implement each branch as ONE Linear(D, K*d) and reshape to (B, K, d)
         # -- exactly equivalent to K independent Linear(D, d) per concept, but
         # one matmul instead of K.
-        # Lookback predictor(s). When n_lookback_subwindows == 1 (default),
-        # one predictor that consumes z_global -- backward-compatible. When
-        # > 1, one predictor per lookback sub-window (similar in spirit to
-        # the per-sub-window forecast predictors), each consuming its own
-        # mean-pooled patch features.
-        self.lookback_concept_predictors = nn.ModuleList([
-            nn.Linear(mid_dim, n_lookback_concepts)
-            for _ in range(max(1, self.n_lookback_subwindows))
-        ])
+        # Single lookback concept predictor: encoder feature -> K_lb logits.
+        # The lookback is summarized as a whole (no per-sub-window split) --
+        # an ablation showed splitting the lookback hierarchically did NOT
+        # help and inflated parameter count for redundant supervision, since
+        # most lookback concepts are summary-style (season, weather regime)
+        # and don't differ between halves of the same 96-hour history.
+        self.lookback_concept_predictor = nn.Linear(mid_dim, n_lookback_concepts)
         self.lookback_emb_plus  = nn.Linear(mid_dim, n_lookback_concepts * self.concept_emb_dim)
         self.lookback_emb_minus = nn.Linear(mid_dim, n_lookback_concepts * self.concept_emb_dim)
 
@@ -242,27 +215,14 @@ class ConceptBottleneckModel(nn.Module):
         else:
             self.residual_proj = None
 
-        # When n_lookback_subwindows > 1 we need per-lookback-sub-window
-        # features. The encoder exposes per-patch features of shape
-        # (B, M*D, N_patches) via ``forward_with_patches``. For each lookback
-        # sub-window we slice the patches that cover it, mean-pool, then
-        # project M*D -> mid_dim. The encoder already has a ``decode_feature``
-        # Linear(M*D, mid_dim) it uses for its own output path; we reuse the
-        # SAME layer (no extra params) by passing the pooled patch vector
-        # through it.
-        # (When n_lookback_subwindows == 1 we don't touch patch features at
-        # all -- the lookback predictor consumes z_global as before.)
-        self._patch_size = None  # filled lazily from encoder at first forward
-
         # ---- Shared sub-decoder ----
         # Input dims (full-CEM layout):
-        #   lookback context  = N_lb_sw * K_lb * d   (input-conditional embeddings,
-        #                                              concatenated across N_lb_sw)
-        #   forecast context  = K_fc * d             (input-conditional embeddings)
+        #   lookback context  = K_lb * d         (input-conditional embeddings)
+        #   forecast context  = K_fc * d         (input-conditional embeddings)
         #   sub-window id     = sw_id_dim
         #   residual          = residual_dim
         # Output: T_sw forecast values. decoder_depth = number of Linear layers (>=1).
-        lb_ctx_dim = self.n_lookback_subwindows * n_lookback_concepts * self.concept_emb_dim
+        lb_ctx_dim = n_lookback_concepts * self.concept_emb_dim
         fc_ctx_dim = n_forecast_concepts * self.concept_emb_dim
         dec_in_dim = lb_ctx_dim + fc_ctx_dim + sub_window_id_dim + self.residual_dim
         if decoder_depth < 1:
@@ -350,84 +310,23 @@ class ConceptBottleneckModel(nn.Module):
         B = x.shape[0]
         device = x.device
 
-        # 1) Encode. Two cases:
-        #   - n_lookback_subwindows == 1 (default): use forward(); encoder_out
-        #     is (B, T_out, D) when use_time_pool=False, no patch features.
-        #   - n_lookback_subwindows  > 1           : use forward_with_patches()
-        #     to additionally get the (B, M*D, N_patches) tensor, from which
-        #     we slice per-lookback-sub-window pooled features.
-        if self.n_lookback_subwindows > 1:
-            _, encoder_out, patch_features = self.encoder.forward_with_patches(x)
-        else:
-            _, encoder_out = self.encoder(x)
-            patch_features = None
+        # 1) Encode. encoder_out is (B, T_out, D) when use_time_pool was off.
+        _, encoder_out = self.encoder(x)
         z_global, z_per_sw = self._split_encoder_features(encoder_out)
 
-        # 2) Lookback concept layer(s).
-        if self.n_lookback_subwindows == 1:
-            # Single global lookback bottleneck (legacy behavior).
-            lb_logits_single = self.lookback_concept_predictors[0](z_global)  # (B, K_lb)
-            lb_acts_single   = torch.sigmoid(lb_logits_single)
-            lb_eplus  = self.lookback_emb_plus(z_global).reshape(B,
-                            self.n_lookback_concepts, self.concept_emb_dim)
-            lb_eminus = self.lookback_emb_minus(z_global).reshape(B,
-                            self.n_lookback_concepts, self.concept_emb_dim)
-            a_lb = lb_acts_single.unsqueeze(-1)                  # (B, K_lb, 1)
-            lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus
-            lb_ctx    = lb_ctx_3d.reshape(B, -1)                 # (B, K_lb * d)
-            lb_logits = lb_logits_single                          # (B, K_lb)
-            lb_acts   = lb_acts_single
-        else:
-            # N_lb_sw lookback bottlenecks with a HIERARCHICAL split.
-            # patch_features: (B, M*D, N_patches). Lookback covers the first
-            # input_length / patch_stride patches; we slice them according to
-            # ``lookback_subwindow_lengths`` (each entry expressed in TIMESTEPS,
-            # converted to PATCHES by dividing by patch_stride).
-            if self._patch_size is None:
-                self._patch_size = int(getattr(self.encoder, "patch_stride",
-                                                getattr(self.encoder, "patch_size", 4)))
-            ps = self._patch_size
-            # Each length must be divisible by patch_stride so patch boundaries
-            # align with sub-window boundaries.
-            patch_lengths = []
-            for k, ts_len in enumerate(self.lookback_subwindow_lengths):
-                if ts_len % ps != 0:
-                    raise ValueError(
-                        f"lookback_subwindow_lengths[{k}] = {ts_len} is not "
-                        f"divisible by patch_stride = {ps}; cannot align "
-                        f"patch boundaries."
-                    )
-                patch_lengths.append(ts_len // ps)
-            # Cumulative patch offsets: oldest sub-window starts at patch 0.
-            patch_starts = [0]
-            for L in patch_lengths:
-                patch_starts.append(patch_starts[-1] + L)
-
-            lb_logits_list, lb_acts_list, lb_ctx_pieces = [], [], []
-            for k in range(self.n_lookback_subwindows):
-                p_lo = patch_starts[k]
-                p_hi = patch_starts[k + 1]
-                # (B, M*D, n_per_sw) -> mean over patches -> (B, M*D)
-                pooled = patch_features[:, :, p_lo:p_hi].mean(dim=2)
-                # Project M*D -> mid_dim by reusing the encoder's decode_feature.
-                # decode_feature is Linear(M*D, mid_dim); we add a singleton
-                # time axis so its (B, *, M*D) -> (B, *, mid_dim) shape works.
-                z_lb_k = self.encoder.decode_feature(pooled.unsqueeze(1)).squeeze(1)
-                # Concept layer (predictor k + shared embedding MLPs).
-                lg = self.lookback_concept_predictors[k](z_lb_k)              # (B, K_lb)
-                ac = torch.sigmoid(lg)
-                ep = self.lookback_emb_plus(z_lb_k).reshape(B,
-                            self.n_lookback_concepts, self.concept_emb_dim)
-                em = self.lookback_emb_minus(z_lb_k).reshape(B,
-                            self.n_lookback_concepts, self.concept_emb_dim)
-                a_k = ac.unsqueeze(-1)
-                ctx_3d_k = a_k * ep + (1.0 - a_k) * em                         # (B, K_lb, d)
-                lb_logits_list.append(lg)
-                lb_acts_list.append(ac)
-                lb_ctx_pieces.append(ctx_3d_k.reshape(B, -1))                  # (B, K_lb*d)
-            lb_logits = torch.stack(lb_logits_list, dim=1)   # (B, N_lb_sw, K_lb)
-            lb_acts   = torch.stack(lb_acts_list,   dim=1)
-            lb_ctx    = torch.cat(lb_ctx_pieces, dim=-1)     # (B, N_lb_sw * K_lb * d)
+        # 2) Lookback concept layer. Activations from the standard predictor,
+        # embeddings INPUT-CONDITIONAL via two MLP branches:
+        #     ĉ_i = a_i * e_i^+(z_global) + (1 - a_i) * e_i^-(z_global)
+        # The decoder receives concat(ĉ_0, ..., ĉ_{K_lb-1}) in R^{K_lb * d}.
+        lb_logits = self.lookback_concept_predictor(z_global)  # (B, K_lb)
+        lb_acts   = torch.sigmoid(lb_logits)                   # (B, K_lb)
+        lb_eplus  = self.lookback_emb_plus(z_global).reshape(B,
+                        self.n_lookback_concepts, self.concept_emb_dim)
+        lb_eminus = self.lookback_emb_minus(z_global).reshape(B,
+                        self.n_lookback_concepts, self.concept_emb_dim)
+        a_lb = lb_acts.unsqueeze(-1)                            # (B, K_lb, 1)
+        lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
+        lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
 
         # 3) Forecast concept layer(s).
         if self.single_forecast_bottleneck:

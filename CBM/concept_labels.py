@@ -145,38 +145,12 @@ def _whole_forecast_sub_seg(seg: dict) -> dict:
     }
 
 
-def _synthesize_lookback_subwindow_seg(parent_seg: dict, lb_sw_block: dict) -> dict:
-    """Build a seg-shaped dict where ``lookback_stats`` is REPLACED with the
-    given lookback sub-window's stats, so existing lookback rules
-    (``seg.get('lookback_stats', {}).get(...)``) operate on the sub-window
-    instead of the whole lookback. ``time_context.lookback_start`` and
-    ``lookback_end`` are also swapped for the sub-window's own start/end so
-    rules that consult them stay consistent.
-    """
-    tc = dict(parent_seg.get("time_context", {}))
-    sw_tc = lb_sw_block.get("time_context", {})
-    tc["lookback_start"] = sw_tc.get("start", tc.get("lookback_start", {}))
-    tc["lookback_end"]   = sw_tc.get("end",   tc.get("lookback_end",   {}))
-    return {
-        "lookback_stats":      lb_sw_block.get("stats", {}),
-        "forecast_stats":      parent_seg.get("forecast_stats", {}),
-        "subwindow_stats":     parent_seg.get("subwindow_stats", []),
-        "cross_channel_stats": parent_seg.get("cross_channel_stats", {}),
-        "time_context":        tc,
-    }
-
-
 def compute_segment_label_tensors(
     segments: list[dict],
     lookback_match_fns: list,
     forecast_match_fns: list,
     single_forecast_bottleneck: bool = False,
-    n_lookback_subwindows: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """When ``n_lookback_subwindows > 1`` the segments must have a
-    ``lookback_subwindow_stats`` field whose length matches
-    ``n_lookback_subwindows`` (typically a hierarchical / recency-weighted
-    split produced by preprocessing with --lookback_subwindow_lengths)."""
     """Apply both sets of rules to every segment.
 
     Returns
@@ -191,34 +165,14 @@ def compute_segment_label_tensors(
     n_seg = len(segments)
     K_lb  = len(lookback_match_fns)
     K_fc  = len(forecast_match_fns)
-    use_lb_sw = n_lookback_subwindows > 1
-
-    # Lookback label shape:
-    #   (N_seg, K_lb)             when n_lookback_subwindows == 1
-    #   (N_seg, N_lb_sw, K_lb)    when n_lookback_subwindows >  1
-    # Forecast label shape:
-    #   (N_seg, K_fc)             when single_forecast_bottleneck
-    #   (N_seg, N_sw, K_fc)       otherwise
     if n_seg == 0:
-        lb_zero = (np.zeros((0, n_lookback_subwindows, K_lb), dtype=np.float32)
-                   if use_lb_sw else
-                   np.zeros((0, K_lb), dtype=np.float32))
-        fc_zero = (np.zeros((0, K_fc), dtype=np.float32)
-                   if single_forecast_bottleneck else
-                   np.zeros((0, 0, K_fc), dtype=np.float32))
-        return lb_zero, fc_zero
+        if single_forecast_bottleneck:
+            return (np.zeros((0, K_lb), dtype=np.float32),
+                    np.zeros((0, K_fc), dtype=np.float32))
+        return (np.zeros((0, K_lb), dtype=np.float32),
+                np.zeros((0, 0, K_fc), dtype=np.float32))
 
-    if use_lb_sw:
-        if not segments[0].get("lookback_subwindow_stats"):
-            raise ValueError(
-                "n_lookback_subwindows > 1 but segments[0] has no "
-                "'lookback_subwindow_stats' field. Re-run preprocessing with "
-                "--n_lookback_subwindows."
-            )
-        lb_labels = np.zeros((n_seg, n_lookback_subwindows, K_lb), dtype=np.float32)
-    else:
-        lb_labels = np.zeros((n_seg, K_lb), dtype=np.float32)
-
+    lb_labels = np.zeros((n_seg, K_lb), dtype=np.float32)
     if single_forecast_bottleneck:
         fc_labels = np.zeros((n_seg, K_fc), dtype=np.float32)
     else:
@@ -231,15 +185,9 @@ def compute_segment_label_tensors(
         fc_labels = np.zeros((n_seg, K_sw, K_fc), dtype=np.float32)
 
     for i, seg in enumerate(segments):
-        # Lookback labels.
-        if use_lb_sw:
-            for k, lb_sw in enumerate(seg.get("lookback_subwindow_stats", [])):
-                synth = _synthesize_lookback_subwindow_seg(seg, lb_sw)
-                for j, fn in enumerate(lookback_match_fns):
-                    lb_labels[i, k, j] = _safe_call(fn, synth)
-        else:
-            for j, fn in enumerate(lookback_match_fns):
-                lb_labels[i, j] = _safe_call(fn, seg)
+        # Lookback labels: rule sees the whole segment dict.
+        for j, fn in enumerate(lookback_match_fns):
+            lb_labels[i, j] = _safe_call(fn, seg)
 
         if single_forecast_bottleneck:
             # Forecast labels: rule sees ONE whole-window sub_seg per segment.
@@ -288,7 +236,6 @@ def build_window_label_tables(
     segment_stride: int | None = None,
     only_ok: bool = True,
     single_forecast_bottleneck: bool = False,
-    n_lookback_subwindows: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, list[dict], list[dict]]:
     """Top-level helper used by ``train_cbm.py``.
 
@@ -321,14 +268,9 @@ def build_window_label_tables(
     lb_seg, fc_seg = compute_segment_label_tensors(
         segments, lb_fns, fc_fns,
         single_forecast_bottleneck=single_forecast_bottleneck,
-        n_lookback_subwindows=n_lookback_subwindows,
     )
-    # Lookback rate report works for both shapes by averaging over the last axis.
-    lb_flat = lb_seg.reshape(-1, lb_seg.shape[-1]) if lb_seg.ndim == 3 else lb_seg
-    lb_scope = ("avg across lookback sub-windows" if lb_seg.ndim == 3
-                else "whole lookback window")
-    print(f"  lookback label positive rates ({lb_scope}): "
-          f"{[round(float(lb_flat[:, j].mean()), 3) for j in range(lb_flat.shape[1])]}")
+    print(f"  lookback label positive rates: "
+          f"{[round(float(lb_seg[:, j].mean()), 3) for j in range(lb_seg.shape[1])]}")
     if fc_seg.size:
         # Report along the (last) concept axis whether the fc table is 2D or 3D.
         fc_flat = fc_seg.reshape(-1, fc_seg.shape[-1])

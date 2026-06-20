@@ -217,23 +217,6 @@ class ConvEmbedding_Learning(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward_with_patches(self, x: torch.Tensor):
-        """Variant of ``forward`` that ALSO returns the post-ModernTCN-block
-        patch tensor of shape (B, M*D, N_patches).
-
-        The N_patches axis runs over both the lookback AND forecast portions
-        of the input (in temporal order). Specifically, the first
-        ``input_length // patch_stride`` patches cover the lookback window,
-        and the remaining patches cover the forecast window.
-
-        This is consumed by the CBM when ``n_lookback_subwindows > 1`` so it
-        can slice the lookback patches per sub-window. Other consumers should
-        keep using ``forward`` -- the two share their internal computation,
-        so calling ``forward_with_patches`` and ``forward`` separately would
-        be wasteful.
-        """
-        return self._forward_impl(x, return_patches=True)
-
     def forward(self, x: torch.Tensor):
         """
         x : (B, total_length, input_dim) — combined window from LOF_Dataset.
@@ -249,9 +232,6 @@ class ConvEmbedding_Learning(nn.Module):
                      mid_dim) — the per-timestep tensor handed to the
                      prototype layer's matching_head adapter.
         """
-        return self._forward_impl(x, return_patches=False)
-
-    def _forward_impl(self, x: torch.Tensor, return_patches: bool = False):
         B = x.size(0)
 
         # Stage 0+1: per-channel embedding (channel axis preserved)
@@ -267,11 +247,6 @@ class ConvEmbedding_Learning(nn.Module):
         # Stage 4: decode
         _, M, D, N = z.shape
         z = z.reshape(B, M * D, N)                          # (B, M*D, N)
-        # Patch features, captured BEFORE decode_time mixes patches into
-        # output-aligned timesteps. The first ``input_length // patch_stride``
-        # entries along the N axis cover the lookback portion of the input;
-        # the remaining entries cover the forecast portion.
-        patch_features = z
         z = self.decode_time(z)                             # (B, M*D, output_length)
         z = z.transpose(1, 2)                                # (B, output_length, M*D)
         encoder_full = self.decode_feature(z)                # (B, output_length, mid_dim)
@@ -298,8 +273,6 @@ class ConvEmbedding_Learning(nn.Module):
         else:
             encoder = encoder_full                            # (B, output_length, mid_dim)
 
-        if return_patches:
-            return output, encoder, patch_features
         return output, encoder
 
 
