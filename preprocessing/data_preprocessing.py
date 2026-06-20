@@ -463,12 +463,55 @@ def build_subwindow_blocks(forecast_df: pd.DataFrame,
     return blocks
 
 
+def build_lookback_subwindow_blocks(lookback_df: pd.DataFrame,
+                                    sw_lengths: list) -> list:
+    """Slice the LOOKBACK window into chunks of the given sizes and compute
+    per-chunk per-channel stats + a local time_context.
+
+    ``sw_lengths`` is a list of positive integers in CHRONOLOGICAL order
+    (oldest first). Sum must equal len(lookback_df). Typical usage is a
+    HIERARCHICAL / recency-weighted split where the OLDEST chunks are large
+    and the MOST-RECENT chunk is small -- the rationale being that the last
+    few hours of the lookback are disproportionately informative for short-
+    horizon forecasting and deserve their own dedicated concept bottleneck.
+
+    Example for a 96-hour lookback: ``[48, 24, 16, 8]`` produces four blocks
+    covering hours [-96,-48), [-48,-24), [-24,-8), [-8,0) respectively.
+
+    Lookback sub-windows include the FFT frequency-domain features (each
+    sub-window is typically long enough at >=8 samples). Forecast sub-windows
+    skip FFT because they're shorter.
+    """
+    lb_len = len(lookback_df)
+    if sum(sw_lengths) != lb_len:
+        raise ValueError(
+            f"sum(lookback_subwindow_lengths)={sum(sw_lengths)} does not "
+            f"equal lookback length {lb_len}."
+        )
+    blocks = []
+    offset = 0
+    for k, sw_len in enumerate(sw_lengths):
+        if sw_len <= 0:
+            raise ValueError(f"lookback_subwindow_lengths[{k}] = {sw_len} <= 0")
+        sw_df = lookback_df.iloc[offset : offset + sw_len]
+        blocks.append({
+            "subwindow_idx": int(k),
+            "subwindow_length": int(sw_len),
+            "stats":         extract_segment_stats(sw_df, CHANNEL_META,
+                                                    include_freq=True),
+            "time_context":  _extract_subwindow_time_context(sw_df, k),
+        })
+        offset += sw_len
+    return blocks
+
+
 def segment_time_series(
     df: pd.DataFrame,
     input_length: int = 384,
     output_length: int = 96,
     stride: int = 96,
     n_subwindows: int = 4,
+    lookback_subwindow_lengths: list | None = None,
 ) -> list:
     """Segment the time series into non-overlapping (or strided) windows.
 
@@ -526,7 +569,11 @@ def segment_time_series(
         # forecast-side concept layers in the CBM (one rule per sub-window).
         subwindow_blocks = build_subwindow_blocks(forecast_df, n_subwindows=n_subwindows)
 
-        segments.append({
+        # Per-sub-window stats over the LOOKBACK window — only emitted when
+        # ``lookback_subwindow_lengths`` is provided. The CBM's per-lookback-
+        # sub-window bottlenecks consume these. Typical use is a HIERARCHICAL
+        # recency-weighted split (e.g. [48, 24, 16, 8] for a 96-hour lookback).
+        seg_record = {
             "segment_id": seg_id,
             "start_idx": int(start),
             "end_idx": int(end),
@@ -535,7 +582,12 @@ def segment_time_series(
             "subwindow_stats": subwindow_blocks,
             "cross_channel_stats": cross_stats,
             "time_context": time_context,
-        })
+        }
+        if lookback_subwindow_lengths:
+            seg_record["lookback_subwindow_stats"] = build_lookback_subwindow_blocks(
+                lookback_df, sw_lengths=lookback_subwindow_lengths,
+            )
+        segments.append(seg_record)
 
         seg_id += 1
 
@@ -689,6 +741,7 @@ def run_preprocessing(
     stride: int = 96,
     max_segments_for_llm: int = 300,
     n_subwindows: int = 4,
+    lookback_subwindow_lengths: list | None = None,
     split: str = "train",
 ):
     """Run the full Part A preprocessing pipeline.
@@ -745,6 +798,7 @@ def run_preprocessing(
         output_length=output_length,
         stride=stride,
         n_subwindows=n_subwindows,
+        lookback_subwindow_lengths=lookback_subwindow_lengths,
     )
     print(f"  Total segments in {split}: {len(all_segments)}")
 
@@ -778,6 +832,8 @@ def run_preprocessing(
         "stride": stride,
         "n_subwindows": n_subwindows,
         "subwindow_length": output_length // n_subwindows,
+        "lookback_subwindow_lengths": list(lookback_subwindow_lengths) if lookback_subwindow_lengths else [],
+        "n_lookback_subwindows": len(lookback_subwindow_lengths) if lookback_subwindow_lengths else 1,
         "total_segments": len(all_segments),
         "sampled_segments": len(sampled_segments),
         "target_variable": _tgt,
@@ -883,6 +939,16 @@ def main():
                              "Each sub-window gets its own per-channel stats block "
                              "used by the CBM's forecast concept layers. Default 4 "
                              "(96 forecast steps -> 4 x 24-step sub-windows = 4 x 6h).")
+    parser.add_argument("--lookback_subwindow_lengths", type=str, default="",
+                        help="Comma-separated positive integers (chronological / "
+                             "OLDEST-first) giving the size of each lookback "
+                             "sub-window. Sum must equal --input_length. Empty "
+                             "(default) = no split (legacy single global lookback "
+                             "bottleneck). Typical hierarchical / recency-weighted "
+                             "choice for a 96-hour lookback: '48,24,16,8' (the "
+                             "most recent 8 hours get a small dedicated sub-window "
+                             "while the oldest 48 hours are pooled into a coarse "
+                             "summary). Lookback sub-windows include FFT features.")
     parser.add_argument("--split", type=str, default="all",
                         choices=["train", "vali", "test", "all"],
                         help="Which slice of the CSV to segment. Output filename "
@@ -894,6 +960,16 @@ def main():
                              "Default 'all' processes train, vali, AND test in "
                              "sequence (three output triplets).")
     args = parser.parse_args()
+
+    lb_sw_lengths = (
+        [int(x) for x in args.lookback_subwindow_lengths.split(",") if x.strip()]
+        if args.lookback_subwindow_lengths else None
+    )
+    if lb_sw_lengths and sum(lb_sw_lengths) != args.input_length:
+        parser.error(
+            f"sum(--lookback_subwindow_lengths) = {sum(lb_sw_lengths)} != "
+            f"--input_length = {args.input_length}"
+        )
 
     splits_to_run = ["train", "vali", "test"] if args.split == "all" else [args.split]
     for s in splits_to_run:
@@ -907,6 +983,7 @@ def main():
             stride=args.stride,
             max_segments_for_llm=args.max_segments,
             n_subwindows=args.n_subwindows,
+            lookback_subwindow_lengths=lb_sw_lengths,
             split=s,
         )
 

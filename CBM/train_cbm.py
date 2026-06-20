@@ -122,6 +122,16 @@ def get_args():
 
     p.add_argument("--n_subwindows",   type=int, default=4,
                    help="Forecast-side bottlenecks (must equal preprocessing's --n_subwindows).")
+    p.add_argument("--lookback_subwindow_lengths", type=str, default="",
+                   help="Comma-separated positive integers in CHRONOLOGICAL / "
+                        "OLDEST-first order, giving the size (in timesteps) of "
+                        "each lookback sub-window. Sum must equal --input_length. "
+                        "Empty (default) = legacy single global lookback bottleneck. "
+                        "Typical recency-weighted choice for a 96-hour lookback: "
+                        "'48,24,16,8' -- four sub-windows with the most recent "
+                        "8h getting a dedicated small bottleneck. MUST match the "
+                        "value passed to preprocessing's --lookback_subwindow_lengths "
+                        "for label shapes to align.")
     p.add_argument("--concept_emb_dim", type=int, default=16,
                    help="Per-concept embedding dimensionality d in the full-CEM "
                         "design. Each concept owns two MLPs producing input-"
@@ -404,6 +414,20 @@ def main():
     print(f"Using device: {device}")
     set_seed(args.seed)
 
+    # Parse the (possibly empty) lookback-subwindow-lengths string into a list.
+    # Empty -> []. Non-empty -> list of positive ints; sum must equal input_length.
+    if args.lookback_subwindow_lengths:
+        lb_sw_lengths = [int(x) for x in args.lookback_subwindow_lengths.split(",") if x.strip()]
+        if sum(lb_sw_lengths) != args.input_length:
+            raise ValueError(
+                f"sum(--lookback_subwindow_lengths) = {sum(lb_sw_lengths)} != "
+                f"--input_length = {args.input_length}"
+            )
+    else:
+        lb_sw_lengths = []
+    args.lookback_subwindow_lengths = lb_sw_lengths
+    args.n_lookback_subwindows = max(1, len(lb_sw_lengths))
+
     # ----- Datasets -----
     print("\n── Loading data ──")
     train_data = LOF_Dataset(args.input_length, args.output_length, "train",
@@ -427,8 +451,9 @@ def main():
         n_windows=len(train_data),
         only_ok=True,
         single_forecast_bottleneck=args.single_forecast_bottleneck,
+        n_lookback_subwindows=args.n_lookback_subwindows,
     )
-    K_lb = lb_train.shape[1]
+    K_lb = lb_train.shape[-1]
     if args.single_forecast_bottleneck:
         K_sw = 0
         K_fc = fc_train.shape[1]
@@ -448,19 +473,25 @@ def main():
             return np.zeros((n_windows, K_fc), dtype=np.float32)
         return np.zeros((n_windows, K_sw, K_fc), dtype=np.float32)
 
+    def _zero_lb(n_windows: int) -> np.ndarray:
+        if args.n_lookback_subwindows > 1:
+            return np.zeros((n_windows, args.n_lookback_subwindows, K_lb),
+                            dtype=np.float32)
+        return np.zeros((n_windows, K_lb), dtype=np.float32)
+
     def _load_split_labels(name: str, path: str | None, n_windows: int):
         """Return (lb_labels, fc_labels, is_real) for a split."""
         if path is None:
             print(f"  {name}: NO segments path supplied -> labels are placeholder zeros, "
                   "per-concept stats will not be reported for this split.")
-            return (np.zeros((n_windows, K_lb), dtype=np.float32),
-                    _zero_fc(n_windows), False)
+            return (_zero_lb(n_windows), _zero_fc(n_windows), False)
         lb, fc, _, _ = build_window_label_tables(
             concepts_path=args.concepts_path,
             segments_path=path,
             n_windows=n_windows,
             only_ok=True,
             single_forecast_bottleneck=args.single_forecast_bottleneck,
+            n_lookback_subwindows=args.n_lookback_subwindows,
         )
         # Shape match check.
         if args.single_forecast_bottleneck:
@@ -511,6 +542,7 @@ def main():
         n_lookback_concepts = K_lb,
         n_forecast_concepts = K_fc,
         n_subwindows        = args.n_subwindows,
+        lookback_subwindow_lengths = args.lookback_subwindow_lengths,
         concept_emb_dim     = args.concept_emb_dim,
         decoder_hidden      = args.decoder_hidden,
         decoder_depth       = args.decoder_depth,
@@ -609,9 +641,15 @@ def main():
     # overstate generalization.
     if test_labels_real:
         print("\n── Per-concept TEST stats (against REAL test labels) ──")
-        _print_lookback_table(
-            "LOOKBACK concepts on TEST", t_lb_lg, t_lb_la, lb_meta,
-        )
+        if args.n_lookback_subwindows > 1:
+            _print_forecast_table(
+                "LOOKBACK concepts on TEST (per lookback sub-window)",
+                t_lb_lg, t_lb_la, lb_meta, args.n_lookback_subwindows,
+            )
+        else:
+            _print_lookback_table(
+                "LOOKBACK concepts on TEST", t_lb_lg, t_lb_la, lb_meta,
+            )
         if args.single_forecast_bottleneck:
             # Single global forecast bottleneck: report as a flat lookback-style
             # table (no per-sub-window grid).
@@ -636,9 +674,15 @@ def main():
                 tr_fc_lg.append(out["fc_logits"].cpu()); tr_fc_la.append(fc_lab)
         tr_lb_lg = torch.cat(tr_lb_lg); tr_lb_la = torch.cat(tr_lb_la)
         tr_fc_lg = torch.cat(tr_fc_lg); tr_fc_la = torch.cat(tr_fc_la)
-        _print_lookback_table(
-            "LOOKBACK concepts on TRAIN (fallback)", tr_lb_lg, tr_lb_la, lb_meta,
-        )
+        if args.n_lookback_subwindows > 1:
+            _print_forecast_table(
+                "LOOKBACK concepts on TRAIN (fallback, per lookback sub-window)",
+                tr_lb_lg, tr_lb_la, lb_meta, args.n_lookback_subwindows,
+            )
+        else:
+            _print_lookback_table(
+                "LOOKBACK concepts on TRAIN (fallback)", tr_lb_lg, tr_lb_la, lb_meta,
+            )
         if args.single_forecast_bottleneck:
             _print_lookback_table(
                 "FORECAST concepts on TRAIN (fallback, single global bottleneck)",
@@ -661,11 +705,21 @@ def main():
 
         for k_idx, w in enumerate(idx):
             print(f"\n  Case {k_idx+1} (test window {w}):")
-            lb_top = torch.topk(t_lb_acts[w], k=min(5, K_lb))
-            print(f"    top lookback concepts active:")
-            for s, j in zip(lb_top.values, lb_top.indices):
-                cm = lb_meta[j.item()]
-                print(f"      {s.item():.3f}  {cm['name']}  ({cm['description'][:60]})")
+            if args.n_lookback_subwindows > 1:
+                print(f"    top lookback concepts per lookback sub-window:")
+                for lbsw in range(args.n_lookback_subwindows):
+                    top = torch.topk(t_lb_acts[w, lbsw], k=min(3, K_lb))
+                    names = ", ".join(
+                        f"{s.item():.2f}*{lb_meta[j.item()]['name']}"
+                        for s, j in zip(top.values, top.indices)
+                    )
+                    print(f"      lb_sw{lbsw}: {names}")
+            else:
+                lb_top = torch.topk(t_lb_acts[w], k=min(5, K_lb))
+                print(f"    top lookback concepts active:")
+                for s, j in zip(lb_top.values, lb_top.indices):
+                    cm = lb_meta[j.item()]
+                    print(f"      {s.item():.3f}  {cm['name']}  ({cm['description'][:60]})")
             if args.single_forecast_bottleneck:
                 # Single global bottleneck: one set of activations to report.
                 top = torch.topk(t_fc_acts[w], k=min(5, K_fc))
