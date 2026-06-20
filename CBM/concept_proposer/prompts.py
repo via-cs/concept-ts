@@ -174,7 +174,18 @@ PRSA_BLOCK = {
     "TEMP": {{
       "mean": float, "median": float, "std": float, "min": float,
       "max": float, "range": float, "skewness": float,
-      "kurtosis": float, "slope": float, "volume": float
+      "kurtosis": float, "slope": float, "volume": float,
+      # Frequency-domain features (ONLY present on lookback_stats for
+      # continuous channels; sub-windows and forecast_stats do NOT have them).
+      "fft_dom_period_h":  float,   # period (hours) of the strongest non-DC frequency
+      "fft_dom_amp":       float,   # amplitude at that dominant period
+      "fft_spec_entropy":  float,   # 0..1: 0 = strongly periodic, 1 = noisy / flat spectrum
+      "fft_lowfreq_ratio": float,   # 0..1: fraction of energy in the low-frequency half
+                                    #       (trend-vs-noise indicator)
+      "fft_amp_p24h":      float,   # amplitude at the 24-hour period bin (daily cycle)
+      "fft_amp_p12h":      float,   # amplitude at 12 hours (half-day / twice-daily peaks)
+      "fft_amp_p8h":       float,   # amplitude at 8 hours
+      "fft_amp_p6h":       float    # amplitude at 6 hours
     }},
     "hour": {{
       "mode": int, "n_unique": int, "distribution": {{"0": float, "1": float, ...}}
@@ -182,8 +193,9 @@ PRSA_BLOCK = {
     # 15 channels total:
     #   discrete: year (0-4), month (1-12), day (1-31), hour (0-23)
     #   continuous: PM10, SO2, NO2, CO, O3, TEMP, PRES, DEWP, RAIN, WSPM, PM2.5
+    # Every continuous channel has BOTH the standard stats and the fft_* features.
   }},
-  "forecast_stats": {{ ... same shape, computed over the {output_length}-step forecast window ... }},
+  "forecast_stats": {{ ... same continuous + discrete shape but WITHOUT fft_* fields ... }},
   "cross_channel_stats": {{
     "target_corr_PM10":  float,   # PM10 is the most-correlated pollutant
     "target_corr_WSPM":  float,   # wind speed (typically negative: wind disperses PM)
@@ -202,9 +214,18 @@ PRSA_BLOCK = {
 }}
 ```
 
-NOTE: this dataset has no weekday/holiday flags. Day-type rules will not work.
-Wind direction (``wd``) was dropped during cleaning, so only wind SPEED (WSPM)
-is available.""",
+NOTES:
+- This dataset has no weekday/holiday flags. Day-type rules will not work.
+- Wind direction (``wd``) was dropped during cleaning, so only wind SPEED (WSPM) is available.
+- **Frequency stats**: the dataset is sampled hourly, the lookback covers
+  {input_length} samples = {input_length} hours. The smallest period the FFT
+  can resolve is 2h (Nyquist); the longest is the full window {input_length}h.
+  ``fft_amp_p24h`` will be substantially larger than the other harmonics when
+  a channel has a strong daily diurnal cycle (typical for TEMP, NO2, traffic-
+  driven pollutants, less so for PM2.5 which depends more on weather regime).
+  A high ``fft_dom_amp`` with ``fft_dom_period_h`` near 24 means "the signal
+  is strongly daily-periodic". A high ``fft_spec_entropy`` (close to 1) means
+  "no clear periodicity, looks like noise or a slow trend".""",
 
     "subwindow_schema_example": """```python
 {{
@@ -255,6 +276,20 @@ resolution that is {subwindow_hours} hours per sub-window.""",
     "description": "Strong positive correlation between PM2.5 and PM10 in the lookback (typical of dust / combustion sources).",
     "category": "cross_channel",
     "function": "def matches(seg):\\n    c = seg.get('cross_channel_stats', {{}}).get('target_corr_PM10')\\n    return c is not None and c > 0.7"
+  }},
+  {{
+    "id": 3,
+    "name": "is_history_strong_daily_temp_cycle",
+    "description": "Lookback temperature has a strong 24-hour periodicity (clear-sky diurnal cycle -- typical of dry, stable weather without sustained cloud cover).",
+    "category": "frequency",
+    "function": "def matches(seg):\\n    a = seg.get('lookback_stats', {{}}).get('TEMP', {{}}).get('fft_amp_p24h')\\n    return a is not None and a > 60"
+  }},
+  {{
+    "id": 4,
+    "name": "is_history_pm25_noisy_spectrum",
+    "description": "Lookback PM2.5 spectrum is broadband (high entropy) -- no single dominant period, suggesting episodic / event-driven pollution rather than a clean diurnal pattern.",
+    "category": "frequency",
+    "function": "def matches(seg):\\n    e = seg.get('lookback_stats', {{}}).get('PM2.5', {{}}).get('fft_spec_entropy')\\n    return e is not None and e > 0.85"
   }}
 ]""",
 
@@ -369,7 +404,8 @@ Hard requirements for EVERY function (both sets):
    (for forecast rules this is computed across all segment*sub-window pairs).
 6. **Diversity** across categories: ``season``, ``time_of_day``, ``calendar``,
    ``weather_temperature``, ``weather_other``, ``weather_dynamics``,
-   ``pollutant_chemistry``, ``cross_channel``, ``regime``, ``misc``.
+   ``pollutant_chemistry``, ``cross_channel``, ``regime``,
+   ``frequency`` (FFT/periodicity-based, **lookback only**), ``misc``.
 7. **No compounds**. ``is_history_cold`` is good; ``is_history_cold_and_workday``
    is bad (the CBM combines them at the embedding level).
 

@@ -90,6 +90,16 @@ else:
         f"Expected 'LOF' | 'PRSA'."
     )
 
+# Hours per sample -- used by the frequency-domain extractor to translate FFT
+# bin indices into period-in-hours. Keep in sync with the dataset's native
+# sampling rate.
+if DATASET == "LOF":
+    TIME_RESOLUTION_HOURS = 0.25   # 15-min samples
+elif DATASET == "PRSA":
+    TIME_RESOLUTION_HOURS = 1.0    # 1-hour samples
+else:
+    TIME_RESOLUTION_HOURS = 1.0
+
 
 # ============================================================
 # Statistical Extraction Functions
@@ -166,6 +176,81 @@ def extract_continuous_stats(values: np.ndarray) -> dict:
     }
 
 
+def extract_frequency_stats(values: np.ndarray,
+                            time_resolution_hours: float = 1.0) -> dict:
+    """FFT-based summary statistics for a 1D continuous signal.
+
+    Computes the discrete real FFT after removing the mean, then surfaces:
+
+    - ``fft_dom_period_h``    : period (hours) of the strongest non-DC component
+    - ``fft_dom_amp``         : amplitude at that dominant period
+    - ``fft_spec_entropy``    : normalized entropy of the (non-DC) spectrum
+                                 (0 = concentrated/strongly periodic; 1 = flat/noisy)
+    - ``fft_lowfreq_ratio``   : fraction of spectral energy in the low-frequency
+                                 (long-period) half -- a trend-vs-noise indicator
+    - ``fft_amp_p{24,12,8,6}h``: amplitude at the bin closest to each target
+                                 period in hours. Only emitted when the window
+                                 is at least one period long.
+
+    Skipped (returns {}) for signals shorter than 8 samples.
+    """
+    n = len(values)
+    if n < 8:
+        return {}
+
+    x = np.asarray(values, dtype=np.float64) - float(np.mean(values))
+    fft = np.fft.rfft(x)
+    amps = np.abs(fft)
+    if len(amps) <= 1:
+        return {}
+    amps_nodc = amps[1:]
+    if amps_nodc.sum() < 1e-9:
+        return {}
+
+    # Period (in hours) of each non-DC bin k = 1..len(amps)-1.
+    # Bin k = k cycles in the window's duration (n * time_resolution_hours).
+    window_duration_h = n * time_resolution_hours
+    periods_h = np.array(
+        [window_duration_h / k for k in range(1, len(amps))], dtype=np.float64,
+    )
+
+    dom_idx     = int(np.argmax(amps_nodc))
+    dom_period  = float(periods_h[dom_idx])
+    dom_amp     = float(amps_nodc[dom_idx])
+
+    p = amps_nodc / (amps_nodc.sum() + 1e-12)
+    sp_ent = (float(-np.sum(p * np.log(p + 1e-12)) / np.log(len(p) + 1e-12))
+              if len(p) > 1 else 0.0)
+
+    n_half          = max(1, len(amps_nodc) // 2)
+    lowfreq_energy  = float(amps_nodc[:n_half].sum())
+    total_energy    = float(amps_nodc.sum())
+    lowfreq_ratio   = lowfreq_energy / (total_energy + 1e-12)
+
+    out = {
+        "fft_dom_period_h":  round(dom_period, 2),
+        "fft_dom_amp":       round(dom_amp, 2),
+        "fft_spec_entropy":  round(sp_ent, 3),
+        "fft_lowfreq_ratio": round(lowfreq_ratio, 3),
+    }
+
+    def _amp_at_period(target_h: float) -> float:
+        if target_h <= 0:
+            return 0.0
+        target_k = window_duration_h / target_h
+        bin_k = int(round(target_k))
+        if 1 <= bin_k < len(amps):
+            return float(amps[bin_k])
+        return 0.0
+
+    for tp_h in (24, 12, 8, 6):
+        # Only emit if the window is long enough to contain at least one period.
+        if window_duration_h >= tp_h:
+            out[f"fft_amp_p{tp_h}h"] = round(_amp_at_period(tp_h), 2)
+
+    return out
+
+
 def extract_discrete_stats(values: np.ndarray) -> dict:
     """
     mode, unique count, and value distribution.
@@ -189,8 +274,21 @@ def extract_discrete_stats(values: np.ndarray) -> dict:
     }
 
 
-def extract_segment_stats(segment_df: pd.DataFrame, channel_meta: dict) -> dict:
-    """Extract statistics for all channels in a single segment."""
+def extract_segment_stats(segment_df: pd.DataFrame,
+                          channel_meta: dict,
+                          include_freq: bool = False) -> dict:
+    """Extract statistics for all channels in a single segment.
+
+    Args
+    ----
+    segment_df    : the window's dataframe slice.
+    channel_meta  : type/description per column (continuous vs discrete).
+    include_freq  : if True, augment each continuous channel's stats with
+                    frequency-domain features (``fft_*``). Typically passed
+                    True for the LOOKBACK window only -- the forecast window
+                    and sub-windows are usually too short for an informative
+                    FFT.
+    """
     stats = {}
     for col in segment_df.columns:
         if col not in channel_meta:
@@ -198,6 +296,10 @@ def extract_segment_stats(segment_df: pd.DataFrame, channel_meta: dict) -> dict:
         values = segment_df[col].values
         if channel_meta[col]["type"] == "continuous":
             stats[col] = extract_continuous_stats(values)
+            if include_freq and len(values) >= 16:
+                stats[col].update(
+                    extract_frequency_stats(values, TIME_RESOLUTION_HOURS)
+                )
         else:
             stats[col] = extract_discrete_stats(values)
     return stats
@@ -405,8 +507,14 @@ def segment_time_series(
         # Time context: what calendar period does this segment cover
         time_context = _extract_time_context(lookback_df, forecast_df)
 
-        # Per-channel statistics for lookback window (all channels)
-        lookback_stats = extract_segment_stats(lookback_df, CHANNEL_META)
+        # Per-channel statistics for lookback window (all channels). The
+        # lookback also gets frequency-domain features (FFT amplitudes at the
+        # 24h/12h/8h/6h periods plus dominant-period / spectral-entropy /
+        # low-frequency-ratio summaries). The forecast and sub-windows skip
+        # this -- their windows are usually too short for an informative FFT.
+        lookback_stats = extract_segment_stats(
+            lookback_df, CHANNEL_META, include_freq=True,
+        )
 
         # Per-channel statistics for forecast window (target + key covariates)
         forecast_stats = extract_segment_stats(forecast_df, CHANNEL_META)
