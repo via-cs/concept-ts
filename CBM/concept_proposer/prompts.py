@@ -316,6 +316,30 @@ resolution that is {subwindow_hours} hours per sub-window.""",
     "function": "def matches(sub_seg):\\n    d = sub_seg.get('stats', {{}}).get('DEWP', {{}}).get('mean')\\n    return d is not None and d > 10"
   }}
 ]""",
+
+    "example_forecast_global_concepts": """[
+  {{
+    "id": 0,
+    "name": "is_forecast_high_peak_pm25",
+    "description": "Peak PM2.5 over the WHOLE 24-hour forecast exceeds 150 ug/m^3 -- forecast contains at least one heavy-pollution hour.",
+    "category": "aggregate",
+    "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('PM2.5', {{}}).get('max')\\n    return m is not None and m > 150"
+  }},
+  {{
+    "id": 1,
+    "name": "is_forecast_pm25_trending_up",
+    "description": "PM2.5 slope over the WHOLE forecast is positive AND non-trivial -- pollution rising across the horizon.",
+    "category": "trend",
+    "function": "def matches(sub_seg):\\n    s = sub_seg.get('stats', {{}}).get('PM2.5', {{}}).get('slope')\\n    return s is not None and s > 0.5"
+  }},
+  {{
+    "id": 2,
+    "name": "is_forecast_uniformly_calm",
+    "description": "Wind speed across the whole forecast stays both low (mean < 1.5) AND uniform (std < 0.5) -- prolonged stagnation regime.",
+    "category": "persistence",
+    "function": "def matches(sub_seg):\\n    w = sub_seg.get('stats', {{}}).get('WSPM', {{}})\\n    m, s = w.get('mean'), w.get('std')\\n    return m is not None and s is not None and m < 1.5 and s < 0.5"
+  }}
+]""",
 }
 
 
@@ -368,16 +392,20 @@ A lookback concept function `def matches(seg) -> bool` receives this dict:
 
 {_BLOCK['lookback_schema_example']}
 
-## Schema 2 — sub-window dict (for FORECAST concepts)
+## Schema 2 — sub-window dict (for FORECAST and FORECAST_GLOBAL concepts)
 
-A forecast concept function `def matches(sub_seg) -> bool` receives this dict
-(one per sub-window, the same rule is applied to all {{n_subwindows}} sub-windows):
+A forecast concept function `def matches(sub_seg) -> bool` receives this dict.
+Per-sub-window forecast concepts get one such dict per sub-window (rule applied
+{{n_subwindows}} times). Global-forecast concepts get ONE such dict per segment
+whose ``stats`` and ``time_context`` cover the WHOLE {{output_length}}-step
+forecast window (i.e. ``stats`` is the segment's full ``forecast_stats`` and
+``time_context.start`` / ``end`` are the segment's ``forecast_start`` / ``end``):
 
 {_BLOCK['subwindow_schema_example']}
 
 ## Your Task
 
-Propose:
+Propose THREE concept sets:
 
   * Exactly **{{n_lookback_concepts}} LOOKBACK concepts**. These probe the HISTORY:
     things like "lookback temperature was cold", "lookback load was high",
@@ -385,13 +413,32 @@ Propose:
     `seg['cross_channel_stats']`, `seg['time_context']` (especially
     `lookback_start`/`lookback_end`).
 
-  * Exactly **{{n_forecast_concepts}} FORECAST concepts**. These probe ONE sub-window
-    of the forecast at a time: things like "temperature rising in this block",
-    "this is the evening peak block", "this block is humid". Operate on
-    `sub_seg['stats']`, `sub_seg['time_context']` (especially `start.hour`,
-    `season`), and `sub_seg['cross_channel_stats']`.
+  * Exactly **{{n_forecast_concepts}} FORECAST-SUB-WINDOW concepts**. These probe
+    ONE sub-window of the forecast at a time (each rule fires {{n_subwindows}}
+    times per segment, once per sub-window): things like "temperature rising
+    in this block", "this is the evening peak block", "this block is humid".
+    Operate on `sub_seg['stats']`, `sub_seg['time_context']` (especially
+    `start.hour`, `season`), and `sub_seg['cross_channel_stats']`.
+    These are LOCAL, time-resolved descriptors.
 
-Hard requirements for EVERY function (both sets):
+  * Exactly **{{n_forecast_global_concepts}} FORECAST-GLOBAL concepts**. These probe
+    the WHOLE forecast window as a single unit (each rule fires ONCE per
+    segment). They should capture properties that DO NOT decompose into
+    sub-window concepts -- aggregates, thresholds spanning the whole horizon,
+    persistence across the forecast, cross-block comparisons. Good examples:
+      - "max PM2.5 over the forecast exceeds 150" (aggregate threshold)
+      - "PM2.5 slope across the WHOLE forecast is positive" (whole-horizon trend)
+      - "wind stays low AND uniform across the whole forecast" (persistence)
+      - "temperature range across the forecast exceeds 15 deg C" (aggregate span)
+    Operate on the same ``sub_seg`` API, but the ``stats`` here cover the full
+    forecast window so e.g. ``stats['PM2.5']['max']`` is the max over all
+    {{output_length}} forecast steps. Bad examples (avoid these -- they duplicate
+    the sub-window set):
+      - "forecast is in winter" (use a sub-window concept; it'll fire on every sub-window of a winter segment)
+      - "forecast has at least one humid hour" (better as sub-window "is_humid_block")
+      - "temperature is rising during the forecast" (better as sub-window dynamics)
+
+Hard requirements for EVERY function (all three sets):
 
 1. Named exactly ``matches``. Single positional arg.
 2. **ATOMIC**: the body is ONE return statement evaluating a single boolean
@@ -405,7 +452,9 @@ Hard requirements for EVERY function (both sets):
 6. **Diversity** across categories: ``season``, ``time_of_day``, ``calendar``,
    ``weather_temperature``, ``weather_other``, ``weather_dynamics``,
    ``pollutant_chemistry``, ``cross_channel``, ``regime``,
-   ``frequency`` (FFT/periodicity-based, **lookback only**), ``misc``.
+   ``frequency`` (FFT/periodicity-based, **lookback only**),
+   ``aggregate`` / ``threshold`` / ``persistence`` / ``trend`` (good fits for
+   the FORECAST-GLOBAL set), ``misc``.
 7. **No compounds**. ``is_history_cold`` is good; ``is_history_cold_and_workday``
    is bad (the CBM combines them at the embedding level).
 
@@ -415,13 +464,14 @@ Return a single JSON object with this exact shape:
 
 ```json
 {{{{
-  "lookback_concepts": [...{_BLOCK['example_lookback_concepts']}...],
-  "forecast_concepts": [...{_BLOCK['example_forecast_concepts']}...]
+  "lookback_concepts":        [...{_BLOCK['example_lookback_concepts']}...],
+  "forecast_concepts":        [...{_BLOCK['example_forecast_concepts']}...],
+  "forecast_global_concepts": [...{_BLOCK['example_forecast_global_concepts']}...]
 }}}}
 ```
 
 IDs in each array run 0..K-1 independently (lookback ids start at 0, forecast
-ids also start at 0).
+sub-window ids start at 0, forecast-global ids start at 0).
 
 Return ONLY the JSON object. No prose before or after.
 """

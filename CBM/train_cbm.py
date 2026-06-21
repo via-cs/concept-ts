@@ -73,20 +73,25 @@ from dataloader.dataloader import LOF_Dataset
 # ---------------------------------------------------------------------------
 
 class CBMDataset(Dataset):
-    def __init__(self, base: Dataset, lb_labels: np.ndarray, fc_labels: np.ndarray):
-        assert len(base) == len(lb_labels) == len(fc_labels), (
-            f"len(base)={len(base)} vs lb={len(lb_labels)} vs fc={len(fc_labels)}"
+    def __init__(self, base: Dataset,
+                 lb_labels: np.ndarray,
+                 fc_labels: np.ndarray,
+                 gfc_labels: np.ndarray):
+        assert len(base) == len(lb_labels) == len(fc_labels) == len(gfc_labels), (
+            f"len(base)={len(base)} vs lb={len(lb_labels)} vs "
+            f"fc={len(fc_labels)} vs gfc={len(gfc_labels)}"
         )
-        self.base      = base
-        self.lb_labels = torch.from_numpy(lb_labels).float()    # (N, K_lb)
-        self.fc_labels = torch.from_numpy(fc_labels).float()    # (N, K_sw, K_fc)
+        self.base       = base
+        self.lb_labels  = torch.from_numpy(lb_labels).float()    # (N, K_lb)
+        self.fc_labels  = torch.from_numpy(fc_labels).float()    # (N, K_sw, K_fc)
+        self.gfc_labels = torch.from_numpy(gfc_labels).float()   # (N, K_gfc); K_gfc may be 0
 
     def __len__(self) -> int:
         return len(self.base)
 
     def __getitem__(self, idx: int):
         x, y = self.base[idx]
-        return x, y, self.lb_labels[idx], self.fc_labels[idx]
+        return x, y, self.lb_labels[idx], self.fc_labels[idx], self.gfc_labels[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +185,10 @@ def get_args():
                         "tends to leave the decoder undersupervised.")
     p.add_argument("--alpha_lookback",         type=float, default=1.0)
     p.add_argument("--alpha_forecast_concept", type=float, default=1.0)
+    p.add_argument("--alpha_forecast_global_concept", type=float, default=1.0,
+                   help="Weight on the global-forecast BCE term. Used only when "
+                        "the concepts JSON includes a non-empty "
+                        "'forecast_global_concepts' set (K_fc_global > 0).")
     p.add_argument("--alpha_residual_reg",     type=float, default=1e-3,
                    help="L2 penalty on the residual channel's magnitude. "
                         "Higher = decoder must rely more on concepts. Lower = "
@@ -210,32 +219,38 @@ def set_seed(seed: int = 0):
 
 def train_one_epoch(model, loader, optimizer, device,
                     alpha_forecast, alpha_lookback, alpha_forecast_concept,
-                    alpha_residual_reg):
+                    alpha_forecast_global_concept, alpha_residual_reg):
     model.train()
-    cum_f, cum_lb, cum_fc, cum_res, n = 0.0, 0.0, 0.0, 0.0, 0
+    cum_f, cum_lb, cum_fc, cum_gfc, cum_res, n = 0.0, 0.0, 0.0, 0.0, 0.0, 0
     l1_fn  = nn.L1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
 
-    for x, y, lb_lab, fc_lab in loader:
-        x      = x.to(device)
-        y      = y.to(device)
-        lb_lab = lb_lab.to(device)
-        fc_lab = fc_lab.to(device)
+    for x, y, lb_lab, fc_lab, gfc_lab in loader:
+        x       = x.to(device)
+        y       = y.to(device)
+        lb_lab  = lb_lab.to(device)
+        fc_lab  = fc_lab.to(device)
+        gfc_lab = gfc_lab.to(device)
         out = model(x)
 
         loss_f   = l1_fn(out["y_hat"],     y)
         loss_lb  = bce_fn(out["lb_logits"], lb_lab)
         loss_fc  = bce_fn(out["fc_logits"], fc_lab)
-        # L2 penalty on residual norm. Mean over all (B, N, residual_dim)
-        # elements -- if residual_dim==0 the tensor is empty and contributes 0.
+        # Global-forecast BCE. When K_gfc == 0 both tensors are empty and we
+        # skip the term entirely (BCEWithLogitsLoss with no elements is a NaN).
+        if out["gfc_logits"].numel() > 0:
+            loss_gfc = bce_fn(out["gfc_logits"], gfc_lab)
+        else:
+            loss_gfc = torch.zeros((), device=device)
         if out["residual"].numel() > 0:
             loss_res = out["residual"].pow(2).mean()
         else:
             loss_res = torch.zeros((), device=device)
-        loss = (alpha_forecast        * loss_f
-                + alpha_lookback         * loss_lb
-                + alpha_forecast_concept * loss_fc
-                + alpha_residual_reg     * loss_res)
+        loss = (alpha_forecast               * loss_f
+                + alpha_lookback                * loss_lb
+                + alpha_forecast_concept        * loss_fc
+                + alpha_forecast_global_concept * loss_gfc
+                + alpha_residual_reg            * loss_res)
 
         optimizer.zero_grad()
         loss.backward()
@@ -244,11 +259,13 @@ def train_one_epoch(model, loader, optimizer, device,
         cum_f   += loss_f.item()
         cum_lb  += loss_lb.item()
         cum_fc  += loss_fc.item()
+        cum_gfc += loss_gfc.item()
         cum_res += loss_res.item()
         n       += 1
 
-    return (cum_f / max(1, n), cum_lb / max(1, n),
-            cum_fc / max(1, n), cum_res / max(1, n))
+    return (cum_f   / max(1, n), cum_lb / max(1, n),
+            cum_fc  / max(1, n), cum_gfc / max(1, n),
+            cum_res / max(1, n))
 
 
 @torch.no_grad()
@@ -261,7 +278,8 @@ def _evaluate_concept_only(model, loader, device) -> tuple[float, float]:
     """
     model.eval()
     mae_sum, mse_sum, denom = 0.0, 0.0, 0
-    for x, y, _, _ in loader:
+    for batch in loader:
+        x, y = batch[0], batch[1]
         x = x.to(device); y = y.to(device)
         out = model(x, disable_residual=True)
         y_hat = out["y_hat"]
@@ -283,26 +301,29 @@ def evaluate(model, loader, device):
          all y_true      (N, T_out, O))
     """
     model.eval()
-    all_lb_lg, all_lb_la = [], []
-    all_fc_lg, all_fc_la = [], []
+    all_lb_lg,  all_lb_la  = [], []
+    all_fc_lg,  all_fc_la  = [], []
+    all_gfc_lg, all_gfc_la = [], []
     all_yh, all_yt = [], []
     mae_sum, mse_sum, denom = 0.0, 0.0, 0
 
-    for x, y, lb_lab, fc_lab in loader:
+    for x, y, lb_lab, fc_lab, gfc_lab in loader:
         x = x.to(device); y = y.to(device)
         out = model(x)
         y_hat = out["y_hat"]
         mae_sum += (y_hat - y).abs().sum().item()
         mse_sum += ((y_hat - y) ** 2).sum().item()
         denom   += y.numel()
-        all_lb_lg.append(out["lb_logits"].cpu()); all_lb_la.append(lb_lab)
-        all_fc_lg.append(out["fc_logits"].cpu()); all_fc_la.append(fc_lab)
+        all_lb_lg.append(out["lb_logits"].cpu());  all_lb_la.append(lb_lab)
+        all_fc_lg.append(out["fc_logits"].cpu());  all_fc_la.append(fc_lab)
+        all_gfc_lg.append(out["gfc_logits"].cpu()); all_gfc_la.append(gfc_lab)
         all_yh.append(y_hat.cpu());                all_yt.append(y.cpu())
 
     return (mse_sum / denom, mae_sum / denom,
-            torch.cat(all_lb_lg), torch.cat(all_lb_la),
-            torch.cat(all_fc_lg), torch.cat(all_fc_la),
-            torch.cat(all_yh),    torch.cat(all_yt))
+            torch.cat(all_lb_lg),  torch.cat(all_lb_la),
+            torch.cat(all_fc_lg),  torch.cat(all_fc_la),
+            torch.cat(all_gfc_lg), torch.cat(all_gfc_la),
+            torch.cat(all_yh),     torch.cat(all_yt))
 
 
 def per_concept_auroc(logits_2d: torch.Tensor, labels_2d: torch.Tensor) -> list[float]:
@@ -421,22 +442,25 @@ def main():
     if args.single_forecast_bottleneck:
         print("  [ABLATION] Single global forecast bottleneck -- "
               "labels computed on whole forecast window.")
-    lb_train, fc_train, lb_meta, fc_meta = build_window_label_tables(
+    lb_train, fc_train, gfc_train, lb_meta, fc_meta, gfc_meta = build_window_label_tables(
         concepts_path=args.concepts_path,
         segments_path=args.segments_path,
         n_windows=len(train_data),
         only_ok=True,
         single_forecast_bottleneck=args.single_forecast_bottleneck,
     )
-    K_lb = lb_train.shape[1]
+    K_lb  = lb_train.shape[1]
+    K_gfc = gfc_train.shape[1]
     if args.single_forecast_bottleneck:
         K_sw = 0
         K_fc = fc_train.shape[1]
-        print(f"  K_lookback = {K_lb}, K_forecast = {K_fc} (single bottleneck)")
+        print(f"  K_lookback = {K_lb}, K_forecast = {K_fc} (single bottleneck), "
+              f"K_forecast_global = {K_gfc}")
     else:
         K_sw = fc_train.shape[1] if fc_train.ndim == 3 else 0
         K_fc = fc_train.shape[2] if fc_train.ndim == 3 else 0
-        print(f"  K_lookback = {K_lb}, K_subwindows = {K_sw}, K_forecast = {K_fc}")
+        print(f"  K_lookback = {K_lb}, K_subwindows = {K_sw}, "
+              f"K_forecast = {K_fc}, K_forecast_global = {K_gfc}")
         if K_sw != args.n_subwindows:
             print(f"  WARNING: --n_subwindows={args.n_subwindows} != K_sw={K_sw} from segments file. "
                   f"Using {K_sw} (taken from preprocessing).")
@@ -449,13 +473,15 @@ def main():
         return np.zeros((n_windows, K_sw, K_fc), dtype=np.float32)
 
     def _load_split_labels(name: str, path: str | None, n_windows: int):
-        """Return (lb_labels, fc_labels, is_real) for a split."""
+        """Return (lb_labels, fc_labels, gfc_labels, is_real) for a split."""
         if path is None:
             print(f"  {name}: NO segments path supplied -> labels are placeholder zeros, "
                   "per-concept stats will not be reported for this split.")
             return (np.zeros((n_windows, K_lb), dtype=np.float32),
-                    _zero_fc(n_windows), False)
-        lb, fc, _, _ = build_window_label_tables(
+                    _zero_fc(n_windows),
+                    np.zeros((n_windows, K_gfc), dtype=np.float32),
+                    False)
+        lb, fc, gfc, _, _, _ = build_window_label_tables(
             concepts_path=args.concepts_path,
             segments_path=path,
             n_windows=n_windows,
@@ -475,21 +501,29 @@ def main():
                     f"{name} segments at {path} produced fc-label shape {fc.shape}; "
                     f"train produced (W, {K_sw}, {K_fc}). n_subwindows mismatch?"
                 )
+        if gfc.shape[1] != K_gfc:
+            raise ValueError(
+                f"{name} segments at {path} produced gfc-label shape {gfc.shape}; "
+                f"train produced (W, {K_gfc})."
+            )
         print(f"  {name}: REAL concept labels loaded "
-              f"(lb {lb.shape}, fc {fc.shape}).")
-        return lb.astype(np.float32), fc.astype(np.float32), True
+              f"(lb {lb.shape}, fc {fc.shape}, gfc {gfc.shape}).")
+        return (lb.astype(np.float32),
+                fc.astype(np.float32),
+                gfc.astype(np.float32),
+                True)
 
     print("\n── Building concept labels (val / test) ──")
-    lb_val,  fc_val,  val_labels_real  = _load_split_labels(
+    lb_val,  fc_val,  gfc_val,  val_labels_real  = _load_split_labels(
         "val",  args.val_segments_path,  len(val_data),
     )
-    lb_test, fc_test, test_labels_real = _load_split_labels(
+    lb_test, fc_test, gfc_test, test_labels_real = _load_split_labels(
         "test", args.test_segments_path, len(test_data),
     )
 
-    train_ds = CBMDataset(train_data, lb_train, fc_train)
-    val_ds   = CBMDataset(val_data,   lb_val,   fc_val)
-    test_ds  = CBMDataset(test_data,  lb_test,  fc_test)
+    train_ds = CBMDataset(train_data, lb_train, fc_train, gfc_train)
+    val_ds   = CBMDataset(val_data,   lb_val,   fc_val,   gfc_val)
+    test_ds  = CBMDataset(test_data,  lb_test,  fc_test,  gfc_test)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                shuffle=True, drop_last=True)
@@ -508,10 +542,11 @@ def main():
         output_length= args.output_length,
         num_blocks   = args.num_layer,
         dropout      = args.dropout,
-        n_lookback_concepts = K_lb,
-        n_forecast_concepts = K_fc,
-        n_subwindows        = args.n_subwindows,
-        concept_emb_dim     = args.concept_emb_dim,
+        n_lookback_concepts        = K_lb,
+        n_forecast_concepts        = K_fc,
+        n_global_forecast_concepts = K_gfc,
+        n_subwindows               = args.n_subwindows,
+        concept_emb_dim            = args.concept_emb_dim,
         decoder_hidden      = args.decoder_hidden,
         decoder_depth       = args.decoder_depth,
         sub_window_id_dim   = args.sw_id_dim,
@@ -545,18 +580,20 @@ def main():
         eff_alpha_forecast = (0.0
                               if epoch < args.concept_warmup_epochs
                               else args.alpha_forecast)
-        l_f, l_lb, l_fc, l_res = train_one_epoch(
+        l_f, l_lb, l_fc, l_gfc, l_res = train_one_epoch(
             model, train_loader, optimizer, device,
             eff_alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
-            args.alpha_residual_reg,
+            args.alpha_forecast_global_concept, args.alpha_residual_reg,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
         improved = val_mae < best_val_mae
         marker = " *" if improved else ""
+        gfc_str = f"  train_gfc_BCE={l_gfc:.4f}" if K_gfc > 0 else ""
         print(f"  [epoch {epoch+1:>3d}/{args.epoch}]  "
               f"train_L1={l_f:.4f}  "
               f"train_lb_BCE={l_lb:.4f}  "
-              f"train_fc_BCE={l_fc:.4f}  "
+              f"train_fc_BCE={l_fc:.4f}"
+              f"{gfc_str}  "
               f"train_res={l_res:.4f}  "
               f"val MAE={val_mae:.4f}{marker}")
         if improved:
@@ -583,9 +620,11 @@ def main():
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
 
     print("\n── Test forecast results ──")
-    test_mse, test_mae, t_lb_lg, t_lb_la, t_fc_lg, t_fc_la, t_yh, t_yt = evaluate(
-        model, test_loader, device,
-    )
+    (test_mse, test_mae,
+     t_lb_lg,  t_lb_la,
+     t_fc_lg,  t_fc_la,
+     t_gfc_lg, t_gfc_la,
+     t_yh,     t_yt) = evaluate(model, test_loader, device)
     print(f"  test MSE      = {test_mse:.6f}  (full model)")
     print(f"  test MAE      = {test_mae:.6f}  (full model)")
 
@@ -623,19 +662,28 @@ def main():
             _print_forecast_table(
                 "FORECAST concepts on TEST", t_fc_lg, t_fc_la, fc_meta, args.n_subwindows,
             )
+        if K_gfc > 0:
+            _print_lookback_table(
+                "GLOBAL-FORECAST concepts on TEST (one rule per whole forecast window)",
+                t_gfc_lg, t_gfc_la, gfc_meta,
+            )
     else:
         print("\n── Per-concept stats: TEST labels not provided, falling back to TRAIN ──")
         print("    Pass --test_segments_path to get the REAL test-set tables.")
-        tr_lb_lg, tr_lb_la, tr_fc_lg, tr_fc_la = [], [], [], []
+        tr_lb_lg,  tr_lb_la  = [], []
+        tr_fc_lg,  tr_fc_la  = [], []
+        tr_gfc_lg, tr_gfc_la = [], []
         model.eval()
         with torch.no_grad():
-            for x, _, lb_lab, fc_lab in train_loader:
+            for x, _, lb_lab, fc_lab, gfc_lab in train_loader:
                 x = x.to(device)
                 out = model(x)
-                tr_lb_lg.append(out["lb_logits"].cpu()); tr_lb_la.append(lb_lab)
-                tr_fc_lg.append(out["fc_logits"].cpu()); tr_fc_la.append(fc_lab)
-        tr_lb_lg = torch.cat(tr_lb_lg); tr_lb_la = torch.cat(tr_lb_la)
-        tr_fc_lg = torch.cat(tr_fc_lg); tr_fc_la = torch.cat(tr_fc_la)
+                tr_lb_lg.append(out["lb_logits"].cpu());  tr_lb_la.append(lb_lab)
+                tr_fc_lg.append(out["fc_logits"].cpu());  tr_fc_la.append(fc_lab)
+                tr_gfc_lg.append(out["gfc_logits"].cpu()); tr_gfc_la.append(gfc_lab)
+        tr_lb_lg  = torch.cat(tr_lb_lg);  tr_lb_la  = torch.cat(tr_lb_la)
+        tr_fc_lg  = torch.cat(tr_fc_lg);  tr_fc_la  = torch.cat(tr_fc_la)
+        tr_gfc_lg = torch.cat(tr_gfc_lg); tr_gfc_la = torch.cat(tr_gfc_la)
         _print_lookback_table(
             "LOOKBACK concepts on TRAIN (fallback)", tr_lb_lg, tr_lb_la, lb_meta,
         )
@@ -649,12 +697,18 @@ def main():
                 "FORECAST concepts on TRAIN (fallback)", tr_fc_lg, tr_fc_la, fc_meta,
                 args.n_subwindows,
             )
+        if K_gfc > 0:
+            _print_lookback_table(
+                "GLOBAL-FORECAST concepts on TRAIN (fallback)",
+                tr_gfc_lg, tr_gfc_la, gfc_meta,
+            )
 
     # ----- Case studies -----
     if args.case_studies > 0:
         print(f"\n── Case studies: {args.case_studies} random test windows ──")
-        t_lb_acts = torch.sigmoid(t_lb_lg)
-        t_fc_acts = torch.sigmoid(t_fc_lg)
+        t_lb_acts  = torch.sigmoid(t_lb_lg)
+        t_fc_acts  = torch.sigmoid(t_fc_lg)
+        t_gfc_acts = torch.sigmoid(t_gfc_lg) if K_gfc > 0 else None
         n_test = t_yh.shape[0]
         rng = np.random.RandomState(args.seed)
         idx = rng.choice(n_test, min(args.case_studies, n_test), replace=False)
@@ -666,6 +720,12 @@ def main():
             for s, j in zip(lb_top.values, lb_top.indices):
                 cm = lb_meta[j.item()]
                 print(f"      {s.item():.3f}  {cm['name']}  ({cm['description'][:60]})")
+            if t_gfc_acts is not None:
+                gfc_top = torch.topk(t_gfc_acts[w], k=min(5, K_gfc))
+                print(f"    top global-forecast concepts active:")
+                for s, j in zip(gfc_top.values, gfc_top.indices):
+                    cm = gfc_meta[j.item()]
+                    print(f"      {s.item():.3f}  {cm['name']}  ({cm['description'][:60]})")
             if args.single_forecast_bottleneck:
                 # Single global bottleneck: one set of activations to report.
                 top = torch.topk(t_fc_acts[w], k=min(5, K_fc))

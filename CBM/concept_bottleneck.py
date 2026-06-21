@@ -99,6 +99,7 @@ class ConceptBottleneckModel(nn.Module):
         dropout: float,
         n_lookback_concepts: int,
         n_forecast_concepts: int,
+        n_global_forecast_concepts: int = 0,
         n_subwindows: int = 4,
         concept_emb_dim: int = 16,
         decoder_hidden: int = 512,
@@ -115,9 +116,10 @@ class ConceptBottleneckModel(nn.Module):
                 f"output_length ({output_length}) must be divisible by "
                 f"n_subwindows ({n_subwindows})."
             )
-        self.n_lookback_concepts = n_lookback_concepts
-        self.n_forecast_concepts = n_forecast_concepts
-        self.n_subwindows        = n_subwindows
+        self.n_lookback_concepts        = n_lookback_concepts
+        self.n_forecast_concepts        = n_forecast_concepts
+        self.n_global_forecast_concepts = int(n_global_forecast_concepts)
+        self.n_subwindows               = n_subwindows
         self.output_length       = output_length
         self.output_dim          = output_dim
         self.sub_window_length   = output_length // n_subwindows
@@ -196,6 +198,25 @@ class ConceptBottleneckModel(nn.Module):
         self.forecast_emb_plus  = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
         self.forecast_emb_minus = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
 
+        # ---- Global forecast bottleneck (full CEM, OPTIONAL) ----
+        # When n_global_forecast_concepts > 0, an extra bottleneck reads
+        # z_global to produce a single set of activations for the WHOLE
+        # forecast window. Its concept-context is concatenated into every
+        # sub-window's decoder input (same value reused across sub-windows --
+        # the global forecast IS one global characterization).
+        # When n_global_forecast_concepts == 0, this bottleneck is skipped
+        # entirely (no params, no decoder-input growth).
+        if self.n_global_forecast_concepts > 0:
+            self.global_forecast_concept_predictor = nn.Linear(
+                mid_dim, self.n_global_forecast_concepts,
+            )
+            self.global_forecast_emb_plus  = nn.Linear(
+                mid_dim, self.n_global_forecast_concepts * self.concept_emb_dim,
+            )
+            self.global_forecast_emb_minus = nn.Linear(
+                mid_dim, self.n_global_forecast_concepts * self.concept_emb_dim,
+            )
+
         # ---- Sub-window id embedding ----
         self.sub_window_id_embed = nn.Embedding(n_subwindows, sub_window_id_dim)
 
@@ -217,14 +238,17 @@ class ConceptBottleneckModel(nn.Module):
 
         # ---- Shared sub-decoder ----
         # Input dims (full-CEM layout):
-        #   lookback context  = K_lb * d         (input-conditional embeddings)
-        #   forecast context  = K_fc * d         (input-conditional embeddings)
-        #   sub-window id     = sw_id_dim
-        #   residual          = residual_dim
+        #   lookback context        = K_lb         * d   (input-conditional)
+        #   forecast (sub-window)   = K_fc         * d   (input-conditional)
+        #   forecast (global)       = K_fc_global  * d   (input-conditional; 0 if disabled)
+        #   sub-window id           = sw_id_dim
+        #   residual                = residual_dim
         # Output: T_sw forecast values. decoder_depth = number of Linear layers (>=1).
-        lb_ctx_dim = n_lookback_concepts * self.concept_emb_dim
-        fc_ctx_dim = n_forecast_concepts * self.concept_emb_dim
-        dec_in_dim = lb_ctx_dim + fc_ctx_dim + sub_window_id_dim + self.residual_dim
+        lb_ctx_dim  = n_lookback_concepts        * self.concept_emb_dim
+        fc_ctx_dim  = n_forecast_concepts        * self.concept_emb_dim
+        gfc_ctx_dim = self.n_global_forecast_concepts * self.concept_emb_dim
+        dec_in_dim  = (lb_ctx_dim + fc_ctx_dim + gfc_ctx_dim
+                       + sub_window_id_dim + self.residual_dim)
         if decoder_depth < 1:
             raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
         layers: list[nn.Module] = []
@@ -328,6 +352,27 @@ class ConceptBottleneckModel(nn.Module):
         lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
         lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
 
+        # 2b) Global forecast concept layer (OPTIONAL). Reads z_global to
+        # produce ONE concept activation pattern characterizing the WHOLE
+        # forecast window. Its context is reused across every sub-window's
+        # decoding.
+        if self.n_global_forecast_concepts > 0:
+            gfc_logits = self.global_forecast_concept_predictor(z_global)   # (B, K_gfc)
+            gfc_acts   = torch.sigmoid(gfc_logits)
+            g_ep = self.global_forecast_emb_plus(z_global).reshape(
+                B, self.n_global_forecast_concepts, self.concept_emb_dim,
+            )
+            g_em = self.global_forecast_emb_minus(z_global).reshape(
+                B, self.n_global_forecast_concepts, self.concept_emb_dim,
+            )
+            a_g  = gfc_acts.unsqueeze(-1)                                    # (B, K_gfc, 1)
+            gfc_ctx_3d = a_g * g_ep + (1.0 - a_g) * g_em                     # (B, K_gfc, d)
+            gfc_ctx    = gfc_ctx_3d.reshape(B, -1)                           # (B, K_gfc * d)
+        else:
+            gfc_logits = x.new_zeros((B, 0))
+            gfc_acts   = x.new_zeros((B, 0))
+            gfc_ctx    = x.new_zeros((B, 0))
+
         # 3) Forecast concept layer(s).
         if self.single_forecast_bottleneck:
             # Ablation mode: ONE forecast predictor on z_global. The same
@@ -386,7 +431,10 @@ class ConceptBottleneckModel(nn.Module):
         for k in range(self.n_subwindows):
             sw_idx = torch.full((B,), k, dtype=torch.long, device=device)
             sw_emb = self.sub_window_id_embed(sw_idx)          # (B, sw_id_dim)
-            parts = [lb_ctx, fc_ctx_list[k], sw_emb]
+            parts = [lb_ctx, fc_ctx_list[k]]
+            if self.n_global_forecast_concepts > 0:
+                parts.append(gfc_ctx)                           # (B, K_gfc * d), shared across sub-windows
+            parts.append(sw_emb)
             if residual_list[k] is not None:
                 parts.append(residual_list[k])                  # (B, residual_dim)
             dec_in = torch.cat(parts, dim=-1)
@@ -401,5 +449,7 @@ class ConceptBottleneckModel(nn.Module):
             "lb_acts":   lb_acts,
             "fc_logits": fc_logits,
             "fc_acts":   fc_acts,
+            "gfc_logits": gfc_logits, # (B, K_gfc); K_gfc=0 -> empty tensor
+            "gfc_acts":   gfc_acts,
             "residual":  residual,   # (B, N, residual_dim) -- penalize in loss
         }

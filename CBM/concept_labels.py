@@ -86,30 +86,33 @@ def _filter_and_compile(concepts: list[dict],
 
 def load_concept_sets(concepts_path: str,
                       only_ok: bool = True
-                      ) -> tuple[tuple[list, list], tuple[list, list]]:
-    """Load the two-set concepts JSON written by ``concept_proposer``.
+                      ) -> tuple[tuple[list, list], tuple[list, list], tuple[list, list]]:
+    """Load the three-set concepts JSON written by ``concept_proposer``.
 
     Returns
     -------
-    (lookback_accepted, lookback_match_fns), (forecast_accepted, forecast_match_fns)
+    (lookback_accepted, lookback_match_fns),
+    (forecast_accepted, forecast_match_fns),
+    (forecast_global_accepted, forecast_global_match_fns)
 
-    Validated concepts JSON layout:
-        {
-          "metadata": {...},
-          "lookback_concepts":  [<concept>, ...],
-          "forecast_concepts":  [<concept>, ...]
-        }
+    The third (``forecast_global_concepts``) is OPTIONAL for backward
+    compatibility with older concepts JSONs. If the key is missing it returns
+    ``([], [])`` and downstream code treats K_fc_global = 0 as "no global
+    forecast bottleneck".
     """
     with open(concepts_path) as f:
         blob = json.load(f)
     if "lookback_concepts" not in blob or "forecast_concepts" not in blob:
         raise ValueError(
-            f"{concepts_path} is not a two-set concepts file. Expected keys "
-            f"'lookback_concepts' and 'forecast_concepts', got {list(blob.keys())}."
+            f"{concepts_path} is missing required keys. Expected "
+            f"'lookback_concepts' and 'forecast_concepts'; got {list(blob.keys())}."
         )
     lb_accepted, lb_fns = _filter_and_compile(blob["lookback_concepts"], only_ok)
     fc_accepted, fc_fns = _filter_and_compile(blob["forecast_concepts"], only_ok)
-    return (lb_accepted, lb_fns), (fc_accepted, fc_fns)
+    # New optional set -- absent for older concept files; treated as empty.
+    raw_global = blob.get("forecast_global_concepts", [])
+    gfc_accepted, gfc_fns = _filter_and_compile(raw_global, only_ok)
+    return (lb_accepted, lb_fns), (fc_accepted, fc_fns), (gfc_accepted, gfc_fns)
 
 
 # ===========================================================================
@@ -149,30 +152,30 @@ def compute_segment_label_tensors(
     segments: list[dict],
     lookback_match_fns: list,
     forecast_match_fns: list,
+    forecast_global_match_fns: list | None = None,
     single_forecast_bottleneck: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Apply both sets of rules to every segment.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Returns (lb_labels, fc_labels, gfc_labels).
 
-    Returns
-    -------
-    lb_labels : (N_seg, K_lb)
-    fc_labels :
-        - shape (N_seg, K_sw, K_fc) if single_forecast_bottleneck is False
-          (default; rules applied per sub-window).
-        - shape (N_seg, K_fc)       if single_forecast_bottleneck is True
-          (ablation; rules applied once per segment on the whole forecast window).
+    ``gfc_labels`` has shape (N_seg, K_fc_global); rules are applied to a
+    whole-forecast sub_seg synthesized from the segment's ``forecast_stats``.
+    If ``forecast_global_match_fns`` is None / empty, gfc_labels has shape
+    (N_seg, 0) -- safe to ignore downstream when K_fc_global = 0.
     """
+    forecast_global_match_fns = forecast_global_match_fns or []
     n_seg = len(segments)
     K_lb  = len(lookback_match_fns)
     K_fc  = len(forecast_match_fns)
+    K_gfc = len(forecast_global_match_fns)
     if n_seg == 0:
+        lb_zero  = np.zeros((0, K_lb),  dtype=np.float32)
+        gfc_zero = np.zeros((0, K_gfc), dtype=np.float32)
         if single_forecast_bottleneck:
-            return (np.zeros((0, K_lb), dtype=np.float32),
-                    np.zeros((0, K_fc), dtype=np.float32))
-        return (np.zeros((0, K_lb), dtype=np.float32),
-                np.zeros((0, 0, K_fc), dtype=np.float32))
+            return lb_zero, np.zeros((0, K_fc), dtype=np.float32), gfc_zero
+        return lb_zero, np.zeros((0, 0, K_fc), dtype=np.float32), gfc_zero
 
-    lb_labels = np.zeros((n_seg, K_lb), dtype=np.float32)
+    lb_labels  = np.zeros((n_seg, K_lb),  dtype=np.float32)
+    gfc_labels = np.zeros((n_seg, K_gfc), dtype=np.float32)
     if single_forecast_bottleneck:
         fc_labels = np.zeros((n_seg, K_fc), dtype=np.float32)
     else:
@@ -207,7 +210,15 @@ def compute_segment_label_tensors(
                 for j, fn in enumerate(forecast_match_fns):
                     fc_labels[i, k, j] = _safe_call(fn, sub_seg)
 
-    return lb_labels, fc_labels
+        # Global-forecast labels: rule sees a sub_seg covering the WHOLE
+        # forecast window (synthesized from seg.forecast_stats and the
+        # segment-level forecast_start/end time context).
+        if K_gfc > 0:
+            whole = _whole_forecast_sub_seg(seg)
+            for j, fn in enumerate(forecast_global_match_fns):
+                gfc_labels[i, j] = _safe_call(fn, whole)
+
+    return lb_labels, fc_labels, gfc_labels
 
 
 # ===========================================================================
@@ -236,24 +247,29 @@ def build_window_label_tables(
     segment_stride: int | None = None,
     only_ok: bool = True,
     single_forecast_bottleneck: bool = False,
-) -> tuple[np.ndarray, np.ndarray, list[dict], list[dict]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray,
+           list[dict], list[dict], list[dict]]:
     """Top-level helper used by ``train_cbm.py``.
 
     Returns
     -------
-    lb_window_labels : (n_windows, K_lb)
-    fc_window_labels :
+    lb_window_labels   : (n_windows, K_lb)
+    fc_window_labels   :
         - shape (n_windows, K_sw, K_fc) when single_forecast_bottleneck=False
         - shape (n_windows, K_fc)       when single_forecast_bottleneck=True
-    lb_accepted      : list of accepted lookback concept metadata dicts
-    fc_accepted      : list of accepted forecast concept metadata dicts
+    gfc_window_labels  : (n_windows, K_fc_global)  -- K_fc_global = 0 when the
+                          concepts JSON has no ``forecast_global_concepts`` key
+                          (backward compat).
+    lb_accepted        : list of accepted lookback concept metadata dicts
+    fc_accepted        : list of accepted forecast (sub-window) concept dicts
+    gfc_accepted       : list of accepted global-forecast concept dicts
     """
-    (lb_accepted, lb_fns), (fc_accepted, fc_fns) = load_concept_sets(
-        concepts_path, only_ok=only_ok
-    )
-    if not lb_accepted and not fc_accepted:
+    (lb_accepted, lb_fns), (fc_accepted, fc_fns), (gfc_accepted, gfc_fns) = \
+        load_concept_sets(concepts_path, only_ok=only_ok)
+    if not lb_accepted and not fc_accepted and not gfc_accepted:
         raise RuntimeError(f"No OK concepts loaded from {concepts_path}.")
-    print(f"  loaded {len(lb_accepted)} lookback + {len(fc_accepted)} forecast concepts")
+    print(f"  loaded {len(lb_accepted)} lookback + {len(fc_accepted)} forecast "
+          f"+ {len(gfc_accepted)} forecast-global concepts")
 
     with open(segments_path) as f:
         segments = json.load(f)["segments"]
@@ -265,21 +281,24 @@ def build_window_label_tables(
         segment_stride = int(segments[1]["start_idx"] - segments[0]["start_idx"])
     print(f"  segment stride = {segment_stride}")
 
-    lb_seg, fc_seg = compute_segment_label_tensors(
-        segments, lb_fns, fc_fns,
+    lb_seg, fc_seg, gfc_seg = compute_segment_label_tensors(
+        segments, lb_fns, fc_fns, gfc_fns,
         single_forecast_bottleneck=single_forecast_bottleneck,
     )
     print(f"  lookback label positive rates: "
           f"{[round(float(lb_seg[:, j].mean()), 3) for j in range(lb_seg.shape[1])]}")
     if fc_seg.size:
-        # Report along the (last) concept axis whether the fc table is 2D or 3D.
         fc_flat = fc_seg.reshape(-1, fc_seg.shape[-1])
         scope_note = ("whole forecast window"
                        if single_forecast_bottleneck else
                        "avg across sub-windows")
         print(f"  forecast label positive rates ({scope_note}): "
               f"{[round(float(fc_flat[:, j].mean()), 3) for j in range(fc_flat.shape[1])]}")
+    if gfc_seg.size:
+        print(f"  forecast-global label positive rates: "
+              f"{[round(float(gfc_seg[:, j].mean()), 3) for j in range(gfc_seg.shape[1])]}")
 
-    lb_win = _broadcast_seg_to_windows(lb_seg, n_windows, segment_stride)
-    fc_win = _broadcast_seg_to_windows(fc_seg, n_windows, segment_stride)
-    return lb_win, fc_win, lb_accepted, fc_accepted
+    lb_win  = _broadcast_seg_to_windows(lb_seg,  n_windows, segment_stride)
+    fc_win  = _broadcast_seg_to_windows(fc_seg,  n_windows, segment_stride)
+    gfc_win = _broadcast_seg_to_windows(gfc_seg, n_windows, segment_stride)
+    return lb_win, fc_win, gfc_win, lb_accepted, fc_accepted, gfc_accepted
