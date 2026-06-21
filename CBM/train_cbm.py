@@ -141,6 +141,16 @@ def get_args():
                         "3 = 2 hidden layers (default).")
     p.add_argument("--sw_id_dim",      type=int, default=16,
                    help="Width of the sub-window-id embedding fed to the shared sub-decoder.")
+    p.add_argument("--sw_gru_hidden",  type=int, default=32,
+                   help="Hidden width of the bidirectional GRU that refines the "
+                        "per-sub-window forecast concept contexts (sequence-aware "
+                        "decoder). Output per sub-window = 2 * sw_gru_hidden dims "
+                        "concatenated into the decoder input. Set 0 to disable "
+                        "this enhancement (legacy behavior). Automatically off "
+                        "when --single_forecast_bottleneck is set (degenerate).")
+    p.add_argument("--sw_summary_dim", type=int, default=64,
+                   help="Width of the Linear projection (K_fc*d -> this) applied "
+                        "before the BiGRU. Only used when --sw_gru_hidden > 0.")
     p.add_argument("--residual_dim",   type=int, default=16,
                    help="Width of the regularized residual channel that bypasses "
                         "the concept layer (hybrid CBM). 0 to disable. The decoder "
@@ -189,6 +199,22 @@ def get_args():
                    help="Weight on the global-forecast BCE term. Used only when "
                         "the concepts JSON includes a non-empty "
                         "'forecast_global_concepts' set (K_fc_global > 0).")
+    p.add_argument("--alpha_boundary_smooth", type=float, default=0.01,
+                   help="L1 penalty weight on the difference between adjacent "
+                        "forecast timesteps at sub-window BOUNDARIES (positions "
+                        "sw_len, 2*sw_len, ..., (N-1)*sw_len). Discourages the "
+                        "discontinuities that the piecewise per-sub-window "
+                        "decoder otherwise produces. Set 0 to disable.")
+    p.add_argument("--min_pos_rate", type=float, default=0.08,
+                   help="Drop concepts whose positive_rate is BELOW this value. "
+                        "0.08 (8%%) filters concepts that fire so rarely that BCE "
+                        "supervision degenerates into 'always predict False'. "
+                        "Set 0 to keep all concepts (legacy behavior).")
+    p.add_argument("--max_pos_rate", type=float, default=0.75,
+                   help="Drop concepts whose positive_rate is ABOVE this value. "
+                        "0.75 (75%%) filters concepts that fire so universally "
+                        "that BCE degenerates into 'always predict True' with no "
+                        "discriminative signal. Set 1 to keep all concepts.")
     p.add_argument("--alpha_residual_reg",     type=float, default=1e-3,
                    help="L2 penalty on the residual channel's magnitude. "
                         "Higher = decoder must rely more on concepts. Lower = "
@@ -217,13 +243,35 @@ def set_seed(seed: int = 0):
 # Train / eval loops
 # ---------------------------------------------------------------------------
 
+def _boundary_smoothness_loss(y_hat: torch.Tensor, sub_window_length: int,
+                              n_subwindows: int) -> torch.Tensor:
+    """Mean L1 difference between adjacent forecast timesteps at the
+    sub-window boundaries (positions sw_len, 2*sw_len, ..., (N-1)*sw_len).
+
+    y_hat shape: (B, T_out, O). Returns a scalar tensor on y_hat.device.
+    Zero when n_subwindows <= 1 (no boundaries).
+    """
+    if n_subwindows <= 1 or sub_window_length <= 0:
+        return y_hat.new_zeros(())
+    diffs = []
+    for k in range(1, n_subwindows):
+        bd = k * sub_window_length
+        diffs.append((y_hat[:, bd, :] - y_hat[:, bd - 1, :]).abs().mean())
+    return torch.stack(diffs).mean()
+
+
 def train_one_epoch(model, loader, optimizer, device,
                     alpha_forecast, alpha_lookback, alpha_forecast_concept,
-                    alpha_forecast_global_concept, alpha_residual_reg):
+                    alpha_forecast_global_concept, alpha_residual_reg,
+                    alpha_boundary_smooth):
     model.train()
-    cum_f, cum_lb, cum_fc, cum_gfc, cum_res, n = 0.0, 0.0, 0.0, 0.0, 0.0, 0
+    cum_f, cum_lb, cum_fc, cum_gfc, cum_res, cum_sm, n = (
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,
+    )
     l1_fn  = nn.L1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
+    sw_len = int(getattr(model, "sub_window_length", 0))
+    n_sw   = int(getattr(model, "n_subwindows", 1))
 
     for x, y, lb_lab, fc_lab, gfc_lab in loader:
         x       = x.to(device)
@@ -236,8 +284,6 @@ def train_one_epoch(model, loader, optimizer, device,
         loss_f   = l1_fn(out["y_hat"],     y)
         loss_lb  = bce_fn(out["lb_logits"], lb_lab)
         loss_fc  = bce_fn(out["fc_logits"], fc_lab)
-        # Global-forecast BCE. When K_gfc == 0 both tensors are empty and we
-        # skip the term entirely (BCEWithLogitsLoss with no elements is a NaN).
         if out["gfc_logits"].numel() > 0:
             loss_gfc = bce_fn(out["gfc_logits"], gfc_lab)
         else:
@@ -246,11 +292,16 @@ def train_one_epoch(model, loader, optimizer, device,
             loss_res = out["residual"].pow(2).mean()
         else:
             loss_res = torch.zeros((), device=device)
+        # Boundary smoothness: small L1 penalty on |y_hat[bd] - y_hat[bd-1]|
+        # at each sub-window seam. No effect when n_subwindows == 1.
+        loss_sm = _boundary_smoothness_loss(out["y_hat"], sw_len, n_sw)
+
         loss = (alpha_forecast               * loss_f
                 + alpha_lookback                * loss_lb
                 + alpha_forecast_concept        * loss_fc
                 + alpha_forecast_global_concept * loss_gfc
-                + alpha_residual_reg            * loss_res)
+                + alpha_residual_reg            * loss_res
+                + alpha_boundary_smooth         * loss_sm)
 
         optimizer.zero_grad()
         loss.backward()
@@ -261,11 +312,12 @@ def train_one_epoch(model, loader, optimizer, device,
         cum_fc  += loss_fc.item()
         cum_gfc += loss_gfc.item()
         cum_res += loss_res.item()
+        cum_sm  += loss_sm.item()
         n       += 1
 
     return (cum_f   / max(1, n), cum_lb / max(1, n),
             cum_fc  / max(1, n), cum_gfc / max(1, n),
-            cum_res / max(1, n))
+            cum_res / max(1, n), cum_sm / max(1, n))
 
 
 @torch.no_grad()
@@ -448,6 +500,8 @@ def main():
         n_windows=len(train_data),
         only_ok=True,
         single_forecast_bottleneck=args.single_forecast_bottleneck,
+        min_pos_rate=args.min_pos_rate,
+        max_pos_rate=args.max_pos_rate,
     )
     K_lb  = lb_train.shape[1]
     K_gfc = gfc_train.shape[1]
@@ -487,6 +541,8 @@ def main():
             n_windows=n_windows,
             only_ok=True,
             single_forecast_bottleneck=args.single_forecast_bottleneck,
+            min_pos_rate=args.min_pos_rate,
+            max_pos_rate=args.max_pos_rate,
         )
         # Shape match check.
         if args.single_forecast_bottleneck:
@@ -551,6 +607,8 @@ def main():
         decoder_depth       = args.decoder_depth,
         sub_window_id_dim   = args.sw_id_dim,
         residual_dim        = args.residual_dim,
+        sw_gru_hidden       = args.sw_gru_hidden,
+        sw_summary_dim      = args.sw_summary_dim,
         single_forecast_bottleneck = args.single_forecast_bottleneck,
         use_rev_in   = 1,
         norm_type    = "B",
@@ -580,21 +638,24 @@ def main():
         eff_alpha_forecast = (0.0
                               if epoch < args.concept_warmup_epochs
                               else args.alpha_forecast)
-        l_f, l_lb, l_fc, l_gfc, l_res = train_one_epoch(
+        l_f, l_lb, l_fc, l_gfc, l_res, l_sm = train_one_epoch(
             model, train_loader, optimizer, device,
             eff_alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
             args.alpha_forecast_global_concept, args.alpha_residual_reg,
+            args.alpha_boundary_smooth,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
         improved = val_mae < best_val_mae
         marker = " *" if improved else ""
         gfc_str = f"  train_gfc_BCE={l_gfc:.4f}" if K_gfc > 0 else ""
+        sm_str  = f"  train_sm={l_sm:.4f}"        if args.alpha_boundary_smooth > 0 else ""
         print(f"  [epoch {epoch+1:>3d}/{args.epoch}]  "
               f"train_L1={l_f:.4f}  "
               f"train_lb_BCE={l_lb:.4f}  "
               f"train_fc_BCE={l_fc:.4f}"
               f"{gfc_str}  "
-              f"train_res={l_res:.4f}  "
+              f"train_res={l_res:.4f}"
+              f"{sm_str}  "
               f"val MAE={val_mae:.4f}{marker}")
         if improved:
             best_val_mae      = val_mae

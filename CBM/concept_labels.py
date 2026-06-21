@@ -68,11 +68,33 @@ def _compile_one(code: str):
 
 
 def _filter_and_compile(concepts: list[dict],
-                        only_ok: bool) -> tuple[list[dict], list]:
+                        only_ok: bool,
+                        min_pos_rate: float = 0.0,
+                        max_pos_rate: float = 1.0) -> tuple[list[dict], list]:
+    """Filter concepts by validation status AND by positive-rate band.
+
+    A concept is kept iff:
+      - its validation status is in {ok, warning_balance} (when only_ok=True)
+      - its positive_rate is in [min_pos_rate, max_pos_rate]
+      - its function code compiles
+
+    The positive-rate band exists to drop two failure modes the trainer is
+    sensitive to:
+      - Very-rare concepts (pos_rate < min_pos_rate, e.g. 0.08): the BCE
+        loss can be minimized by trivially predicting False, contributing
+        almost no useful gradient.
+      - Near-universal concepts (pos_rate > max_pos_rate, e.g. 0.75):
+        same story in reverse; trivial-baseline AUROC ~ 0.5 and the encoder
+        just learns 'always say yes'. These also tend to be very brittle
+        to distribution shift between train/val/test.
+    """
     accepted, match_fns = [], []
     for c in concepts:
         status = c.get("validation", {}).get("status", "ok")
         if only_ok and status not in ("ok", "warning_balance"):
+            continue
+        pr = c.get("positive_rate")
+        if pr is not None and (pr < min_pos_rate or pr > max_pos_rate):
             continue
         try:
             fn = _compile_one(c["function"])
@@ -85,7 +107,9 @@ def _filter_and_compile(concepts: list[dict],
 
 
 def load_concept_sets(concepts_path: str,
-                      only_ok: bool = True
+                      only_ok: bool = True,
+                      min_pos_rate: float = 0.0,
+                      max_pos_rate: float = 1.0,
                       ) -> tuple[tuple[list, list], tuple[list, list], tuple[list, list]]:
     """Load the three-set concepts JSON written by ``concept_proposer``.
 
@@ -107,11 +131,17 @@ def load_concept_sets(concepts_path: str,
             f"{concepts_path} is missing required keys. Expected "
             f"'lookback_concepts' and 'forecast_concepts'; got {list(blob.keys())}."
         )
-    lb_accepted, lb_fns = _filter_and_compile(blob["lookback_concepts"], only_ok)
-    fc_accepted, fc_fns = _filter_and_compile(blob["forecast_concepts"], only_ok)
+    lb_accepted, lb_fns = _filter_and_compile(
+        blob["lookback_concepts"], only_ok, min_pos_rate, max_pos_rate,
+    )
+    fc_accepted, fc_fns = _filter_and_compile(
+        blob["forecast_concepts"], only_ok, min_pos_rate, max_pos_rate,
+    )
     # New optional set -- absent for older concept files; treated as empty.
     raw_global = blob.get("forecast_global_concepts", [])
-    gfc_accepted, gfc_fns = _filter_and_compile(raw_global, only_ok)
+    gfc_accepted, gfc_fns = _filter_and_compile(
+        raw_global, only_ok, min_pos_rate, max_pos_rate,
+    )
     return (lb_accepted, lb_fns), (fc_accepted, fc_fns), (gfc_accepted, gfc_fns)
 
 
@@ -247,6 +277,8 @@ def build_window_label_tables(
     segment_stride: int | None = None,
     only_ok: bool = True,
     single_forecast_bottleneck: bool = False,
+    min_pos_rate: float = 0.0,
+    max_pos_rate: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
            list[dict], list[dict], list[dict]]:
     """Top-level helper used by ``train_cbm.py``.
@@ -265,11 +297,15 @@ def build_window_label_tables(
     gfc_accepted       : list of accepted global-forecast concept dicts
     """
     (lb_accepted, lb_fns), (fc_accepted, fc_fns), (gfc_accepted, gfc_fns) = \
-        load_concept_sets(concepts_path, only_ok=only_ok)
+        load_concept_sets(
+            concepts_path, only_ok=only_ok,
+            min_pos_rate=min_pos_rate, max_pos_rate=max_pos_rate,
+        )
     if not lb_accepted and not fc_accepted and not gfc_accepted:
         raise RuntimeError(f"No OK concepts loaded from {concepts_path}.")
     print(f"  loaded {len(lb_accepted)} lookback + {len(fc_accepted)} forecast "
-          f"+ {len(gfc_accepted)} forecast-global concepts")
+          f"+ {len(gfc_accepted)} forecast-global concepts "
+          f"(pos_rate band [{min_pos_rate:.2f}, {max_pos_rate:.2f}])")
 
     with open(segments_path) as f:
         segments = json.load(f)["segments"]

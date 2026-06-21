@@ -106,6 +106,8 @@ class ConceptBottleneckModel(nn.Module):
         decoder_depth: int = 3,
         sub_window_id_dim: int = 16,
         residual_dim: int = 16,
+        sw_gru_hidden: int = 32,
+        sw_summary_dim: int = 64,
         single_forecast_bottleneck: bool = False,
         use_rev_in: int = 1,
         norm_type: str = "B",
@@ -236,18 +238,44 @@ class ConceptBottleneckModel(nn.Module):
         else:
             self.residual_proj = None
 
+        # ---- Sub-window context BiGRU (sequence-aware refinement) ----
+        # Each forecast sub-window has its own concept context fc_ctx[k] of
+        # dim K_fc * d. We project them to a smaller summary, run a
+        # bidirectional GRU across the N sub-window axis, and concatenate the
+        # per-position output back into the decoder input. This lets the
+        # decoder for sub-window k know what's happening in adjacent sub-
+        # windows (sequential context) while keeping the per-sub-window
+        # concept activations themselves fully interpretable.
+        # Disabled (sw_gru_out_dim = 0) when sw_gru_hidden == 0 or when the
+        # forecast side has been collapsed to a single global bottleneck
+        # (--single_forecast_bottleneck makes the GRU degenerate -- same
+        # context at every position).
+        lb_ctx_dim  = n_lookback_concepts             * self.concept_emb_dim
+        fc_ctx_dim  = n_forecast_concepts             * self.concept_emb_dim
+        gfc_ctx_dim = self.n_global_forecast_concepts * self.concept_emb_dim
+
+        self.sw_gru_hidden = int(sw_gru_hidden)
+        if self.sw_gru_hidden > 0 and not self.single_forecast_bottleneck:
+            self.sw_summary_dim = int(sw_summary_dim)
+            self.sw_context_summary = nn.Linear(fc_ctx_dim, self.sw_summary_dim)
+            self.sw_context_gru = nn.GRU(
+                self.sw_summary_dim, self.sw_gru_hidden,
+                bidirectional=True, batch_first=True,
+            )
+            sw_gru_out_dim = self.sw_gru_hidden * 2
+        else:
+            sw_gru_out_dim = 0
+
         # ---- Shared sub-decoder ----
         # Input dims (full-CEM layout):
         #   lookback context        = K_lb         * d   (input-conditional)
         #   forecast (sub-window)   = K_fc         * d   (input-conditional)
+        #   sw_gru context          = 2 * sw_gru_hidden  (cross-sub-window aware; 0 if disabled)
         #   forecast (global)       = K_fc_global  * d   (input-conditional; 0 if disabled)
         #   sub-window id           = sw_id_dim
         #   residual                = residual_dim
         # Output: T_sw forecast values. decoder_depth = number of Linear layers (>=1).
-        lb_ctx_dim  = n_lookback_concepts        * self.concept_emb_dim
-        fc_ctx_dim  = n_forecast_concepts        * self.concept_emb_dim
-        gfc_ctx_dim = self.n_global_forecast_concepts * self.concept_emb_dim
-        dec_in_dim  = (lb_ctx_dim + fc_ctx_dim + gfc_ctx_dim
+        dec_in_dim  = (lb_ctx_dim + fc_ctx_dim + sw_gru_out_dim + gfc_ctx_dim
                        + sub_window_id_dim + self.residual_dim)
         if decoder_depth < 1:
             raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
@@ -414,6 +442,20 @@ class ConceptBottleneckModel(nn.Module):
             fc_logits = torch.stack(fc_logits_list, dim=1)         # (B, N, K_fc)
             fc_acts   = torch.stack(fc_acts_list,   dim=1)         # (B, N, K_fc)
 
+        # 3b) Sequence-aware refinement: BiGRU over the N sub-window contexts.
+        # Projects each fc_ctx[k] to a small summary, runs a bidirectional GRU
+        # across sub-windows, and yields a per-sub-window cross-context vector
+        # that the decoder consumes alongside fc_ctx[k]. Skipped in single-
+        # forecast-bottleneck mode (degenerate -- same context at every k).
+        if (self.sw_gru_hidden > 0
+                and not self.single_forecast_bottleneck
+                and hasattr(self, "sw_context_gru")):
+            fc_ctx_stack = torch.stack(fc_ctx_list, dim=1)           # (B, N, K_fc*d)
+            sw_summaries = self.sw_context_summary(fc_ctx_stack)      # (B, N, sw_summary_dim)
+            sw_enhanced, _ = self.sw_context_gru(sw_summaries)        # (B, N, 2*sw_gru_hidden)
+        else:
+            sw_enhanced = None
+
         # 4) Residual channel (hybrid CBM). One projection per sub-window;
         # the projection module itself is shared.
         if self.residual_proj is not None:
@@ -432,6 +474,8 @@ class ConceptBottleneckModel(nn.Module):
             sw_idx = torch.full((B,), k, dtype=torch.long, device=device)
             sw_emb = self.sub_window_id_embed(sw_idx)          # (B, sw_id_dim)
             parts = [lb_ctx, fc_ctx_list[k]]
+            if sw_enhanced is not None:
+                parts.append(sw_enhanced[:, k, :])              # (B, 2*sw_gru_hidden), cross-sub-window context
             if self.n_global_forecast_concepts > 0:
                 parts.append(gfc_ctx)                           # (B, K_gfc * d), shared across sub-windows
             parts.append(sw_emb)
