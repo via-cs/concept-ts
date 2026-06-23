@@ -467,91 +467,6 @@ def _print_forecast_table(title: str,
 
 
 # ---------------------------------------------------------------------------
-# Forecast visualization
-# ---------------------------------------------------------------------------
-
-def _save_forecast_visualizations(t_yh: torch.Tensor,
-                                  t_yt: torch.Tensor,
-                                  output_path: str,
-                                  seed: int = 0) -> None:
-    """Save a 3x3 grid of forecast-vs-ground-truth plots.
-
-    Per-window MAE is computed as the mean absolute error over all output
-    timesteps and output dims. Cases selected are:
-      - row 1 (3 best)   : lowest 3 per-window MAEs
-      - row 2 (3 random) : sampled from the remaining windows
-      - row 3 (3 worst)  : highest 3 per-window MAEs
-
-    Both predicted and ground-truth curves are in z-scored target space
-    (the same space the L1 loss operates in). Saves a single PNG file.
-    Silently skipped when matplotlib is not installed.
-    """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception as e:
-        print(f"  [skip forecast visualization: matplotlib import failed: {e}]")
-        return
-
-    diffs = (t_yh - t_yt).abs()                                     # (N, T, O)
-    per_win_mae = diffs.reshape(diffs.shape[0], -1).mean(dim=1).numpy()
-    N = len(per_win_mae)
-    if N == 0:
-        print("  [skip forecast visualization: no test windows]")
-        return
-
-    sorted_idx = np.argsort(per_win_mae)
-    best_idx  = sorted_idx[: min(3, N)].tolist()
-    worst_idx = sorted_idx[max(0, N - 3):][::-1].tolist()           # largest first
-    used = set(best_idx + worst_idx)
-    remaining = [i for i in range(N) if i not in used]
-    rng = np.random.RandomState(seed)
-    n_random = min(3, len(remaining))
-    random_idx = (rng.choice(remaining, size=n_random, replace=False).tolist()
-                   if n_random > 0 else [])
-
-    # Pad short selections (tiny test sets) so the 3x3 grid always renders.
-    def _pad_to_three(idx_list):
-        while len(idx_list) < 3:
-            idx_list.append(idx_list[-1] if idx_list else 0)
-        return idx_list[:3]
-    best_idx   = _pad_to_three(best_idx)
-    random_idx = _pad_to_three(random_idx)
-    worst_idx  = _pad_to_three(worst_idx)
-
-    cases = (
-        [("Best",   i) for i in best_idx]
-        + [("Random", i) for i in random_idx]
-        + [("Worst",  i) for i in worst_idx]
-    )
-
-    T_out = t_yh.shape[1]
-    time_axis = np.arange(T_out)
-    fig, axes = plt.subplots(3, 3, figsize=(14, 9), constrained_layout=True)
-    for ax, (label, idx) in zip(axes.flat, cases):
-        pred = t_yh[idx, :, 0].numpy()
-        true = t_yt[idx, :, 0].numpy()
-        mae  = per_win_mae[idx]
-        ax.plot(time_axis, true, label="Ground truth",
-                color="tab:blue",   linewidth=1.7)
-        ax.plot(time_axis, pred, label="Forecast",
-                color="tab:orange", linewidth=1.7, linestyle="--")
-        ax.set_title(f"{label} | window {idx} | MAE = {mae:.3f}", fontsize=10)
-        ax.set_xlabel("Forecast timestep")
-        ax.set_ylabel("Target (z-scored)")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(alpha=0.3)
-    fig.suptitle(
-        "Test forecast curves -- 3 best (top row) / 3 random (middle) / 3 worst (bottom)",
-        fontsize=12,
-    )
-    fig.savefig(output_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    print(f"\n  Saved forecast visualization to {output_path}")
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -773,10 +688,6 @@ def main():
      t_yh,     t_yt) = evaluate(model, test_loader, device)
     print(f"  test MSE      = {test_mse:.6f}  (full model)")
     print(f"  test MAE      = {test_mae:.6f}  (full model)")
-
-    # ----- Forecast-curve visualization (3 best / 3 random / 3 worst windows) -----
-    _viz_path = os.path.join(args.checkpoint_dir, "forecast_cases.png")
-    _save_forecast_visualizations(t_yh, t_yt, _viz_path, seed=args.seed)
 
     # Concept-only test: re-evaluate with residual zeroed. If the residual
     # was carrying real forecast signal, this MAE will be visibly higher.
