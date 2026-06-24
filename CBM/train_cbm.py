@@ -230,6 +230,18 @@ def get_args():
 
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/cbm")
     p.add_argument("--case_studies",   type=int, default=5)
+    p.add_argument("--interp_cases",   type=int, default=6,
+                   help="Number of GOOD (low-MAE) test windows to render as "
+                        "per-case interpretability figures (continuous-feature "
+                        "plots + active concepts in all three bottlenecks). "
+                        "0 disables. Figures saved to "
+                        "<checkpoint_dir>/interp_case_<i>_w<window>.png.")
+    p.add_argument("--interp_top_k",   type=int, default=5,
+                   help="Max number of active concepts to list per bottleneck "
+                        "in each interpretability figure.")
+    p.add_argument("--interp_base_year", type=int, default=2013,
+                   help="Calendar base year for the PRSA 0-based 'year' column "
+                        "(0 -> 2013 for the Aotizhongxin station).")
     return p.parse_args()
 
 
@@ -464,6 +476,248 @@ def _print_forecast_table(title: str,
         print(f"   [{c['id']:>2}] {c['name']:32s}                          "
               + "  ".join(per_sw))
     print(bar)
+
+
+# ---------------------------------------------------------------------------
+# Interpretability case figures
+# ---------------------------------------------------------------------------
+
+# Column layout of the (length, input_dim) window tensor produced by
+# dataloader.LOF_Dataset for the PRSA schema. The first four columns are the
+# calendar (used only to reconstruct timestamps), columns 4..13 are the raw
+# continuous exogenous channels, and column 14 is the (z-scored, forecast-
+# masked) PM2.5 target.
+_PRSA_CAL_COLS   = {"year": 0, "month": 1, "day": 2, "hour": 3}
+_PRSA_CONT_COLS  = [
+    (4,  "PM10"), (5,  "SO2"),  (6,  "NO2"),  (7,  "CO"),   (8,  "O3"),
+    (9,  "TEMP"), (10, "PRES"), (11, "DEWP"), (12, "RAIN"), (13, "WSPM"),
+]
+_PRSA_PM25_COL   = 14
+
+
+def _season_from_month(m: int) -> str:
+    return {12: "Winter", 1: "Winter", 2: "Winter",
+            3: "Spring", 4: "Spring", 5: "Spring",
+            6: "Summer", 7: "Summer", 8: "Summer",
+            9: "Autumn", 10: "Autumn", 11: "Autumn"}.get(int(m), "?")
+
+
+def _window_timestamps(x: "torch.Tensor", base_year: int = 2013):
+    """Reconstruct a per-row datetime list from the calendar columns of a
+    single window tensor ``x`` of shape (length, input_dim).
+
+    The PRSA CSV stores ``year`` as a 0-based offset (0 -> 2013, 1 -> 2014,
+    ...). Returns a list[datetime] of length == x.shape[0]. Falls back to a
+    plain hour index if any calendar value is malformed.
+    """
+    from datetime import datetime, timedelta
+    yr = x[:, _PRSA_CAL_COLS["year"]].round().long().tolist()
+    mo = x[:, _PRSA_CAL_COLS["month"]].round().long().tolist()
+    dy = x[:, _PRSA_CAL_COLS["day"]].round().long().tolist()
+    hr = x[:, _PRSA_CAL_COLS["hour"]].round().long().tolist()
+    out = []
+    for y, m, d, h in zip(yr, mo, dy, hr):
+        try:
+            out.append(datetime(base_year + int(y), int(m), int(d), int(h)))
+        except Exception:
+            # Malformed calendar value -> extrapolate hourly from last good ts.
+            out.append((out[-1] + timedelta(hours=1)) if out else datetime(base_year, 1, 1))
+    return out
+
+
+def _fmt_ts(ts) -> str:
+    """e.g. '2013-06-07 12:00 pm' (lowercase am/pm, no leading zero on hour)."""
+    s = ts.strftime("%Y-%m-%d %I:%M %p").replace("AM", "am").replace("PM", "pm")
+    # strip leading zero of the 12h hour for readability ("06:00" -> "6:00")
+    date_part, time_part = s.split(" ", 1)
+    hh, rest = time_part.split(":", 1)
+    return f"{date_part} {int(hh)}:{rest}"
+
+
+def _top_concepts(probs_1d, meta, top_k: int, thresh: float = 0.5):
+    """Return a list of (prob, name, description) for the active concepts in a
+    single bottleneck. 'Active' = prob >= thresh; if none clear the threshold
+    we still surface the single highest-scoring concept so the panel is never
+    empty. Capped at ``top_k`` entries, sorted by descending probability."""
+    import torch
+    if probs_1d.numel() == 0:
+        return []
+    order = torch.argsort(probs_1d, descending=True)
+    rows = []
+    for j in order.tolist():
+        p = float(probs_1d[j])
+        if p < thresh and rows:
+            break
+        cm = meta[j]
+        rows.append((p, cm.get("name", f"c{j}"), str(cm.get("description", ""))))
+        if len(rows) >= top_k:
+            break
+    return rows
+
+
+def _save_interpretability_cases(
+    out_dir: str,
+    test_data,                 # LOF_Dataset (base) — gives x and inver_data()
+    input_length: int,
+    output_length: int,
+    n_subwindows: int,
+    t_yh,                      # (N, T_out, 1) z-scored predictions
+    t_yt,                      # (N, T_out, 1) z-scored ground truth
+    t_lb_lg,                   # (N, K_lb)
+    t_fc_lg,                   # (N, N_sw, K_fc)  or (N, K_fc) if single
+    t_gfc_lg,                  # (N, K_gfc)  (may be width 0)
+    lb_meta, fc_meta, gfc_meta,
+    n_cases: int = 6,
+    top_k: int = 5,
+    seed: int = 0,
+    base_year: int = 2013,
+    single_forecast_bottleneck: bool = False,
+) -> None:
+    """Save one figure per randomly-chosen GOOD (low-MAE) test window.
+
+    Each figure shows, for the chosen window:
+      * a title with the lookback time range, forecast time range, season,
+        and the de-z-scored per-window MAE (µg/m³);
+      * a grid of every continuous channel over the whole window with a red
+        dashed line marking the lookback / forecast boundary;
+      * the PM2.5 panel overlays forecast vs ground truth in the forecast
+        region (de-z-scored with the dataset's StandardScaler);
+      * a text panel listing the active concepts in all three bottlenecks
+        (lookback / per-sub-window forecast / global forecast) with their
+        predicted activation probabilities.
+
+    "Good" windows are the lowest-MAE quartile; ``n_cases`` are sampled from
+    that pool with a fixed seed so the selection is reproducible.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import torch
+
+    os.makedirs(out_dir, exist_ok=True)
+    n_test = t_yh.shape[0]
+    if n_test == 0:
+        print("  [interp] no test windows — skipping.")
+        return
+
+    # ---- pick GOOD windows: lowest-MAE quartile, then random sample ----
+    per_mae = (t_yh - t_yt).abs().mean(dim=(1, 2)).numpy()      # (N,)  z-scored
+    n_good = max(1, n_test // 4)
+    good_pool = np.argsort(per_mae)[:n_good]                    # best quartile
+    rng = np.random.RandomState(seed)
+    n_pick = min(n_cases, len(good_pool))
+    chosen = rng.choice(good_pool, size=n_pick, replace=False)
+
+    lb_acts  = torch.sigmoid(t_lb_lg)
+    fc_acts  = torch.sigmoid(t_fc_lg)
+    gfc_acts = torch.sigmoid(t_gfc_lg) if t_gfc_lg.shape[-1] > 0 else None
+
+    sw_len = output_length // max(1, n_subwindows)
+
+    for case_i, w in enumerate(chosen):
+        w = int(w)
+        x, _ = test_data[w]                      # x: (L+T, input_dim)
+        x = x if isinstance(x, torch.Tensor) else torch.as_tensor(x)
+        L, T = input_length, output_length
+        ts = _window_timestamps(x, base_year=base_year)
+
+        lb_start, lb_end = ts[0], ts[L - 1]
+        fc_start, fc_end = ts[L], ts[L + T - 1]
+        season = _season_from_month(x[L, _PRSA_CAL_COLS["month"]].item())
+
+        # de-z-scored series
+        pm25_lb  = test_data.inver_data(x[:L, _PRSA_PM25_COL].numpy())
+        truth_fc = test_data.inver_data(t_yt[w, :, 0].numpy())
+        pred_fc  = test_data.inver_data(t_yh[w, :, 0].numpy())
+        mae_raw  = float(np.abs(truth_fc - pred_fc).mean())
+
+        # ---- figure layout: feature grid (3x4) + wide text panel ----
+        fig = plt.figure(figsize=(20, 17))
+        gs = fig.add_gridspec(4, 4, height_ratios=[1, 1, 1, 1.55],
+                              hspace=0.45, wspace=0.28)
+        t_full = np.arange(L + T)
+        t_fcst = np.arange(L, L + T)
+
+        # continuous exogenous channels (cols 4..13) — full window
+        for i, (col, name) in enumerate(_PRSA_CONT_COLS):
+            ax = fig.add_subplot(gs[i // 4, i % 4])
+            ax.plot(t_full, x[:, col].numpy(), color="#1f77b4", lw=1.1)
+            ax.axvline(L, color="red", ls="--", lw=1.2, alpha=0.8)
+            ax.set_title(name, fontsize=11, fontweight="bold")
+            ax.tick_params(labelsize=8)
+            ax.margins(x=0.01)
+
+        # PM2.5 panel (slot index 10 -> row 2, col 2)
+        ax_pm = fig.add_subplot(gs[2, 2])
+        ax_pm.plot(np.arange(L), pm25_lb, color="#1f77b4", lw=1.1, label="PM2.5 lookback")
+        ax_pm.plot(t_fcst, truth_fc, color="#2ca02c", lw=1.8, label="ground truth")
+        ax_pm.plot(t_fcst, pred_fc, color="#d62728", lw=1.8, ls="--", label="forecast")
+        ax_pm.axvline(L, color="red", ls="--", lw=1.2, alpha=0.8)
+        ax_pm.set_title("PM2.5 (target)", fontsize=11, fontweight="bold")
+        ax_pm.tick_params(labelsize=8)
+        ax_pm.legend(fontsize=7, loc="upper left")
+        ax_pm.margins(x=0.01)
+
+        # spare slot (row 2, col 3) — quick forecast-vs-truth zoom
+        ax_zoom = fig.add_subplot(gs[2, 3])
+        ax_zoom.plot(np.arange(T), truth_fc, color="#2ca02c", lw=1.8, label="truth")
+        ax_zoom.plot(np.arange(T), pred_fc, color="#d62728", lw=1.8, ls="--", label="forecast")
+        ax_zoom.set_title("Forecast horizon (zoom)", fontsize=11, fontweight="bold")
+        ax_zoom.set_xlabel("hours ahead", fontsize=8)
+        ax_zoom.tick_params(labelsize=8)
+        ax_zoom.legend(fontsize=7, loc="best")
+
+        # ---- concept text panel ----
+        ax_txt = fig.add_subplot(gs[3, :])
+        ax_txt.axis("off")
+        lines = []
+        lines.append("ACTIVE CONCEPTS (predicted activation probability)")
+        lines.append("=" * 110)
+
+        lines.append("LOOKBACK bottleneck (whole 96-h history):")
+        for p, nm, desc in _top_concepts(lb_acts[w], lb_meta, top_k):
+            lines.append(f"   {p:5.2f}  {nm:32s} {desc[:60]}")
+        if not lb_meta:
+            lines.append("   (none)")
+        lines.append("")
+
+        lines.append(f"FORECAST sub-window bottleneck ({n_subwindows} x {sw_len}-h windows):")
+        if single_forecast_bottleneck or fc_acts.dim() == 2:
+            for p, nm, desc in _top_concepts(fc_acts[w], fc_meta, top_k):
+                lines.append(f"   {p:5.2f}  {nm:32s} {desc[:60]}")
+        else:
+            for sw in range(fc_acts.shape[1]):
+                sw_lo = ts[L + sw * sw_len]
+                sw_hi = ts[min(L + (sw + 1) * sw_len - 1, L + T - 1)]
+                lines.append(f"   sub-window {sw}  [{_fmt_ts(sw_lo)} → {_fmt_ts(sw_hi)}]:")
+                rows = _top_concepts(fc_acts[w, sw], fc_meta, min(3, top_k))
+                if not rows:
+                    lines.append("      (none active)")
+                for p, nm, desc in rows:
+                    lines.append(f"      {p:5.2f}  {nm:32s} {desc[:52]}")
+        lines.append("")
+
+        if gfc_acts is not None:
+            lines.append("GLOBAL-FORECAST bottleneck (whole 24-h forecast):")
+            for p, nm, desc in _top_concepts(gfc_acts[w], gfc_meta, top_k):
+                lines.append(f"   {p:5.2f}  {nm:32s} {desc[:60]}")
+
+        ax_txt.text(0.0, 1.0, "\n".join(lines), va="top", ha="left",
+                    family="monospace", fontsize=9, transform=ax_txt.transAxes)
+
+        title = (
+            f"Interpretability case {case_i + 1}  (test window {w})   "
+            f"season: {season}   |   per-window MAE = {mae_raw:.1f} µg/m³\n"
+            f"lookback window: {_fmt_ts(lb_start)} TO {_fmt_ts(lb_end)}   ;   "
+            f"forecasting window: {_fmt_ts(fc_start)} TO {_fmt_ts(fc_end)}"
+        )
+        fig.suptitle(title, fontsize=13, fontweight="bold", y=0.995)
+
+        fpath = os.path.join(out_dir, f"interp_case_{case_i + 1}_w{w}.png")
+        fig.savefig(fpath, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  [interp] saved {fpath}  (MAE {mae_raw:.1f} µg/m³, {season})")
 
 
 # ---------------------------------------------------------------------------
@@ -806,6 +1060,30 @@ def main():
                     print(f"      sw{sw}: {names}")
             mae_here = (t_yh[w] - t_yt[w]).abs().mean().item()
             print(f"    per-window MAE = {mae_here:.4f}")
+
+    # ----- Interpretability case figures (good forecasts) -----
+    if args.interp_cases > 0:
+        print(f"\n── Interpretability figures: {args.interp_cases} good test windows ──")
+        _save_interpretability_cases(
+            out_dir       = args.checkpoint_dir,
+            test_data     = test_data,
+            input_length  = args.input_length,
+            output_length = args.output_length,
+            n_subwindows  = args.n_subwindows,
+            t_yh          = t_yh,
+            t_yt          = t_yt,
+            t_lb_lg       = t_lb_lg,
+            t_fc_lg       = t_fc_lg,
+            t_gfc_lg      = t_gfc_lg,
+            lb_meta       = lb_meta,
+            fc_meta       = fc_meta,
+            gfc_meta      = gfc_meta,
+            n_cases       = args.interp_cases,
+            top_k         = args.interp_top_k,
+            seed          = args.seed,
+            base_year     = args.interp_base_year,
+            single_forecast_bottleneck = args.single_forecast_bottleneck,
+        )
 
 
 if __name__ == "__main__":
