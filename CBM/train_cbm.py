@@ -34,7 +34,7 @@ Run
         --input_length 96 --output_length 96 \\
         --input_dim 15 --output_dim 1 \\
         --num_layer 4 --dropout 0.5 --embed_dim 128 \\
-        --n_subwindows 8 --concept_emb_dim 16 \\
+        --n_subwindows 16 --concept_emb_dim 16 \\
         --decoder_hidden 512 --decoder_depth 3 \\
         --residual_dim 16 --alpha_residual_reg 1e-3 \\
         --alpha_forecast 1.0 --alpha_lookback 1.0 --alpha_forecast_concept 1.0 \\
