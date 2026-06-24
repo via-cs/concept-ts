@@ -102,6 +102,19 @@ def _cluster_segments(segments_path: str,
 # Step 2 — render the prompt
 # ===========================================================================
 
+def _minutes_per_step(metadata: dict) -> float:
+    """Parse the dataset's sampling period (minutes per timestep) from the
+    segments-JSON ``time_resolution`` string, e.g. '15 minutes' -> 15.0,
+    '1 hour' -> 60.0. Falls back to 15.0 (LOF default) if unparseable."""
+    import re
+    tr = str(metadata.get("time_resolution", "")).strip().lower()
+    m = re.search(r"([\d.]+)\s*(hours|hour|hrs|hr|minutes|minute|mins|min|h|m)\b", tr)
+    if not m:
+        return 15.0
+    val, unit = float(m.group(1)), m.group(2)
+    return val * 60.0 if unit.startswith(("h", "hr")) else val
+
+
 def _render_prompt(n_lookback_concepts: int,
                    n_forecast_concepts: int,
                    n_forecast_global_concepts: int,
@@ -110,7 +123,11 @@ def _render_prompt(n_lookback_concepts: int,
     n_sw = int(metadata.get("n_subwindows", 4))
     out_len = int(metadata.get("output_length", 96))
     sw_len = int(metadata.get("subwindow_length", out_len // n_sw))
-    sw_hours = sw_len * 15 / 60  # 15-min resolution
+    # Derive hours-per-sub-window from the dataset's actual sampling period
+    # (parsed from metadata) rather than assuming 15-min resolution — PRSA is
+    # hourly, LOF is 15-min, and the surrounding prompt text already states
+    # the correct resolution per dataset.
+    sw_hours = sw_len * _minutes_per_step(metadata) / 60.0
 
     return INITIAL_PROMPT.format(
         n_lookback_concepts=n_lookback_concepts,
