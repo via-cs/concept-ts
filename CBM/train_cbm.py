@@ -940,8 +940,21 @@ def main():
      t_fc_lg,  t_fc_la,
      t_gfc_lg, t_gfc_la,
      t_yh,     t_yt) = evaluate(model, test_loader, device)
-    print(f"  test MSE      = {test_mse:.6f}  (full model)")
-    print(f"  test MAE      = {test_mae:.6f}  (full model)")
+    print(f"  test MSE      = {test_mse:.6f}  (full model, z-scored)")
+    print(f"  test MAE      = {test_mae:.6f}  (full model, z-scored)")
+
+    # Raw-unit (µg/m³) MSE/MAE for direct comparison against paper numbers.
+    # The dataloader z-scores the target with a single StandardScaler, so
+    # de-z-scoring is the affine map  raw = z * scale + mean. Under that map a
+    # difference (y_hat - y) loses the additive mean, hence:
+    #     MAE_raw = MAE_z * scale         MSE_raw = MSE_z * scale**2
+    # We keep the z-scored numbers above and ADD the raw numbers here.
+    tgt_scale = float(test_data.ans_type.scale_[0])
+    test_mse_raw = test_mse * (tgt_scale ** 2)
+    test_mae_raw = test_mae * tgt_scale
+    print(f"  test MSE      = {test_mse_raw:.4f}  (full model, RAW µg/m³, "
+          f"RMSE = {test_mse_raw ** 0.5:.4f})")
+    print(f"  test MAE      = {test_mae_raw:.4f}  (full model, RAW µg/m³)")
 
     # Concept-only test: re-evaluate with residual zeroed. If the residual
     # was carrying real forecast signal, this MAE will be visibly higher.
@@ -949,7 +962,11 @@ def main():
     # means the residual is doing most of the work.
     if args.residual_dim > 0:
         test_mse_co, test_mae_co = _evaluate_concept_only(model, test_loader, device)
-        print(f"  test MAE      = {test_mae_co:.6f}  (CONCEPT-ONLY, residual disabled)")
+        test_mse_co_raw = test_mse_co * (tgt_scale ** 2)
+        test_mae_co_raw = test_mae_co * tgt_scale
+        print(f"  test MAE      = {test_mae_co:.6f}  (CONCEPT-ONLY, residual disabled, z-scored)")
+        print(f"  test MAE      = {test_mae_co_raw:.4f}  (CONCEPT-ONLY, residual disabled, RAW µg/m³)")
+        print(f"  test MSE      = {test_mse_co_raw:.4f}  (CONCEPT-ONLY, residual disabled, RAW µg/m³)")
         gap = test_mae_co - test_mae
         rel = (gap / max(1e-9, test_mae)) * 100
         print(f"  residual gain = {gap:+.4f}  ({rel:+.1f}% MAE improvement from residual)")
