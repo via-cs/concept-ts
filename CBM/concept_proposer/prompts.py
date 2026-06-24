@@ -321,7 +321,7 @@ resolution that is {subwindow_hours} hours per sub-window.""",
   {{
     "id": 0,
     "name": "is_forecast_high_peak_pm25",
-    "description": "Peak PM2.5 over the WHOLE 24-hour forecast exceeds 150 ug/m^3 -- forecast contains at least one heavy-pollution hour.",
+    "description": "Peak PM2.5 over the WHOLE 96-hour (4-day) forecast exceeds 150 ug/m^3 -- forecast contains at least one heavy-pollution hour.",
     "category": "aggregate",
     "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('PM2.5', {{}}).get('max')\\n    return m is not None and m > 150"
   }},
