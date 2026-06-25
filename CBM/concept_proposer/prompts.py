@@ -239,7 +239,10 @@ NOTES:
     "hour": {{
       "mode": int, "n_unique": int, "distribution": {{...}}
     }},
-    # ... same 15 channels, stats computed over this sub-window's {subwindow_length} timesteps
+    # 14 USABLE channels here: year, month, day, hour, PM10, SO2, NO2, CO, O3,
+    # TEMP, PRES, DEWP, RAIN, WSPM. PM2.5 IS THE PREDICTION TARGET and is
+    # UNKNOWN in the forecast window -- its stats are masked/unavailable, so a
+    # 'PM2.5' key here is NOT a valid input. Do NOT reference PM2.5.
   }},
   "time_context": {{
     "subwindow_idx": int,
@@ -253,7 +256,17 @@ NOTES:
 
 NOTE: with output_length = {output_length} and n_subwindows = {n_subwindows},
 each sub-window covers {subwindow_length} consecutive timesteps. At 1-hour
-resolution that is {subwindow_hours} hours per sub-window.""",
+resolution that is {subwindow_hours} hours per sub-window.
+
+*** TARGET LEAKAGE WARNING ***
+PM2.5 is what the model PREDICTS. In the FORECAST window (every sub-window AND
+the whole-forecast view used by global concepts) PM2.5 is unavailable to the
+model -- it is masked out of the inputs. A forecast or forecast-global concept
+that reads ``stats['PM2.5']`` would be defining a concept on the answer itself,
+which is circular and forbidden. FORECAST-SUB-WINDOW and FORECAST-GLOBAL
+concepts must be built ONLY from the known future drivers (meteorology: TEMP,
+PRES, DEWP, RAIN, WSPM; other pollutants: PM10, SO2, NO2, CO, O3; and calendar).
+ONLY lookback concepts may use PM2.5, because the history is observed.""",
 
     "example_lookback_concepts": """[
   {{
@@ -320,17 +333,17 @@ resolution that is {subwindow_hours} hours per sub-window.""",
     "example_forecast_global_concepts": """[
   {{
     "id": 0,
-    "name": "is_forecast_high_peak_pm25",
-    "description": "Peak PM2.5 over the WHOLE 96-hour (4-day) forecast exceeds 150 ug/m^3 -- forecast contains at least one heavy-pollution hour.",
+    "name": "is_forecast_has_stagnant_hour",
+    "description": "Minimum wind speed over the WHOLE forecast drops below 0.5 m/s -- the forecast contains at least one near-calm hour in which pollutants accumulate. (Covariate-only; PM2.5 is the masked target and must NOT be used.)",
     "category": "aggregate",
-    "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('PM2.5', {{}}).get('max')\\n    return m is not None and m > 150"
+    "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('WSPM', {{}}).get('min')\\n    return m is not None and m < 0.5"
   }},
   {{
     "id": 1,
-    "name": "is_forecast_pm25_trending_up",
-    "description": "PM2.5 slope over the WHOLE forecast is positive AND non-trivial -- pollution rising across the horizon.",
+    "name": "is_forecast_humidity_rising",
+    "description": "Dew point slope over the WHOLE forecast is positive AND non-trivial -- humidity (hence particle-growth potential) rises across the horizon. (Covariate-only; PM2.5 must NOT be used.)",
     "category": "trend",
-    "function": "def matches(sub_seg):\\n    s = sub_seg.get('stats', {{}}).get('PM2.5', {{}}).get('slope')\\n    return s is not None and s > 0.5"
+    "function": "def matches(sub_seg):\\n    s = sub_seg.get('stats', {{}}).get('DEWP', {{}}).get('slope')\\n    return s is not None and s > 0.1"
   }},
   {{
     "id": 2,
@@ -420,18 +433,24 @@ Propose THREE concept sets:
     Operate on `sub_seg['stats']`, `sub_seg['time_context']` (especially
     `start.hour`, `season`), and `sub_seg['cross_channel_stats']`.
     These are LOCAL, time-resolved descriptors.
+    DO NOT reference `stats['PM2.5']` -- PM2.5 is the prediction target and is
+    masked/unavailable in the forecast window. Use only meteorology
+    (TEMP, PRES, DEWP, RAIN, WSPM), other pollutants (PM10, SO2, NO2, CO, O3),
+    and calendar.
 
   * Exactly **{{n_forecast_global_concepts}} FORECAST-GLOBAL concepts**. These probe
     the WHOLE forecast window as a single unit (each rule fires ONCE per
     segment). They should capture properties that DO NOT decompose into
     sub-window concepts -- aggregates, thresholds spanning the whole horizon,
-    persistence across the forecast, cross-block comparisons. Good examples:
-      - "max PM2.5 over the forecast exceeds 150" (aggregate threshold)
-      - "PM2.5 slope across the WHOLE forecast is positive" (whole-horizon trend)
+    persistence across the forecast, cross-block comparisons. They must be
+    built from KNOWN future drivers only -- NEVER from PM2.5 (the masked
+    target). Good examples:
+      - "min wind speed over the forecast drops below 0.5 m/s" (aggregate threshold)
+      - "dew point slope across the WHOLE forecast is positive" (whole-horizon trend)
       - "wind stays low AND uniform across the whole forecast" (persistence)
       - "temperature range across the forecast exceeds 15 deg C" (aggregate span)
     Operate on the same ``sub_seg`` API, but the ``stats`` here cover the full
-    forecast window so e.g. ``stats['PM2.5']['max']`` is the max over all
+    forecast window so e.g. ``stats['WSPM']['min']`` is the min wind over all
     {{output_length}} forecast steps. Bad examples (avoid these -- they duplicate
     the sub-window set):
       - "forecast is in winter" (use a sub-window concept; it'll fire on every sub-window of a winter segment)
@@ -457,6 +476,15 @@ Hard requirements for EVERY function (all three sets):
    the FORECAST-GLOBAL set), ``misc``.
 7. **No compounds**. ``is_history_cold`` is good; ``is_history_cold_and_workday``
    is bad (the CBM combines them at the embedding level).
+8. **NO TARGET LEAKAGE (critical)**. PM2.5 is the forecast target. It is
+   OBSERVED in the lookback but UNKNOWN (masked) in the forecast window.
+   Therefore:
+     - LOOKBACK concepts MAY use ``lookback_stats['PM2.5']``.
+     - FORECAST-SUB-WINDOW and FORECAST-GLOBAL concepts MUST NOT reference
+       ``stats['PM2.5']`` in any way (no mean/max/min/slope/std/fft of PM2.5).
+       A forecast-side rule that touches PM2.5 defines a concept on the answer
+       itself and will be rejected. Use only meteorology, other pollutants,
+       and calendar for forecast-side concepts.
 
 ## Output Format
 
