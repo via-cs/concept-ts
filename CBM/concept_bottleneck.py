@@ -7,13 +7,19 @@ Architecture
 
     x  in (B, T_in + T_out, C)
        |
-       v  Embedding_Learning (encoder backbone, use_time_pool=False)
+       +-- lookback_encoder( x[:, :T_in, :] )    # SEES ONLY THE HISTORY
+       |     enc_lb in (B, T_in, D)              # target RevIN'd (revin_all)
+       |     z_global = enc_lb.mean(dim=1)       # (B, D) -> LOOKBACK bottleneck
        |
-       enc in (B, T_out, D)                      # per-timestep encoder output
-       |
-       split into:
-         z_global = enc.mean(dim=1)              # (B, D) -- whole forecast window
-         z_sw_k   = enc[:, k*T_sw:(k+1)*T_sw, :].mean(dim=1)   # (B, D) per sub-window
+       +-- forecast_encoder( x[:, T_in:, :] )    # SEES ONLY THE FORECAST WINDOW
+             enc_fc in (B, T_out, D)             # target masked (mask_all)
+             z_sw_k            = enc_fc[:, k*T_sw:(k+1)*T_sw, :].mean(dim=1)  # per sub-window
+             z_global_forecast = enc_fc.mean(dim=1)   # (B, D) -> GLOBAL-FORECAST bottleneck
+
+    Two SEPARATE-WEIGHT encoders give a HARD lookback/forecast information
+    barrier: lookback concepts are provably a function of the history, and
+    forecast concepts a function of the forecast window. (use_time_pool=False
+    on both; the CBM does the pooling.)
        |
        +-- Lookback concept layer (full CEM) -----------------------------+
        |   lb_logits = Linear(D, K_lb)(z_global)                          |
@@ -130,36 +136,69 @@ class ConceptBottleneckModel(nn.Module):
         self.single_forecast_bottleneck = bool(single_forecast_bottleneck)
         self.input_length = int(input_length)
 
-        # ---- Encoder backbone ----
-        # We deliberately disable the encoder's internal time_pool (if it has
-        # one) so the encoder returns per-timestep features of shape
-        # (B, output_length, D) instead of a global (B, D) summary. The
-        # forecast concept predictors then slice these per sub-window, so
-        # predictor k actually sees the encoder's features specific to
-        # forecast sub-window k -- which is the whole point of having N
-        # forecast bottlenecks. Without this, every forecast predictor would
-        # receive the same mean-pooled vector and couldn't distinguish
-        # "rising temperature in sub-window 0" from sub-window 3.
-        encoder_kwargs = dict(
-            input_dim=input_dim,
-            mid_dim=mid_dim,
-            ext_dim=ext_dim,
-            output_dim=output_dim,
-            bottle_dim_p=bottle_dim_p,
-            input_length=input_length,
-            output_length=output_length,
-            num_blocks=num_blocks,
-            dropout=dropout,
-            norm_type=norm_type,
-            use_rev_in=use_rev_in,
-        )
-        # Only pass use_time_pool=False if the active encoder supports it
-        # (ConvEmbedding_Learning does; Mixer/TS2Vec encoders never had it
-        # and already return 3D features).
+        # ---- Encoder backbones (TWO separate-weight encoders) ----
+        # To give a HARD lookback/forecast information barrier, the lookback
+        # and forecast concept bottlenecks read from two physically separate
+        # encoders, each of which only ever sees its own slice of the window:
+        #
+        #   lookback_encoder  sees ONLY x[:, :input_length, :]  (the history,
+        #       target real -> RevIN over the whole target, target_mode=
+        #       "revin_all"). Its mean-pooled output is z_global, fed to the
+        #       LOOKBACK bottleneck. So lookback concepts are PROVABLY a
+        #       function of the history alone.
+        #
+        #   forecast_encoder  sees ONLY x[:, input_length:, :]  (the forecast
+        #       window; target unknown -> masked, target_mode="mask_all",
+        #       use_rev_in=0). Its per-timestep output is sliced per
+        #       sub-window (z_sw_k) for the FORECAST sub-window bottlenecks and
+        #       mean-pooled (z_global_forecast) for the GLOBAL-FORECAST
+        #       bottleneck. So forecast concepts are a function of the forecast
+        #       window alone.
+        #
+        # Both encoders run with use_time_pool=False so they return per-
+        # timestep (B, T, D) features; the CBM does the pooling itself.
+        # Implemented as a single-window encoder via input_length=0,
+        # output_length=window_len (total_length = window_len), with the
+        # target handled by target_mode rather than the legacy lookback/
+        # forecast split.
         enc_sig = inspect.signature(Embedding_Learning.__init__)
-        if "use_time_pool" in enc_sig.parameters:
-            encoder_kwargs["use_time_pool"] = False
-        self.encoder = Embedding_Learning(**encoder_kwargs)
+        if "target_mode" not in enc_sig.parameters:
+            raise RuntimeError(
+                "The two-encoder ConceptBottleneckModel requires an encoder "
+                "that supports `target_mode` (e.g. ConvEmbedding_Learning). "
+                f"The active Embedding_Learning ({Embedding_Learning.__name__}) "
+                "does not. Either switch the encoder alias in model/embedding.py "
+                "or restore the single-encoder build."
+            )
+
+        def _make_window_encoder(window_len: int, target_mode: str,
+                                 use_rev_in_flag: int):
+            kw = dict(
+                input_dim=input_dim,
+                mid_dim=mid_dim,
+                ext_dim=ext_dim,
+                output_dim=output_dim,
+                bottle_dim_p=bottle_dim_p,
+                input_length=0,            # whole fed window handled via target_mode
+                output_length=window_len,  # total_length == window_len
+                num_blocks=num_blocks,
+                dropout=dropout,
+                norm_type=norm_type,
+                use_rev_in=use_rev_in_flag,
+                target_mode=target_mode,
+            )
+            if "use_time_pool" in enc_sig.parameters:
+                kw["use_time_pool"] = False
+            return Embedding_Learning(**kw)
+
+        self.lookback_encoder = _make_window_encoder(
+            window_len=input_length, target_mode="revin_all",
+            use_rev_in_flag=use_rev_in,
+        )
+        self.forecast_encoder = _make_window_encoder(
+            window_len=output_length, target_mode="mask_all",
+            use_rev_in_flag=0,
+        )
 
         # ---- Lookback concept bottleneck (full CEM) ----
         # Predictor stays the same: encoder feature -> K_lb concept logits.
@@ -295,55 +334,73 @@ class ConceptBottleneckModel(nn.Module):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _split_encoder_features(self, encoder_out: torch.Tensor
-                                ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """Turn the encoder output into (z_global, [z_sw_0, ..., z_sw_{N-1}]).
+    def _pool_encoder_features(self,
+                               enc_lb: torch.Tensor,
+                               enc_fc: torch.Tensor
+                               ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
+        """Pool the two encoders' outputs into the concept-layer inputs.
 
-        ``z_global`` is a (B, D) summary used by the LOOKBACK concept predictor.
-        ``z_sw_k``    is a (B, D) summary specific to forecast sub-window k,
-                      computed by mean-pooling encoder features within the
-                      sub-window's slice of the time axis. Used by
-                      ``forecast_concept_predictors[k]``.
+        Returns
+        -------
+        z_global           : (B, D) -- mean over the LOOKBACK encoder's
+                             per-timestep features. Fed to the LOOKBACK
+                             concept bottleneck. Provably a function of the
+                             history alone (the lookback encoder never sees
+                             the forecast window).
+        z_per_sw           : list of N (B, D) tensors -- mean over each
+                             forecast sub-window slice of the FORECAST
+                             encoder's features. Fed to the per-sub-window
+                             forecast bottlenecks (and the residual channel).
+        z_global_forecast  : (B, D) -- mean over the FORECAST encoder's whole
+                             output. Fed to the GLOBAL-FORECAST bottleneck.
 
-        If the encoder returns a 2D (B, D) tensor (e.g. some downstream encoder
-        without per-timestep output), the per-sub-window summaries fall back
-        to the same vector and we emit a one-time warning -- in that case the
-        sub-window predictors can only differ via their weights, not inputs.
+        Both encoders run with use_time_pool=False, so enc_lb / enc_fc are
+        (B, T, D). A 2D fallback is kept for robustness if an encoder ever
+        returns a pooled (B, D) vector.
         """
-        if encoder_out.dim() == 2:
-            if not getattr(self, "_warned_pooled_encoder", False):
-                warnings.warn(
-                    "ConceptBottleneckModel: encoder returned a 2D (B, D) tensor; "
-                    "per-sub-window concept predictors will receive identical "
-                    "inputs. To get per-sub-window features, use an encoder that "
-                    "returns (B, T_out, D) (e.g. set use_time_pool=False).",
-                    RuntimeWarning,
-                )
-                self._warned_pooled_encoder = True
-            z_global = encoder_out
-            return z_global, [z_global] * self.n_subwindows
-
-        if encoder_out.dim() != 3:
+        # ---- lookback summary ----
+        if enc_lb.dim() == 2:
+            z_global = enc_lb
+        elif enc_lb.dim() == 3:
+            z_global = enc_lb.mean(dim=1)                 # (B, D)
+        else:
             raise ValueError(
-                f"Encoder output has unexpected ndim={encoder_out.dim()}; "
+                f"lookback encoder output has unexpected ndim={enc_lb.dim()}; "
                 f"expected 2 or 3."
             )
 
-        # (B, T, D). If T != output_length (e.g. encoder emits per-patch features
-        # across the full input+output window), take the last output_length
-        # timesteps as the forecast window.
-        T = encoder_out.shape[1]
+        # ---- forecast: per-sub-window + whole-forecast summaries ----
+        if enc_fc.dim() == 2:
+            if not getattr(self, "_warned_pooled_encoder", False):
+                warnings.warn(
+                    "ConceptBottleneckModel: forecast encoder returned a 2D "
+                    "(B, D) tensor; per-sub-window concept predictors will "
+                    "receive identical inputs. Use an encoder that returns "
+                    "(B, T_out, D) (e.g. use_time_pool=False).",
+                    RuntimeWarning,
+                )
+                self._warned_pooled_encoder = True
+            z_global_forecast = enc_fc
+            return z_global, [enc_fc] * self.n_subwindows, z_global_forecast
+
+        if enc_fc.dim() != 3:
+            raise ValueError(
+                f"forecast encoder output has unexpected ndim={enc_fc.dim()}; "
+                f"expected 2 or 3."
+            )
+
+        # (B, T, D). If T != output_length, keep the last output_length steps.
+        T = enc_fc.shape[1]
         if T != self.output_length:
-            encoder_out = encoder_out[:, -self.output_length:, :]
+            enc_fc = enc_fc[:, -self.output_length:, :]
 
-        z_global = encoder_out.mean(dim=1)               # (B, D)
-
+        z_global_forecast = enc_fc.mean(dim=1)            # (B, D)
         sw_len = self.sub_window_length
         z_per_sw = [
-            encoder_out[:, k * sw_len : (k + 1) * sw_len, :].mean(dim=1)
+            enc_fc[:, k * sw_len : (k + 1) * sw_len, :].mean(dim=1)
             for k in range(self.n_subwindows)
         ]
-        return z_global, z_per_sw
+        return z_global, z_per_sw, z_global_forecast
 
     # ------------------------------------------------------------------
     # Forward
@@ -362,9 +419,17 @@ class ConceptBottleneckModel(nn.Module):
         B = x.shape[0]
         device = x.device
 
-        # 1) Encode. encoder_out is (B, T_out, D) when use_time_pool was off.
-        _, encoder_out = self.encoder(x)
-        z_global, z_per_sw = self._split_encoder_features(encoder_out)
+        # 1) Encode with TWO separate encoders over disjoint windows.
+        #    Clone the slices: PerChannelEmbedding overwrites the target column
+        #    in-place, and cloning prevents the two encoder passes from
+        #    aliasing each other's region of x.
+        x_lb = x[:, : self.input_length, :].clone()       # lookback window
+        x_fc = x[:, self.input_length :, :].clone()       # forecast window
+        _, enc_lb = self.lookback_encoder(x_lb)           # (B, T_in,  D)
+        _, enc_fc = self.forecast_encoder(x_fc)           # (B, T_out, D)
+        z_global, z_per_sw, z_global_forecast = self._pool_encoder_features(
+            enc_lb, enc_fc,
+        )
 
         # 2) Lookback concept layer. Activations from the standard predictor,
         # embeddings INPUT-CONDITIONAL via two MLP branches:
@@ -385,12 +450,15 @@ class ConceptBottleneckModel(nn.Module):
         # forecast window. Its context is reused across every sub-window's
         # decoding.
         if self.n_global_forecast_concepts > 0:
-            gfc_logits = self.global_forecast_concept_predictor(z_global)   # (B, K_gfc)
+            # Reads the FORECAST encoder's whole-window summary (not the
+            # lookback z_global) so global-forecast concepts derive from the
+            # forecast window, matching how their labels are computed.
+            gfc_logits = self.global_forecast_concept_predictor(z_global_forecast)   # (B, K_gfc)
             gfc_acts   = torch.sigmoid(gfc_logits)
-            g_ep = self.global_forecast_emb_plus(z_global).reshape(
+            g_ep = self.global_forecast_emb_plus(z_global_forecast).reshape(
                 B, self.n_global_forecast_concepts, self.concept_emb_dim,
             )
-            g_em = self.global_forecast_emb_minus(z_global).reshape(
+            g_em = self.global_forecast_emb_minus(z_global_forecast).reshape(
                 B, self.n_global_forecast_concepts, self.concept_emb_dim,
             )
             a_g  = gfc_acts.unsqueeze(-1)                                    # (B, K_gfc, 1)
@@ -403,13 +471,14 @@ class ConceptBottleneckModel(nn.Module):
 
         # 3) Forecast concept layer(s).
         if self.single_forecast_bottleneck:
-            # Ablation mode: ONE forecast predictor on z_global. The same
-            # concept context is reused for every sub-window's decoding.
-            lg = self.forecast_concept_predictors[0](z_global)       # (B, K_fc)
+            # Ablation mode: ONE forecast predictor on the FORECAST encoder's
+            # whole-window summary (z_global_forecast). The same concept
+            # context is reused for every sub-window's decoding.
+            lg = self.forecast_concept_predictors[0](z_global_forecast)  # (B, K_fc)
             ac = torch.sigmoid(lg)
-            ep = self.forecast_emb_plus(z_global).reshape(B,
+            ep = self.forecast_emb_plus(z_global_forecast).reshape(B,
                         self.n_forecast_concepts, self.concept_emb_dim)
-            em = self.forecast_emb_minus(z_global).reshape(B,
+            em = self.forecast_emb_minus(z_global_forecast).reshape(B,
                         self.n_forecast_concepts, self.concept_emb_dim)
             a_g = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
             ctx_3d = a_g * ep + (1.0 - a_g) * em                      # (B, K_fc, d)

@@ -81,8 +81,15 @@ class ConvEmbedding_Learning(nn.Module):
         expand: int = 2,             # ConvFFN expand factor r
         # --- adapter-mode knob ---
         use_time_pool: bool = True,  # False → Mode B, encoder returns (B, T, D)
+        # --- target-handling knob (see PerChannelEmbedding.target_mode) ---
+        # "split" (default) keeps the legacy lookback+forecast contract.
+        # "revin_all" / "mask_all" let this class be used as a single-window
+        # encoder over a pure lookback or pure forecast window (the two-encoder
+        # CBM design).
+        target_mode: str = "split",
     ):
         super().__init__()
+        self.target_mode = target_mode
         self.input_dim = input_dim
         self.mid_dim = mid_dim
         self.ext_dim = ext_dim
@@ -113,6 +120,7 @@ class ConvEmbedding_Learning(nn.Module):
             embed_dim=d_pc,
             input_length=input_length,
             output_length=output_length,
+            target_mode=target_mode,
         )
 
         # ---- Stage 2: depthwise patchification ----
