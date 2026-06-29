@@ -2,25 +2,35 @@
 Autoformer (Wu et al. 2021) ported into ProtoLLM/comparison_model as a fair
 baseline for ProtoLLM's CBM on the Beijing PRSA Aotizhongxin PM2.5 task.
 
-The model class (__init__, forward, decomposition + seq2seq pipeline) is
-BYTE-IDENTICAL to ``cap/cap/models/Autoformer.py``. We change only:
+The model class matches the ORIGINAL Autoformer (Wu et al. 2021,
+https://github.com/thuml/Autoformer/blob/main/models/Autoformer.py). We
+change three things vs cap's port -- two of which restore the upstream
+paper code that cap's port had silently broken:
 
   1. Import paths -- relative to our local ``tsl_layers/``.
   2. ``prepare_batch`` -- rewritten to consume the rich-batch dict from
      ``PRSA_EncDec_Dataset`` so the future half of ``x_dec`` carries the
      REAL future-known exogenous covariates instead of zeros, and the
      ``x_mark_*`` tensors carry real normalized calendar features
-     (matching the ``embed='timeF'``, ``freq='h'`` contract). The
-     architecture itself is unchanged.
+     (matching the ``embed='timeF'``, ``freq='h'`` contract).
+  3. BUG FIX: cap's port collapsed ``dec_embedding`` to a single channel
+     (``output_dim=1``) and sliced ``seasonal_init[:, ..., 0:1]`` before
+     feeding to the decoder. This silently discarded ALL cross-channel
+     seasonal information, the central mechanism Autoformer is designed
+     to exploit. We restore the upstream behavior: ``dec_embedding``
+     takes ``input_dim`` channels and ``seasonal_init`` keeps all
+     channels. (See ``__init__`` and ``forward``.)
+  4. The noisy ``print(output.shape)`` debug call from cap's forward is
+     removed.
 
 IMPORTANT architectural caveat (not a bug, this is how Autoformer is defined)
 -----------------------------------------------------------------------------
 Autoformer's ``forward`` does NOT consume the contents of ``x_dec`` -- it
-derives the decoder input from ``x_enc`` via series_decomp (line 115-126 of
-upstream), padding the future half with zeros from the lookback's mean and
-seasonal components. ``x_dec`` only contributes its SHAPE (batch size /
-device).  This means Autoformer CANNOT consume future-known real exogenous
-covariates -- the architecture has no inlet for them.
+derives the decoder input from ``x_enc`` via series_decomp, padding the
+future half with zeros from the lookback's mean and seasonal components.
+``x_dec`` only contributes its SHAPE (batch size / device). This means
+Autoformer CANNOT consume future-known real exogenous covariates -- the
+architecture has no inlet for them.
 
 What Autoformer DOES consume from the forecast window:
   * ``x_mark_dec`` -- the calendar features over (label_len + pred_len) are
@@ -78,8 +88,14 @@ class Autoformer(nn.Module):
         self.decomp = series_decomp(moving_avg)
 
         # Embeddings
+        # BUG FIX vs cap port: original Autoformer (Wu et al. 2021) feeds the
+        # FULL multi-channel seasonal init (target + every exogenous channel)
+        # into the decoder embedding. cap's port collapsed dec_embedding to
+        # ``output_dim=1`` -- single channel -- which silently discarded ALL
+        # cross-channel seasonal information, the very thing Autoformer is
+        # designed to exploit. Restoring the upstream behavior.
         self.enc_embedding = DataEmbedding_wo_pos(input_dim, d_model, embed, freq, dropout)
-        self.dec_embedding = DataEmbedding_wo_pos(output_dim, d_model, embed, freq, dropout)
+        self.dec_embedding = DataEmbedding_wo_pos(input_dim, d_model, embed, freq, dropout)
 
         # Encoder
         self.encoder = Encoder(
@@ -129,8 +145,25 @@ class Autoformer(nn.Module):
         return inputs, tsl["y_true"]
 
     # ----------------------------------------------------------------------
-    # Forward -- BYTE-IDENTICAL to cap/cap/models/Autoformer.py except that
-    # the noisy `print(output.shape)` debug call is removed.
+    # Forward -- ALIGNED with the original Autoformer paper code
+    # (https://github.com/thuml/Autoformer/blob/main/models/Autoformer.py).
+    #
+    # Two changes vs cap's port, both of which are paper-faithful BUG FIXES:
+    #
+    #   (a) ``zeros`` is now full-channel ``(B, pred_len, x_enc.size(-1))``,
+    #       not ``(B, pred_len, 1)``.
+    #   (b) ``seasonal_init`` future-half no longer slices to channel 0
+    #       only: we keep ALL channels of the lookback seasonal component
+    #       and pad with full-channel zeros for the forecast horizon,
+    #       exactly as in Wu et al. 2021.
+    #
+    # The cap port's collapse of these to single-channel discarded the cross-
+    # channel seasonal information that gives Autoformer its forecasting
+    # ability; that's why the cap port's MAE on multi-feature PM2.5 was ~3x
+    # worse than Informer on the same setup.
+    #
+    # The noisy ``print(output.shape)`` debug call from the cap port is also
+    # removed.
     # ----------------------------------------------------------------------
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         """
@@ -138,13 +171,16 @@ class Autoformer(nn.Module):
         """
         # Decomposition: Trend & Seasonal components
         mean = torch.mean(x_enc, dim=1).unsqueeze(1).repeat(1, self.pred_len, 1)
-        zeros = torch.zeros([x_dec.shape[0], self.pred_len, 1]).to(x_dec.device)
+        zeros = torch.zeros(
+            [x_dec.shape[0], self.pred_len, x_enc.size(-1)], device=x_dec.device,
+        )                                                       # full-channel zeros
 
         seasonal_init, trend_init = self.decomp(x_enc)
 
-        # Prepare decoder input (label_len past values + zeros for future)
+        # Prepare decoder input (label_len past values + zeros for future) --
+        # ALL channels, matching the original Autoformer paper code.
         trend_init = torch.cat([trend_init[:, -self.label_len:, :], mean], dim=1)
-        seasonal_init = torch.cat([seasonal_init[:, -self.label_len:, 0].unsqueeze(-1), zeros], dim=1)
+        seasonal_init = torch.cat([seasonal_init[:, -self.label_len:, :], zeros], dim=1)
 
         # Encoding
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
@@ -154,7 +190,9 @@ class Autoformer(nn.Module):
         dec_out = self.dec_embedding(seasonal_init, x_mark_dec)
         seasonal_part, trend_part = self.decoder(dec_out, enc_out, x_mask=None, cross_mask=None, trend=trend_init)
 
-        # Final output (trend + seasonal)
+        # Final output (trend + seasonal). Target lives at channel 0 in our
+        # data layout (see encdec_dataset.assemble_tsl_inputs); the original
+        # paper used channel -1 because their datasets put the target at the
+        # last column. Picking the right column is a 2-character difference.
         output = trend_part[:, :, 0].unsqueeze(-1) + seasonal_part
-        print(output.shape)
         return output[:, -self.pred_len:, :]  # Match target shape

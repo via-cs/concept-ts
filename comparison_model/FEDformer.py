@@ -2,8 +2,9 @@
 FEDformer (Zhou et al. 2022) ported into ProtoLLM/comparison_model as a fair
 baseline for ProtoLLM's CBM on the Beijing PRSA Aotizhongxin PM2.5 task.
 
-The model class (__init__, forward, forecast pipeline) is BYTE-IDENTICAL to
-``cap/cap/models/FEDFormer.py``. We change only:
+The model class is BYTE-IDENTICAL to ``cap/cap/models/FEDFormer.py`` EXCEPT
+for two paper-faithful BUG FIXES that the cap port introduced relative to
+the original FEDformer (Zhou et al. 2022). We change:
 
   1. Import paths -- relative to our local ``tsl_layers/``.
   2. ``prepare_batch`` -- rewritten to consume the rich-batch dict from
@@ -11,6 +12,13 @@ The model class (__init__, forward, forecast pipeline) is BYTE-IDENTICAL to
      REAL future-known exogenous covariates (target column zeroed) and the
      ``x_mark_*`` tensors carry real normalized calendar features
      (``embed='timeF'``, ``freq='h'``). Architecture is unchanged.
+  3. BUG FIX: cap's port used ``DataEmbedding`` (with sinusoidal positional
+     encoding) for both encoder and decoder embeddings. The original
+     FEDformer paper specifies ``DataEmbedding_wo_pos`` -- WITHOUT
+     positional encoding -- because the Fourier blocks inherently encode
+     position via spectral coefficients. Stacking sinusoidal positional
+     embedding on top of spectral analysis adds noise and degrades
+     performance. We restore the upstream choice. (See ``__init__``.)
 
 IMPORTANT architectural caveat (not a bug, this is how FEDformer is defined)
 ---------------------------------------------------------------------------
@@ -47,7 +55,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tsl_layers.Embed import DataEmbedding
+from .tsl_layers.Embed import DataEmbedding_wo_pos                 # BUG FIX -- see __init__
 from .tsl_layers.AutoCorrelation import AutoCorrelationLayer
 from .tsl_layers.FourierCorrelation import FourierBlock, FourierCrossAttention
 from .tsl_layers.MultiWaveletCorrelation import MultiWaveletCross, MultiWaveletTransform
@@ -80,8 +88,16 @@ class FEDformer(nn.Module):
         self.decomp = series_decomp(moving_avg)
 
         # Embeddings
-        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout)
-        self.dec_embedding = DataEmbedding(dec_in, d_model, embed, freq, dropout)
+        # BUG FIX vs cap port: the original FEDformer (Zhou et al. 2022,
+        # https://github.com/MAZiqing/FEDformer/blob/master/models/FEDformer.py)
+        # uses ``DataEmbedding_wo_pos`` (no positional encoding) for BOTH the
+        # encoder and decoder, because the Fourier blocks inherently encode
+        # position via spectral coefficients. cap's port substituted
+        # ``DataEmbedding`` (with sinusoidal positional encoding), adding
+        # noise on top of the spectral signal and degrading the Fourier
+        # block's representational quality. Restoring the upstream class.
+        self.enc_embedding = DataEmbedding_wo_pos(enc_in, d_model, embed, freq, dropout)
+        self.dec_embedding = DataEmbedding_wo_pos(dec_in, d_model, embed, freq, dropout)
 
         # Choose frequency-based attention mechanism
         if version == 'Wavelets':
