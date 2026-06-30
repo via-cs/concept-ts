@@ -3,37 +3,36 @@ XGBoost baseline for Beijing PRSA Aotizhongxin PM2.5 forecasting with
 known-future covariates.
 
 Same flattened-feature contract as train_random_forest.py (see that file's
-docstring for the feature layout). XGBoost is one of the strongest tabular
-baselines for forecasting tasks and routinely outperforms deep models in
-published air-quality forecasting work, so it's a credibility check worth
-including in any deep-learning comparison.
+docstring for the feature layout).
 
 Multi-output strategy
 ---------------------
 XGBoost 2.0+ supports native multi-output trees via
-``multi_strategy="multi_output_tree"`` (one tree, one leaf, vector output).
-Older XGBoost versions are wrapped via ``sklearn.multioutput.MultiOutputRegressor``
-which trains pred_len independent regressors -- slower but functionally
-equivalent. We auto-detect which path is available and fall back gracefully.
+``multi_strategy="multi_output_tree"`` (one tree per boost iteration with
+vector-valued leaves). This is FAST and what we use by default.
 
-Early stopping
---------------
-We pass the validation set as ``eval_set`` and use ``early_stopping_rounds``
-to halt boosting when val MAE plateaus -- the same selection criterion as
-every other baseline in this folder.
+Older XGBoost falls back to ``sklearn.multioutput.MultiOutputRegressor``,
+which trains ``pred_len`` independent regressors -- slower but functionally
+equivalent.
 
-Comparability: same 70/10/20 split + same StandardScaler-on-train-target as
-all other baselines so z-scored MAE/MSE numbers are directly comparable.
-Raw µg/m³ = z_MAE * target_scaler.scale_[0].
+No early stopping with multi-output
+-----------------------------------
+xgboost 2.x has a known incompatibility between ``eval_metric``,
+``early_stopping_rounds`` (which both moved into the CONSTRUCTOR in 2.x),
+and ``multi_strategy="multi_output_tree"`` -- the single-output metrics
+("mae"/"rmse") raise a shape error when combined with vector-valued targets.
+To avoid the bug we just train for a fixed ``--n_estimators`` and evaluate
+on val/test separately. If you need early stopping, drop pred_len to 1 (one
+horizon step at a time) or use ``--force_multioutput_wrapper`` and rely on
+each sub-regressor's own early stopping.
 
 Run
 ---
     PYTHONPATH=. python -u comparison_model/train_xgboost.py \\
         --dataset ./dataset/PRSA_data/Aotizhongxin.csv \\
-        --lookback_len 96 --pred_len 24 \\
-        --n_estimators 500 --max_depth 6 --learning_rate 0.05 \\
-        --early_stopping_rounds 30 --n_jobs -1 \\
-        --checkpoint_dir ./checkpoint/xgboost
+        --lookback_len 96 --pred_len 96 \\
+        --n_estimators 300 --max_depth 6 --learning_rate 0.1 \\
+        --n_jobs -1 --checkpoint_dir ./checkpoint/xgboost
 """
 
 import argparse
@@ -59,27 +58,24 @@ def get_args():
     p.add_argument("--pred_len", type=int, default=96)
     p.add_argument("--seed", type=int, default=0)
     # XGBoost hyperparameters
-    p.add_argument("--n_estimators", type=int, default=500)
+    p.add_argument("--n_estimators", type=int, default=300,
+                   help="Number of boosting rounds. 300 with default depth=6 "
+                        "is a sane starting point; increase for stronger fit.")
     p.add_argument("--max_depth", type=int, default=6)
-    p.add_argument("--learning_rate", type=float, default=0.05)
+    p.add_argument("--learning_rate", type=float, default=0.1)
     p.add_argument("--subsample", type=float, default=0.8,
-                   help="Fraction of training rows sampled per boosting iter.")
+                   help="Row subsample per boosting iter.")
     p.add_argument("--colsample_bytree", type=float, default=0.8,
-                   help="Fraction of features sampled per tree.")
-    p.add_argument("--reg_lambda", type=float, default=1.0,
-                   help="L2 regularization on leaf weights.")
-    p.add_argument("--reg_alpha", type=float, default=0.0,
-                   help="L1 regularization on leaf weights.")
-    p.add_argument("--early_stopping_rounds", type=int, default=30,
-                   help="Stop boosting after this many rounds with no val "
-                        "improvement. 0 disables early stopping.")
+                   help="Feature subsample per tree.")
+    p.add_argument("--reg_lambda", type=float, default=1.0)
+    p.add_argument("--reg_alpha", type=float, default=0.0)
     p.add_argument("--n_jobs", type=int, default=-1)
     p.add_argument("--tree_method", type=str, default="hist",
-                   choices=["hist", "exact", "approx"],
-                   help="hist (default) is the fastest reliable method.")
+                   choices=["hist", "exact", "approx"])
     p.add_argument("--force_multioutput_wrapper", action="store_true",
-                   help="Force the sklearn MultiOutputRegressor wrapper even "
-                        "on XGBoost 2.0+ (one regressor per forecast step).")
+                   help="Force the sklearn MultiOutputRegressor wrapper "
+                        "even on XGBoost 2.0+ (one regressor per forecast "
+                        "step). Much slower but lets you use early stopping.")
     p.add_argument("--subsample_train", type=int, default=1,
                    help="Keep every Nth training window. 1 = all windows.")
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/xgboost")
@@ -151,6 +147,9 @@ def main():
 
     # ----- Train -----
     if not args.eval_only:
+        # CONSTRUCTOR ONLY: no eval_set, no early_stopping_rounds, no
+        # eval_metric. xgboost 2.x raises shape errors when combining those
+        # with multi_strategy="multi_output_tree" -- see module docstring.
         common_kwargs = dict(
             n_estimators=args.n_estimators,
             max_depth=args.max_depth,
@@ -163,7 +162,6 @@ def main():
             random_state=args.seed,
             tree_method=args.tree_method,
             objective="reg:squarederror",
-            eval_metric="mae",
         )
 
         use_native = (
@@ -173,42 +171,26 @@ def main():
         if use_native:
             print("\n── Training XGBoost (native multi-output) ──")
             print(f"  Using multi_strategy='multi_output_tree' (xgboost 2.0+).")
-            model = xgb.XGBRegressor(multi_strategy="multi_output_tree", **common_kwargs)
+            print(f"  Training for {args.n_estimators} rounds without early "
+                  f"stopping (see module docstring for why).")
+            model = xgb.XGBRegressor(
+                multi_strategy="multi_output_tree", **common_kwargs,
+            )
             t0 = time.time()
-            try:
-                model.fit(
-                    X_train, Y_train,
-                    eval_set=[(X_val, Y_val)],
-                    early_stopping_rounds=(args.early_stopping_rounds
-                                            if args.early_stopping_rounds > 0 else None),
-                    verbose=10,
-                )
-            except TypeError:
-                # Some 2.x patch versions changed the early_stopping kwarg into
-                # a constructor-only param. Retry without it.
-                model = xgb.XGBRegressor(
-                    multi_strategy="multi_output_tree",
-                    early_stopping_rounds=(args.early_stopping_rounds
-                                            if args.early_stopping_rounds > 0 else None),
-                    **common_kwargs,
-                )
-                model.fit(X_train, Y_train, eval_set=[(X_val, Y_val)], verbose=10)
+            model.fit(X_train, Y_train, verbose=False)
             print(f"  fit took {time.time()-t0:.1f}s")
         else:
             print("\n── Training XGBoost (MultiOutputRegressor wrapper) ──")
-            print("  XGBoost < 2.0 or wrapper forced: training pred_len "
-                  "independent regressors.")
+            print("  Training pred_len independent regressors. Slower but "
+                  "compatible with XGBoost < 2.0.")
             from sklearn.multioutput import MultiOutputRegressor
             base = xgb.XGBRegressor(**common_kwargs)
-            # The wrapper doesn't natively pipe eval_set per-step, so we
-            # skip early stopping in this fallback path. Use more conservative
-            # n_estimators to avoid overfit.
-            model = MultiOutputRegressor(base, n_jobs=1)  # parallelism is in xgb
+            model = MultiOutputRegressor(base, n_jobs=1)
             t0 = time.time()
             model.fit(X_train, Y_train)
             print(f"  fit took {time.time()-t0:.1f}s")
 
-        # Val MAE
+        # Val MAE for reporting (no early stopping; this is informational only).
         Y_val_hat = model.predict(X_val)
         val_mae = float(np.mean(np.abs(Y_val_hat - Y_val)))
         val_mse = float(np.mean((Y_val_hat - Y_val) ** 2))
@@ -237,8 +219,7 @@ def main():
     print(f"  test MSE      = {test_mse_raw:.4f}  (RAW µg/m³, RMSE = {test_mse_raw**0.5:.4f})")
     print(f"  test MAE      = {test_mae_raw:.4f}  (RAW µg/m³)")
     print("\n  (Directly comparable to CBM/train_cbm.py and every other "
-          "comparison_model/* baseline: same split, same target scaler, same "
-          "known-future-covariate regime.)")
+          "comparison_model/* baseline.)")
 
 
 if __name__ == "__main__":

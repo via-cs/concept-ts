@@ -28,18 +28,21 @@ Run
 ---
     PYTHONPATH=. python -u comparison_model/train_random_forest.py \\
         --dataset ./dataset/PRSA_data/Aotizhongxin.csv \\
-        --lookback_len 96 --pred_len 24 \\
-        --n_estimators 200 --max_depth 25 --min_samples_leaf 5 \\
-        --max_features 0.3 --n_jobs -1 \\
+        --lookback_len 96 --pred_len 96 \\
+        --n_estimators 100 --max_depth 15 --min_samples_leaf 20 \\
+        --max_features sqrt --n_jobs -1 \\
         --checkpoint_dir ./checkpoint/random_forest
 
 Tips
 ----
-  * Larger ``--n_estimators`` / unlimited ``--max_depth=0`` gives a stronger
-    model but slower fit. 200 trees with depth 25 fits in a few minutes on
-    the full PRSA training split.
-  * ``--subsample_train N`` keeps every Nth training window (useful for a
-    quick sanity check before a full run).
+  * sklearn's multi-output RF cost is roughly O(n_estimators * n_samples *
+    log(n_samples) * max_features * n_outputs). For pred_len=96 the n_outputs
+    term is ~4x what it was at pred_len=24, so default trees are smaller and
+    max_features='sqrt' (not 0.3) to keep fit time in the 10-20 min range.
+  * For a faster sanity-check run, add ``--subsample_train 4`` to use every
+    4th training window (~5 min).
+  * For a STRONGER fit (and more patience): ``--n_estimators 300
+    --max_depth 25 --min_samples_leaf 5 --max_features 0.3``.
 """
 
 import argparse
@@ -66,16 +69,33 @@ def get_args():
     p.add_argument("--pred_len", type=int, default=96)
     p.add_argument("--seed", type=int, default=0)
     # Random Forest hyperparameters
-    p.add_argument("--n_estimators", type=int, default=200,
+    #
+    # Defaults tuned for pred_len=96. sklearn's multi-output RF computes split
+    # impurity averaged over ALL outputs per split, so cost scales roughly
+    # linearly with pred_len (96 outputs → ~4x slower than pred_len=24 with
+    # the same trees). The defaults below trade a small bit of accuracy for
+    # ~10-20 min fit time on a 24k-window training split with -1 cores:
+    #
+    #   n_estimators=100   (was 200)  -- halves tree count
+    #   max_depth=15       (was 25)   -- prevents unbounded leaf growth
+    #   min_samples_leaf=20 (was 5)   -- prevents the tail of one-sample
+    #                                    leaves which dominate fit time
+    #   max_features='sqrt' (was 0.3) -- considers ~53 of 2784 features per
+    #                                    split (was ~835), the single biggest
+    #                                    speedup
+    #
+    # Crank these up if you want a stronger fit and have time to spare.
+    p.add_argument("--n_estimators", type=int, default=100,
                    help="Number of trees.")
-    p.add_argument("--max_depth", type=int, default=25,
+    p.add_argument("--max_depth", type=int, default=15,
                    help="Max tree depth. 0 disables the limit (slower, "
                         "stronger).")
-    p.add_argument("--min_samples_leaf", type=int, default=5,
-                   help="Minimum samples per leaf. Higher = more regularised.")
-    p.add_argument("--max_features", type=str, default="0.3",
-                   help="Fraction of features to consider per split. Accepts "
-                        "a float (e.g. 0.3) or 'sqrt' / 'log2'.")
+    p.add_argument("--min_samples_leaf", type=int, default=20,
+                   help="Minimum samples per leaf. Higher = more regularised "
+                        "and much faster fit.")
+    p.add_argument("--max_features", type=str, default="sqrt",
+                   help="Number of features considered per split. 'sqrt' or "
+                        "'log2', or a float fraction (e.g. 0.3).")
     p.add_argument("--n_jobs", type=int, default=-1,
                    help="Parallel workers (-1 = all cores).")
     p.add_argument("--subsample_train", type=int, default=1,
