@@ -224,3 +224,60 @@ def assemble_tsl_inputs(batch, label_len: int) -> dict:
         "x_mark_dec": x_mark_dec,
         "y_true":     y_true,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tabular flattener -- used by Random Forest and XGBoost trainers
+# ---------------------------------------------------------------------------
+def flatten_dataset_for_tabular(ds: PRSA_EncDec_Dataset):
+    """Walk every window in the dataset and emit one flat feature vector + one
+    target vector per window. Used by sklearn-style models (Random Forest,
+    XGBoost, Linear Regression, Ridge) that consume tabular (N, d) input and
+    emit (N, pred_len) output.
+
+    Returns
+    -------
+    X : np.ndarray of shape (N_windows, n_features)
+        Per-window flat features in this order:
+            [y_past_tgt (L,)]               + lookback target
+            [x_real_past flattened (L*R,)]  + lookback covariates
+            [x_real_future flattened (H*R,)]+ KNOWN-FUTURE covariates
+            [x_mark_past flattened (L*K,)]  + lookback calendar
+            [x_mark_future flattened (H*K,)]+ KNOWN-FUTURE calendar
+        Total: L + L*R + H*R + L*K + H*K  features.
+        For PRSA defaults (L=96, H=24, R=10, K=4): 96 + 960 + 240 + 384 + 96
+        = 1776 features per window.
+    Y : np.ndarray of shape (N_windows, pred_len)
+        z-scored ground-truth target sequence. Same z-space as every other
+        baseline so MAE/MSE numbers stay comparable.
+    """
+    if len(ds) == 0:
+        return np.zeros((0, 1), dtype=np.float32), np.zeros((0, ds.H), dtype=np.float32)
+
+    L, H = ds.L, ds.H
+    R, K = ds.n_real, ds.n_mark
+    n_features = L + L * R + H * R + L * K + H * K
+
+    N = len(ds)
+    X = np.empty((N, n_features), dtype=np.float32)
+    Y = np.empty((N, H), dtype=np.float32)
+
+    for i in range(N):
+        s = i
+        # All slices live in ds.tgt / ds.real / ds.marks (already z-scored /
+        # normalized in __init__), so we avoid the torch.from_numpy round-trip
+        # of __getitem__ and go straight numpy → numpy.
+        y_past_tgt    = ds.tgt[s : s + L].reshape(-1)             # (L,)
+        x_real_past   = ds.real[s : s + L].reshape(-1)            # (L*R,)
+        x_real_future = ds.real[s + L : s + L + H].reshape(-1)    # (H*R,)
+        x_mark_past   = ds.marks[s : s + L].reshape(-1)           # (L*K,)
+        x_mark_future = ds.marks[s + L : s + L + H].reshape(-1)   # (H*K,)
+        y_true        = ds.tgt[s + L : s + L + H].reshape(-1)     # (H,)
+
+        # Concatenate in the documented order; np.concatenate of all-1D arrays
+        # is a memcpy.
+        X[i] = np.concatenate([y_past_tgt, x_real_past, x_real_future,
+                                x_mark_past, x_mark_future])
+        Y[i] = y_true
+
+    return X, Y

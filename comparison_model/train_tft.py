@@ -56,7 +56,7 @@ def get_args():
     p.add_argument("--dataset", type=str, required=True,
                    help="Path to Aotizhongxin.csv.")
     p.add_argument("--lookback_len", type=int, default=96)
-    p.add_argument("--pred_len", type=int, default=24)
+    p.add_argument("--pred_len", type=int, default=96)
     p.add_argument("--epoch", type=int, default=30)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=5e-4)

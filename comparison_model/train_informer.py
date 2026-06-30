@@ -45,7 +45,7 @@ def get_args():
     )
     p.add_argument("--dataset", type=str, required=True)
     p.add_argument("--lookback_len", type=int, default=96)
-    p.add_argument("--pred_len", type=int, default=24)
+    p.add_argument("--pred_len", type=int, default=96)
     p.add_argument("--label_len", type=int, default=48)
     p.add_argument("--epoch", type=int, default=30)
     p.add_argument("--batch_size", type=int, default=32)

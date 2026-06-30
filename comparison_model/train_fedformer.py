@@ -38,7 +38,7 @@ def get_args():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", type=str, required=True)
     p.add_argument("--lookback_len", type=int, default=96)
-    p.add_argument("--pred_len", type=int, default=24)
+    p.add_argument("--pred_len", type=int, default=96)
     p.add_argument("--label_len", type=int, default=48)
     p.add_argument("--epoch", type=int, default=30)
     p.add_argument("--batch_size", type=int, default=32)
@@ -55,7 +55,12 @@ def get_args():
     p.add_argument("--moving_avg", type=int, default=25)
     p.add_argument("--factor", type=int, default=3)
     p.add_argument("--modes", type=int, default=32)
-    p.add_argument("--mode_select", type=str, default="random", choices=["random", "low"])
+    p.add_argument("--mode_select", type=str, default="low", choices=["random", "low"],
+                   help="'low' deterministically picks the lowest --modes frequencies "
+                        "(more stable for short-horizon forecasting where the dominant "
+                        "PM2.5 signal sits at daily/weekly cycles); 'random' is the "
+                        "original FEDformer default but can miss key low frequencies "
+                        "and gives unstable run-to-run results.")
     p.add_argument("--version", type=str, default="fourier", choices=["fourier", "Wavelets"])
     p.add_argument("--embed", type=str, default="timeF", choices=["fixed", "timeF"])
     p.add_argument("--freq", type=str, default="h")
