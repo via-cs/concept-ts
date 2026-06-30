@@ -2,37 +2,47 @@
 XGBoost baseline for Beijing PRSA Aotizhongxin PM2.5 forecasting with
 known-future covariates.
 
-Same flattened-feature contract as train_random_forest.py (see that file's
-docstring for the feature layout).
+Same flattened-feature contract as train_random_forest.py / train_lightgbm.py
+(see those files' docstrings for the feature layout).
 
-Multi-output strategy
----------------------
-XGBoost 2.0+ supports native multi-output trees via
-``multi_strategy="multi_output_tree"`` (one tree per boost iteration with
-vector-valued leaves). This is FAST and what we use by default.
+Why this trainer is built sequentially (and NOT with joblib parallelism)
+------------------------------------------------------------------------
+Two XGBoost 2.x/3.x failure modes were causing mysterious crashes that
+appeared as a phantom "^C" in the terminal even when the user never pressed
+Ctrl+C:
 
-Older XGBoost falls back to ``sklearn.multioutput.MultiOutputRegressor``,
-which trains ``pred_len`` independent regressors -- slower but functionally
-equivalent.
+  1. ``multi_strategy="multi_output_tree"`` with hist trees and large
+     pred_len allocates per-feature, per-output histograms whose memory
+     scales linearly with pred_len. For pred_len=96, 2784 features, 256
+     hist bins, this is multi-GB per worker. The process OOM-crashes or
+     XGBoost internally raises SIGINT, which the terminal echoes as "^C".
 
-No early stopping with multi-output
------------------------------------
-xgboost 2.x has a known incompatibility between ``eval_metric``,
-``early_stopping_rounds`` (which both moved into the CONSTRUCTOR in 2.x),
-and ``multi_strategy="multi_output_tree"`` -- the single-output metrics
-("mae"/"rmse") raise a shape error when combined with vector-valued targets.
-To avoid the bug we just train for a fixed ``--n_estimators`` and evaluate
-on val/test separately. If you need early stopping, drop pred_len to 1 (one
-horizon step at a time) or use ``--force_multioutput_wrapper`` and rely on
-each sub-regressor's own early stopping.
+  2. ``sklearn.MultiOutputRegressor(n_jobs=-1)`` wrapping XGBoost spawns
+     N joblib worker processes (loky backend). When any child process
+     crashes (segfault, OOM, native C++ exception not propagated cleanly),
+     joblib forwards the failure to the parent AS SIGINT, which the
+     terminal again echoes as "^C". This is a long-standing joblib + native-
+     code interaction issue.
+
+Both bugs are SIGINT-pretending-to-be-user-interrupt. The fix is to do
+NEITHER. We train ``pred_len`` XGBoost regressors SEQUENTIALLY in one Python
+process, each using XGBoost's internal CPU threading (``n_jobs=-1``) for
+parallelism within a single tree. No joblib, no worker spawning, no
+multi-output trees -- so neither failure mode is reachable.
+
+Trade-off: a sequential loop is slower in total wall-clock than an ideal
+joblib parallel run would be, but on an 8-core machine the per-tree
+parallelism inside XGBoost still gives us ~5-15 min for pred_len=96 with
+the defaults. And -- importantly -- it actually finishes.
 
 Run
 ---
     PYTHONPATH=. python -u comparison_model/train_xgboost.py \\
         --dataset ./dataset/PRSA_data/Aotizhongxin.csv \\
         --lookback_len 96 --pred_len 96 \\
-        --n_estimators 300 --max_depth 6 --learning_rate 0.1 \\
-        --n_jobs -1 --checkpoint_dir ./checkpoint/xgboost
+        --n_estimators 100 --max_depth 6 --learning_rate 0.1 \\
+        --inner_n_jobs -1 \\
+        --checkpoint_dir ./checkpoint/xgboost
 """
 
 import argparse
@@ -50,6 +60,22 @@ from comparison_model.encdec_dataset import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Multi-output wrapper that is just a list of single-output regressors.
+# Defined at module scope so joblib can pickle it.
+# ---------------------------------------------------------------------------
+class XGBSequentialMultiOutput:
+    """Holds ``pred_len`` independent XGBoost single-output regressors and
+    exposes a sklearn-style ``predict``. No multiprocessing involved."""
+
+    def __init__(self, regressors):
+        self.regressors = list(regressors)
+
+    def predict(self, X):
+        # Each regressor returns (N,); stack along the new axis to get (N, pred_len).
+        return np.stack([r.predict(X) for r in self.regressors], axis=1)
+
+
 def get_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -58,9 +84,8 @@ def get_args():
     p.add_argument("--pred_len", type=int, default=96)
     p.add_argument("--seed", type=int, default=0)
     # XGBoost hyperparameters
-    p.add_argument("--n_estimators", type=int, default=300,
-                   help="Number of boosting rounds. 300 with default depth=6 "
-                        "is a sane starting point; increase for stronger fit.")
+    p.add_argument("--n_estimators", type=int, default=100,
+                   help="Boosting rounds per output regressor.")
     p.add_argument("--max_depth", type=int, default=6)
     p.add_argument("--learning_rate", type=float, default=0.1)
     p.add_argument("--subsample", type=float, default=0.8,
@@ -69,13 +94,15 @@ def get_args():
                    help="Feature subsample per tree.")
     p.add_argument("--reg_lambda", type=float, default=1.0)
     p.add_argument("--reg_alpha", type=float, default=0.0)
-    p.add_argument("--n_jobs", type=int, default=-1)
     p.add_argument("--tree_method", type=str, default="hist",
                    choices=["hist", "exact", "approx"])
-    p.add_argument("--force_multioutput_wrapper", action="store_true",
-                   help="Force the sklearn MultiOutputRegressor wrapper "
-                        "even on XGBoost 2.0+ (one regressor per forecast "
-                        "step). Much slower but lets you use early stopping.")
+    p.add_argument("--inner_n_jobs", type=int, default=-1,
+                   help="XGBoost internal thread count. -1 = all cores. "
+                        "Used PER REGRESSOR; since we train sequentially "
+                        "(one regressor at a time), oversubscription is "
+                        "impossible.")
+    p.add_argument("--progress_every", type=int, default=8,
+                   help="Print a progress line every N regressors trained.")
     p.add_argument("--subsample_train", type=int, default=1,
                    help="Keep every Nth training window. 1 = all windows.")
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/xgboost")
@@ -86,15 +113,6 @@ def get_args():
 def set_seed(seed=0):
     np.random.seed(seed)
     random.seed(seed)
-
-
-def _native_multioutput_supported(xgb_version: str) -> bool:
-    """xgboost 2.0+ supports multi_strategy='multi_output_tree'."""
-    try:
-        major = int(xgb_version.split(".")[0])
-        return major >= 2
-    except Exception:
-        return False
 
 
 def main():
@@ -147,9 +165,15 @@ def main():
 
     # ----- Train -----
     if not args.eval_only:
-        # CONSTRUCTOR ONLY: no eval_set, no early_stopping_rounds, no
-        # eval_metric. xgboost 2.x raises shape errors when combining those
-        # with multi_strategy="multi_output_tree" -- see module docstring.
+        print(f"\n── Training XGBoost (sequential, {args.pred_len} regressors) ──")
+        print(f"  Each regressor: n_estimators={args.n_estimators}  "
+              f"max_depth={args.max_depth}  lr={args.learning_rate}")
+        print(f"  Internal threading: n_jobs={args.inner_n_jobs}  "
+              f"tree_method={args.tree_method}")
+        print(f"  No multiprocessing/joblib: avoids both the "
+              f"multi_output_tree OOM and the joblib-SIGINT-cascade.")
+        print(f"  Progress logged every {args.progress_every} regressors.\n")
+
         common_kwargs = dict(
             n_estimators=args.n_estimators,
             max_depth=args.max_depth,
@@ -158,39 +182,38 @@ def main():
             colsample_bytree=args.colsample_bytree,
             reg_lambda=args.reg_lambda,
             reg_alpha=args.reg_alpha,
-            n_jobs=args.n_jobs,
+            n_jobs=args.inner_n_jobs,
             random_state=args.seed,
             tree_method=args.tree_method,
             objective="reg:squarederror",
+            verbosity=0,
         )
 
-        use_native = (
-            _native_multioutput_supported(xgb.__version__)
-            and not args.force_multioutput_wrapper
-        )
-        if use_native:
-            print("\n── Training XGBoost (native multi-output) ──")
-            print(f"  Using multi_strategy='multi_output_tree' (xgboost 2.0+).")
-            print(f"  Training for {args.n_estimators} rounds without early "
-                  f"stopping (see module docstring for why).")
-            model = xgb.XGBRegressor(
-                multi_strategy="multi_output_tree", **common_kwargs,
-            )
-            t0 = time.time()
-            model.fit(X_train, Y_train, verbose=False)
-            print(f"  fit took {time.time()-t0:.1f}s")
-        else:
-            print("\n── Training XGBoost (MultiOutputRegressor wrapper) ──")
-            print("  Training pred_len independent regressors. Slower but "
-                  "compatible with XGBoost < 2.0.")
-            from sklearn.multioutput import MultiOutputRegressor
-            base = xgb.XGBRegressor(**common_kwargs)
-            model = MultiOutputRegressor(base, n_jobs=1)
-            t0 = time.time()
-            model.fit(X_train, Y_train)
-            print(f"  fit took {time.time()-t0:.1f}s")
+        regressors = []
+        total_start = time.time()
+        for step in range(args.pred_len):
+            step_start = time.time()
+            reg = xgb.XGBRegressor(**common_kwargs)
+            reg.fit(X_train, Y_train[:, step])
+            regressors.append(reg)
 
-        # Val MAE for reporting (no early stopping; this is informational only).
+            done = step + 1
+            if done % args.progress_every == 0 or done == args.pred_len:
+                elapsed = time.time() - total_start
+                rate = done / elapsed                      # regressors/sec
+                eta_s = (args.pred_len - done) / max(rate, 1e-9)
+                step_s = time.time() - step_start
+                print(f"    [{done:>3d}/{args.pred_len}]  "
+                      f"step={step_s:.1f}s  total={elapsed:.0f}s  "
+                      f"ETA={eta_s:.0f}s  rate={rate*60:.1f}/min")
+
+        fit_time = time.time() - total_start
+        print(f"\n  total fit time: {fit_time:.1f}s ({fit_time/60:.1f} min)")
+
+        model = XGBSequentialMultiOutput(regressors)
+
+        # Val MAE
+        print("  evaluating on val...")
         Y_val_hat = model.predict(X_val)
         val_mae = float(np.mean(np.abs(Y_val_hat - Y_val)))
         val_mse = float(np.mean((Y_val_hat - Y_val) ** 2))

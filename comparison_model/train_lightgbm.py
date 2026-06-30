@@ -7,18 +7,24 @@ Same flattened-feature contract as train_random_forest.py / train_xgboost.py
 
 Multi-output strategy
 ---------------------
-Unlike XGBoost 2.0+, LightGBM does NOT have a native vector-leaf multi-output
-tree mode -- so we wrap ``lightgbm.LGBMRegressor`` in
-``sklearn.multioutput.MultiOutputRegressor``. This trains ``pred_len``
-independent boosters, one per forecast step. LightGBM is fast enough that
-even 96 separate boosters fit in 5-15 min on a 24k-window training split
-with -1 cores.
+LightGBM doesn't have a native vector-leaf multi-output tree mode, so we
+train ``pred_len`` independent boosters (one per forecast step) SEQUENTIALLY
+in one Python process. LightGBM uses its internal multi-threading
+(``n_jobs=-1``) for parallelism within each booster.
 
-The independent-per-step approach has a subtle property: each forecast step
-gets its OWN feature importance / split structure. This often gives stronger
-results than tying everything to one tree, because near-term and far-term
-forecasts depend on different features (recent lookback dominates step+1,
-future weather dominates step+96).
+We deliberately AVOID ``sklearn.multioutput.MultiOutputRegressor(n_jobs=-1)``
+even though it's the obvious choice: joblib workers wrapping native LightGBM
+have a long-standing problem where any child crash (OOM, segfault, C++
+exception) gets propagated to the parent as SIGINT, which the terminal
+echoes as a phantom "^C" -- looking like the user pressed Ctrl+C when
+they didn't. This bites XGBoost too (see train_xgboost.py docstring).
+Sequential single-process avoids the issue entirely.
+
+The independent-per-step approach has a useful property: each forecast step
+gets its own feature importance / split structure. Near-term steps (step+1)
+discover that recent lookback dominates; far-term steps (step+96) discover
+that future weather dominates. This per-step specialization often beats
+forced-tied multi-output trees in practice.
 
 Comparability: same 70/10/20 split + same StandardScaler-on-train-target as
 all other baselines so z-scored MAE/MSE numbers are directly comparable.
@@ -30,7 +36,7 @@ Run
         --dataset ./dataset/PRSA_data/Aotizhongxin.csv \\
         --lookback_len 96 --pred_len 96 \\
         --n_estimators 300 --learning_rate 0.1 --num_leaves 31 \\
-        --n_jobs -1 \\
+        --inner_n_jobs -1 \\
         --checkpoint_dir ./checkpoint/lightgbm
 """
 
@@ -47,6 +53,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from comparison_model.encdec_dataset import (
     PRSA_EncDec_Dataset, flatten_dataset_for_tabular,
 )
+
+
+# Defined at module scope so joblib can pickle it.
+class LGBMSequentialMultiOutput:
+    """Holds ``pred_len`` independent LightGBM single-output regressors."""
+
+    def __init__(self, regressors):
+        self.regressors = list(regressors)
+
+    def predict(self, X):
+        return np.stack([r.predict(X) for r in self.regressors], axis=1)
 
 
 def get_args():
@@ -77,12 +94,12 @@ def get_args():
                    help="Perform bagging every k iterations. 0 disables.")
     p.add_argument("--reg_lambda", type=float, default=0.0)
     p.add_argument("--reg_alpha", type=float, default=0.0)
-    p.add_argument("--n_jobs", type=int, default=-1)
-    p.add_argument("--inner_n_jobs", type=int, default=1,
-                   help="Threads INSIDE each LightGBM regressor. Total "
-                        "parallelism = outer * inner. With outer=-1 and "
-                        "inner=1, sklearn parallelises the 96 regressors "
-                        "across all cores, one LightGBM core per regressor.")
+    p.add_argument("--inner_n_jobs", type=int, default=-1,
+                   help="LightGBM internal threads. -1 = all cores. Used "
+                        "PER REGRESSOR; since we train sequentially (one "
+                        "regressor at a time), oversubscription is impossible.")
+    p.add_argument("--progress_every", type=int, default=8,
+                   help="Print a progress line every N regressors trained.")
     p.add_argument("--subsample_train", type=int, default=1,
                    help="Keep every Nth training window. 1 = all windows.")
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/lightgbm")
@@ -101,12 +118,11 @@ def main():
 
     try:
         import lightgbm as lgb
-        from sklearn.multioutput import MultiOutputRegressor
         import joblib
     except ImportError as e:
         raise ImportError(
-            f"LightGBM baseline needs lightgbm + scikit-learn + joblib: {e}. "
-            "Install with: pip install lightgbm scikit-learn joblib"
+            f"LightGBM baseline needs lightgbm + joblib: {e}. "
+            "Install with: pip install lightgbm joblib"
         )
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -146,10 +162,15 @@ def main():
 
     # ----- Train -----
     if not args.eval_only:
-        print("\n── Training LightGBM (MultiOutputRegressor wrapper) ──")
-        print(f"  Training pred_len={args.pred_len} independent boosters "
-              f"({args.n_estimators} rounds each).")
-        base = lgb.LGBMRegressor(
+        print(f"\n── Training LightGBM (sequential, {args.pred_len} regressors) ──")
+        print(f"  Each regressor: n_estimators={args.n_estimators}  "
+              f"num_leaves={args.num_leaves}  lr={args.learning_rate}")
+        print(f"  Internal threading: n_jobs={args.inner_n_jobs}")
+        print(f"  No multiprocessing/joblib: avoids the joblib-SIGINT-cascade "
+              f"(see module docstring).")
+        print(f"  Progress logged every {args.progress_every} regressors.\n")
+
+        common_kwargs = dict(
             n_estimators=args.n_estimators,
             learning_rate=args.learning_rate,
             num_leaves=args.num_leaves,
@@ -165,12 +186,32 @@ def main():
             objective="regression",
             verbosity=-1,
         )
-        model = MultiOutputRegressor(base, n_jobs=args.n_jobs)
-        t0 = time.time()
-        model.fit(X_train, Y_train)
-        print(f"  fit took {time.time()-t0:.1f}s")
+
+        regressors = []
+        total_start = time.time()
+        for step in range(args.pred_len):
+            step_start = time.time()
+            reg = lgb.LGBMRegressor(**common_kwargs)
+            reg.fit(X_train, Y_train[:, step])
+            regressors.append(reg)
+
+            done = step + 1
+            if done % args.progress_every == 0 or done == args.pred_len:
+                elapsed = time.time() - total_start
+                rate = done / elapsed
+                eta_s = (args.pred_len - done) / max(rate, 1e-9)
+                step_s = time.time() - step_start
+                print(f"    [{done:>3d}/{args.pred_len}]  "
+                      f"step={step_s:.1f}s  total={elapsed:.0f}s  "
+                      f"ETA={eta_s:.0f}s  rate={rate*60:.1f}/min")
+
+        fit_time = time.time() - total_start
+        print(f"\n  total fit time: {fit_time:.1f}s ({fit_time/60:.1f} min)")
+
+        model = LGBMSequentialMultiOutput(regressors)
 
         # Val MAE
+        print("  evaluating on val...")
         Y_val_hat = model.predict(X_val)
         val_mae = float(np.mean(np.abs(Y_val_hat - Y_val)))
         val_mse = float(np.mean((Y_val_hat - Y_val) ** 2))
