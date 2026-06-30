@@ -145,9 +145,29 @@ def _linregress_slope(values: np.ndarray) -> float:
 
 def extract_continuous_stats(values: np.ndarray) -> dict:
     """
-    mean, median, std, min, max, range,
-    skewness, kurtosis, slope (linear trend), plus volume (sum of abs changes).
-    Values are rounded to 2 decimal places for compact LLM representation.
+    mean, median, std, min, max, range, skewness, kurtosis, slope (OLS linear
+    trend), delta_half (robust direction indicator), volume (sum of abs
+    changes). Values are rounded for compact LLM representation.
+
+    On slope vs delta_half
+    ----------------------
+    ``slope`` is the OLS regression coefficient with t = np.arange(n) -- units
+    per timestep (= units per hour for PRSA's 1-hour data). It captures the
+    LINEAR trend of the series. On a window that spans an integer number of
+    daily cycles (e.g. a 24-hour PRSA sub-window or 96-hour forecast), the
+    sinusoidal daily cycle averages out and ``slope`` is systematically near
+    zero EVEN WHEN the series is clearly drifting -- which is why ``slope >
+    0.1`` rules for "is rising in this block" basically never fire and have
+    weak AUROC.
+
+    ``delta_half`` is mean(values[n//2:]) - mean(values[:n//2]) -- it compares
+    the SECOND HALF of the window against the FIRST HALF. For cyclical data
+    over one period this stays near zero too, but for cyclic-plus-drift data
+    (the common case in PM2.5 forecasting) the drift dominates the half-mean
+    difference and gives a clean signed direction. Use ``delta_half`` for
+    "is rising / is falling" trend concepts on SUB-WINDOW or FORECAST blocks;
+    use ``slope`` for genuinely linear trends on LONG lookbacks (e.g. 96+
+    hours of multi-day drift).
     """
     n = len(values)
     if n == 0:
@@ -162,6 +182,14 @@ def extract_continuous_stats(values: np.ndarray) -> dict:
     # Volume: sum of absolute differences (measures total variation)
     volume = float(np.sum(np.abs(np.diff(values)))) if n > 1 else 0.0
 
+    # delta_half: mean of second half minus mean of first half. Robust to
+    # daily cyclicality (much more so than OLS slope on a 24-hour window).
+    if n >= 2:
+        half = n // 2
+        delta_half = float(np.mean(values[half:]) - np.mean(values[:half]))
+    else:
+        delta_half = 0.0
+
     return {
         "mean": round(mean_val, 2),
         "median": round(float(np.median(values)), 2),
@@ -172,6 +200,7 @@ def extract_continuous_stats(values: np.ndarray) -> dict:
         "skewness": round(_skewness(values), 2),
         "kurtosis": round(_kurtosis(values), 2),
         "slope": round(slope, 4),
+        "delta_half": round(delta_half, 2),
         "volume": round(volume, 2),
     }
 

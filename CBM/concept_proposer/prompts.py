@@ -51,7 +51,7 @@ LOF_BLOCK = {
     "Skin_temperature": {{
       "mean": float, "median": float, "std": float, "min": float,
       "max": float, "range": float, "skewness": float,
-      "kurtosis": float, "slope": float, "volume": float
+      "kurtosis": float, "slope": float, "delta_half": float, "volume": float
     }},
     "is_workday": {{
       "mode": int, "n_unique": int, "distribution": {{"0": float, "1": float}}
@@ -85,7 +85,7 @@ LOF_BLOCK = {
     "Skin_temperature": {{
       "mean": float, "median": float, "std": float, "min": float,
       "max": float, "range": float, "skewness": float,
-      "kurtosis": float, "slope": float, "volume": float
+      "kurtosis": float, "slope": float, "delta_half": float, "volume": float
     }},
     "is_workday": {{
       "mode": int, "n_unique": int, "distribution": {{...}}
@@ -174,7 +174,7 @@ PRSA_BLOCK = {
     "TEMP": {{
       "mean": float, "median": float, "std": float, "min": float,
       "max": float, "range": float, "skewness": float,
-      "kurtosis": float, "slope": float, "volume": float,
+      "kurtosis": float, "slope": float, "delta_half": float, "volume": float,
       # Frequency-domain features (ONLY present on lookback_stats for
       # continuous channels; sub-windows and forecast_stats do NOT have them).
       "fft_dom_period_h":  float,   # period (hours) of the strongest non-DC frequency
@@ -234,7 +234,7 @@ NOTES:
     "TEMP": {{
       "mean": float, "median": float, "std": float, "min": float,
       "max": float, "range": float, "skewness": float,
-      "kurtosis": float, "slope": float, "volume": float
+      "kurtosis": float, "slope": float, "delta_half": float, "volume": float
     }},
     "hour": {{
       "mode": int, "n_unique": int, "distribution": {{...}}
@@ -257,6 +257,24 @@ NOTES:
 NOTE: with output_length = {output_length} and n_subwindows = {n_subwindows},
 each sub-window covers {subwindow_length} consecutive timesteps. At 1-hour
 resolution that is {subwindow_hours} hours per sub-window.
+
+*** TREND-DIRECTION RULES — USE delta_half, NOT slope, ON SUB-WINDOWS ***
+For any concept of the form "is X rising / falling in this block" or
+"is X trending up over the forecast", USE THE ``delta_half`` STAT, not
+``slope``.  Reason: PRSA sub-windows are {subwindow_hours} hours each.
+If this is a full daily cycle (24h) the OLS slope of cyclical data like
+TEMP/DEWP/wind/pollutants is systematically near zero (the sin/cos
+oscillation averages out of the linear-fit coefficient) -- a ``slope > 0.1``
+rule will basically never fire and the concept's AUROC will be terrible.
+``delta_half`` is mean(second half) - mean(first half); it captures direction
+even on cyclic-with-drift data. Use it as:
+    ``stats['TEMP']['delta_half'] > 0.5``         -- "warmer in second half"
+    ``stats['DEWP']['delta_half'] > 1.0``         -- "humidity rising in block"
+    ``stats['WSPM']['delta_half'] < -0.3``        -- "wind falling in block"
+``slope`` is still fine for LOOKBACK concepts (96-hour windows have several
+days of drift dominating any one cycle) and for FORECAST-GLOBAL aggregate
+concepts on multi-day horizons. Use ``slope`` only when the window length
+is much longer than the dominant daily cycle.
 
 *** TARGET LEAKAGE WARNING ***
 PM2.5 is what the model PREDICTS. In the FORECAST window (every sub-window AND
@@ -334,16 +352,16 @@ ONLY lookback concepts may use PM2.5, because the history is observed.""",
   {{
     "id": 0,
     "name": "is_forecast_has_stagnant_hour",
-    "description": "Minimum wind speed over the WHOLE forecast drops below 0.5 m/s -- the forecast contains at least one near-calm hour in which pollutants accumulate. (Covariate-only; PM2.5 is the masked target and must NOT be used.)",
+    "description": "Minimum wind speed over the WHOLE forecast drops below 0.5 m/s -- the forecast contains at least one near-calm hour, conditions in which airborne particles accumulate.",
     "category": "aggregate",
     "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('WSPM', {{}}).get('min')\\n    return m is not None and m < 0.5"
   }},
   {{
     "id": 1,
     "name": "is_forecast_humidity_rising",
-    "description": "Dew point slope over the WHOLE forecast is positive AND non-trivial -- humidity (hence particle-growth potential) rises across the horizon. (Covariate-only; PM2.5 must NOT be used.)",
+    "description": "Dew point in the SECOND HALF of the forecast is meaningfully higher than the FIRST HALF -- humidity (hence particle-growth potential) rises across the horizon. Uses delta_half (robust to daily cycle) rather than OLS slope (which averages to ~0 on cyclical data).",
     "category": "trend",
-    "function": "def matches(sub_seg):\\n    s = sub_seg.get('stats', {{}}).get('DEWP', {{}}).get('slope')\\n    return s is not None and s > 0.1"
+    "function": "def matches(sub_seg):\\n    d = sub_seg.get('stats', {{}}).get('DEWP', {{}}).get('delta_half')\\n    return d is not None and d > 1.0"
   }},
   {{
     "id": 2,
@@ -418,6 +436,63 @@ forecast window (i.e. ``stats`` is the segment's full ``forecast_stats`` and
 
 ## Your Task
 
+============================================================================
+*** CRITICAL CONSTRAINT — READ THIS BEFORE PROPOSING ANY CONCEPT ***
+============================================================================
+
+PM2.5 IS THE PREDICTION TARGET. The forecast window's PM2.5 values are what
+the model has to predict — they are MASKED / UNAVAILABLE at inference time.
+
+  - LOOKBACK concepts MAY reference PM2.5 (the history is observed).
+  - FORECAST-SUB-WINDOW concepts MUST NOT REFERENCE PM2.5 IN ANY WAY.
+  - FORECAST-GLOBAL concepts MUST NOT REFERENCE PM2.5 IN ANY WAY.
+
+Forecast-side concepts must be built EXCLUSIVELY from CONTEXT FEATURES:
+meteorology (TEMP, PRES, DEWP, RAIN, WSPM), other pollutants (PM10, SO2,
+NO2, CO, O3), and calendar (year, month, day, hour, season). NOTHING ELSE.
+
+A forecast-side rule that touches PM2.5 — directly OR indirectly — defines
+the concept on the answer itself. It is circular, it is data leakage, and
+it will be REJECTED.
+
+What "REFERENCING PM2.5" means in this prompt (all forbidden on forecast side):
+  * Any string ``'PM2.5'`` appearing inside the function body
+  * Any stats lookup keyed on PM2.5: ``stats['PM2.5']``, ``stats.get('PM2.5')``
+  * Any FFT / mean / std / min / max / slope / median / quantile of PM2.5
+  * Any "is_high_pollution_episode" / "is_PM_spike" / "is_pm25_rising" / etc.
+    where the rule's TRUE meaning depends on PM2.5 magnitude
+  * Any cross_channel field that you intend to interpret as a PM2.5 signal
+    (note: ``cross_channel_stats.target_corr_*`` is computed from LOOKBACK
+    PM2.5 only — it is OK to use on the LOOKBACK side, but on the forecast
+    side these stats are the SAME lookback-derived values, not forecast PM2.5;
+    using them in a forecast/global concept is permitted ONLY when you
+    legitimately mean "lookback PM2.5 correlated with X". If you find
+    yourself reaching for ``target_corr_*`` in a forecast-side concept,
+    please reconsider whether the concept actually belongs in the LOOKBACK
+    set instead.)
+
+FORBIDDEN forecast/global concept examples (do NOT propose anything like these):
+  * "is_forecast_pollution_episode" — would read PM2.5 max
+  * "is_pm25_rising_block"          — slope of PM2.5
+  * "is_high_pm25_block"            — mean PM2.5
+  * "is_forecast_pm_spike"          — PM2.5 threshold
+  * "is_pollutant_buildup"          — usually code reads PM2.5
+
+PERMITTED forecast/global concept examples (covariates only):
+  * "is_calm_block"                 — wind speed mean low
+  * "is_humid_block"                — dew point mean high
+  * "is_rush_hour_block"            — start hour in [7, 10]
+  * "is_forecast_uniformly_calm"    — wind low + uniform across whole horizon
+  * "is_forecast_humidity_rising"   — dew point slope > 0 over whole horizon
+  * "is_low_wind_AND_high_pm10_carryover" — wind speed mean low (FUTURE) and
+    PM10 mean high (FUTURE other-pollutant carryover from continuing emissions)
+
+Before you write each forecast-side or global concept, ASK YOURSELF:
+"Does this rule's truth value depend on a PM2.5 value the model would not
+have at test time?" If yes (or unsure), REPLACE IT with a covariate-only rule.
+
+============================================================================
+
 Propose THREE concept sets:
 
   * Exactly **{{n_lookback_concepts}} LOOKBACK concepts**. These probe the HISTORY:
@@ -425,6 +500,8 @@ Propose THREE concept sets:
     "lookback fully on workdays". Operate on `seg['lookback_stats']`,
     `seg['cross_channel_stats']`, `seg['time_context']` (especially
     `lookback_start`/`lookback_end`).
+    LOOKBACK concepts MAY use ``lookback_stats['PM2.5']`` because the history
+    is observed.
 
   * Exactly **{{n_forecast_concepts}} FORECAST-SUB-WINDOW concepts**. These probe
     ONE sub-window of the forecast at a time (each rule fires {{n_subwindows}}
@@ -433,18 +510,27 @@ Propose THREE concept sets:
     Operate on `sub_seg['stats']`, `sub_seg['time_context']` (especially
     `start.hour`, `season`), and `sub_seg['cross_channel_stats']`.
     These are LOCAL, time-resolved descriptors.
-    DO NOT reference `stats['PM2.5']` -- PM2.5 is the prediction target and is
-    masked/unavailable in the forecast window. Use only meteorology
-    (TEMP, PRES, DEWP, RAIN, WSPM), other pollutants (PM10, SO2, NO2, CO, O3),
-    and calendar.
+
+    *** ABSOLUTE RULE — NO PM2.5 IN FORECAST-SUB-WINDOW CONCEPTS ***
+    DO NOT reference ``stats['PM2.5']`` in any way — no mean, max, min, std,
+    slope, fft, threshold, comparison. PM2.5 is the prediction target and is
+    masked in the forecast window. A forecast-sub-window concept that touches
+    PM2.5 is leakage. Use ONLY context features: meteorology (TEMP, PRES,
+    DEWP, RAIN, WSPM), other pollutants (PM10, SO2, NO2, CO, O3), calendar.
 
   * Exactly **{{n_forecast_global_concepts}} FORECAST-GLOBAL concepts**. These probe
     the WHOLE forecast window as a single unit (each rule fires ONCE per
     segment). They should capture properties that DO NOT decompose into
     sub-window concepts -- aggregates, thresholds spanning the whole horizon,
-    persistence across the forecast, cross-block comparisons. They must be
-    built from KNOWN future drivers only -- NEVER from PM2.5 (the masked
-    target). Good examples:
+    persistence across the forecast, cross-block comparisons.
+
+    *** ABSOLUTE RULE — NO PM2.5 IN FORECAST-GLOBAL CONCEPTS ***
+    Same prohibition as forecast-sub-window: do NOT reference ``stats['PM2.5']``
+    in any way. Built from KNOWN future drivers ONLY — never from PM2.5 (the
+    masked target). Use ONLY meteorology (TEMP, PRES, DEWP, RAIN, WSPM),
+    other pollutants (PM10, SO2, NO2, CO, O3), and calendar.
+
+    Good examples:
       - "min wind speed over the forecast drops below 0.5 m/s" (aggregate threshold)
       - "dew point slope across the WHOLE forecast is positive" (whole-horizon trend)
       - "wind stays low AND uniform across the whole forecast" (persistence)
@@ -476,15 +562,35 @@ Hard requirements for EVERY function (all three sets):
    the FORECAST-GLOBAL set), ``misc``.
 7. **No compounds**. ``is_history_cold`` is good; ``is_history_cold_and_workday``
    is bad (the CBM combines them at the embedding level).
-8. **NO TARGET LEAKAGE (critical)**. PM2.5 is the forecast target. It is
-   OBSERVED in the lookback but UNKNOWN (masked) in the forecast window.
-   Therefore:
+8. **NO TARGET LEAKAGE — ABSOLUTE PROHIBITION (most-violated rule, see top)**.
+   PM2.5 is the forecast target. It is OBSERVED in the lookback but
+   UNKNOWN (masked) in the forecast window. Therefore:
      - LOOKBACK concepts MAY use ``lookback_stats['PM2.5']``.
      - FORECAST-SUB-WINDOW and FORECAST-GLOBAL concepts MUST NOT reference
-       ``stats['PM2.5']`` in any way (no mean/max/min/slope/std/fft of PM2.5).
-       A forecast-side rule that touches PM2.5 defines a concept on the answer
-       itself and will be rejected. Use only meteorology, other pollutants,
-       and calendar for forecast-side concepts.
+       ``stats['PM2.5']`` in any way (no mean/max/min/std/slope/median/fft/
+       threshold/comparison of PM2.5). A forecast-side rule that touches PM2.5
+       defines a concept on the answer itself and will be REJECTED. Use ONLY
+       context features (meteorology, other pollutants, calendar) for any
+       FORECAST-SUB-WINDOW or FORECAST-GLOBAL concept.
+     - Also reject any forecast-side concept whose NAME or DESCRIPTION mentions
+       PM2.5, "PM25", "pollution episode", "pm spike", "particulate spike",
+       "AQI", etc. — even if the code seems not to read PM2.5 — because such
+       a concept is implicitly trying to detect the target, and almost always
+       either the code is wrong or the description is misleading. Use covariate
+       names in the concept name (``is_calm_block``, not ``is_pm25_block``).
+
+9. **MANDATORY SELF-CHECK (do this before producing JSON)**. After drafting
+   the lists, scan every entry in ``forecast_concepts`` and
+   ``forecast_global_concepts``:
+     a. Does the ``function`` body string contain ``"PM2.5"`` anywhere?
+        If YES → DELETE this concept and propose a covariate-only replacement.
+     b. Does the ``name`` or ``description`` contain ``pm25`` / ``PM2.5`` /
+        ``pollution episode`` / ``particulate``?
+        If YES → DELETE this concept and propose a covariate-only replacement.
+     c. Does the rule's TRUTH VALUE actually depend on PM2.5 magnitude (even
+        if read via a wrapper, fetched via cross-channel, etc.)?
+        If YES → DELETE this concept and propose a covariate-only replacement.
+   Only after BOTH forecast lists pass this self-check should you emit JSON.
 
 ## Output Format
 

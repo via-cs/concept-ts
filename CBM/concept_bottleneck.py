@@ -117,6 +117,29 @@ class ConceptBottleneckModel(nn.Module):
         single_forecast_bottleneck: bool = False,
         use_rev_in: int = 1,
         norm_type: str = "B",
+        # ---- Sub-window TIME-OF-DAY embedding ------------------------------
+        # The forecast encoder's output is mean-pooled over each sub-window
+        # before being fed to the per-sub-window concept predictor. For PRSA
+        # at 1-hour resolution with pred_len=96 and n_subwindows=4 the
+        # sub-window length is 24 -- exactly one daily cycle -- so the mean
+        # of the hour-of-day channel over a sub-window is ALWAYS 11.5,
+        # regardless of where the sub-window starts. Mean pooling therefore
+        # destroys the only signal that distinguishes "morning sub-window"
+        # from "evening sub-window", and the concept head literally cannot
+        # learn ``is_morning_rush_block``.
+        #
+        # Fix: extract each sub-window's actual START HOUR from the input
+        # tensor, embed it via a learnable nn.Embedding(24, mid_dim), and ADD
+        # it to z_per_sw[k] before the concept predictor sees it. Tiny
+        # parameter overhead (24 * mid_dim), large interpretability win on
+        # time-of-day concepts.
+        #
+        # ``calendar_hour_channel`` is the channel index of the hour column
+        # inside the (B, T, in_dim) input tensor. For PRSA the input layout
+        # is [year, month, day, hour, PM10, ..., PM2.5_masked] → channel 3.
+        # Set to a negative number to DISABLE the hour augmentation
+        # (legacy / ablation; will reintroduce the time-blindness bug).
+        calendar_hour_channel: int = 3,
     ):
         super().__init__()
         if output_length % n_subwindows != 0:
@@ -260,6 +283,13 @@ class ConceptBottleneckModel(nn.Module):
 
         # ---- Sub-window id embedding ----
         self.sub_window_id_embed = nn.Embedding(n_subwindows, sub_window_id_dim)
+
+        # ---- Sub-window TIME-OF-DAY embedding (bug fix; see __init__ doc) ----
+        self.calendar_hour_channel = int(calendar_hour_channel)
+        if self.calendar_hour_channel >= 0:
+            self.sw_hour_embed = nn.Embedding(24, mid_dim)
+        else:
+            self.sw_hour_embed = None
 
         # ---- Residual channel (hybrid CBM, optional) ----
         # A small linear projection from the per-sub-window encoder summary
@@ -430,6 +460,36 @@ class ConceptBottleneckModel(nn.Module):
         z_global, z_per_sw, z_global_forecast = self._pool_encoder_features(
             enc_lb, enc_fc,
         )
+
+        # ---- BUG FIX: augment z_per_sw[k] with the sub-window's actual ----
+        # ---- start-hour-of-day, otherwise mean pooling over a 24-step  ----
+        # ---- sub-window (full daily cycle) destroys time-of-day info    ----
+        # ---- and the forecast concept head cannot tell morning sub-     ----
+        # ---- windows from evening ones. See __init__ docstring.         ----
+        if self.sw_hour_embed is not None and not self.single_forecast_bottleneck:
+            sw_len = self.sub_window_length
+            # Index of each sub-window's FIRST step inside the full input
+            # x (which is lookback + forecast back-to-back).
+            sw_start_idx = self.input_length + torch.arange(
+                self.n_subwindows, device=x.device,
+            ) * sw_len                                                       # (N,)
+            # x[:, sw_start_idx, hour_ch] -> (B, N) integer hours 0..23.
+            # The hour column in the input is the RAW (non-z-scored) value
+            # straight out of the CSV per LOF_Dataset.get_data, so casting
+            # to .long() and clamping is safe.
+            start_hours = (
+                x[:, sw_start_idx, self.calendar_hour_channel]
+                .long().clamp(0, 23)
+            )                                                                # (B, N)
+            sw_hour_vecs = self.sw_hour_embed(start_hours)                   # (B, N, mid_dim)
+            # ADD the hour embedding to each sub-window's pooled feature.
+            # An additive correction preserves z_per_sw[k]'s mean magnitude
+            # so the existing predictor weights still operate at the right
+            # scale; we don't widen the predictor's input dimension.
+            z_per_sw = [
+                z_per_sw[k] + sw_hour_vecs[:, k, :]
+                for k in range(self.n_subwindows)
+            ]
 
         # 2) Lookback concept layer. Activations from the standard predictor,
         # embeddings INPUT-CONDITIONAL via two MLP branches:
