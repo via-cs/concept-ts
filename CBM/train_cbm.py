@@ -136,9 +136,29 @@ def get_args():
     p.add_argument("--decoder_hidden", type=int, default=512,
                    help="Hidden width of the shared sub-decoder MLP (default 512).")
     p.add_argument("--decoder_depth",  type=int, default=3,
-                   help="Number of Linear layers in the shared sub-decoder. "
-                        "1 = single-Linear projection; 2 = 1 hidden layer; "
-                        "3 = 2 hidden layers (default).")
+                   help="Number of Linear layers in EACH residual sub-decoder "
+                        "block. 1 = single-Linear projection; 2 = 1 hidden "
+                        "layer; 3 = 2 hidden layers (default). Applies to "
+                        "every block in the residual stack.")
+    p.add_argument("--decoder_n_blocks", type=int, default=3,
+                   help="Number of residual sub-decoder blocks (NHiTS-style "
+                        "stack). Each block produces a signed DELTA forecast; "
+                        "the deltas sum to the final sub-window forecast. "
+                        "1 = single block (recovers old monolithic behavior); "
+                        "3 = strong default; 5+ = experimental. Preserves "
+                        "strict CBM interpretability -- every block operates "
+                        "on concept-derived context only, no raw feature "
+                        "access.")
+    p.add_argument("--decoder_feedback", type=int, default=1, choices=[0, 1],
+                   help="If 1 (default), blocks i>0 also see the RUNNING "
+                        "FORECAST produced by previous blocks. The running "
+                        "forecast is a function of concept-derived inputs so "
+                        "it adds NO new information -- but it lets each block "
+                        "specialize on a different residual scale (coarse "
+                        "trend -> mid corrections -> fine detail). Set 0 to "
+                        "disable and let all blocks operate identically on "
+                        "dec_in (weaker; blocks tend to collapse into 'block "
+                        "0 does everything, others output ~0').")
     p.add_argument("--sw_id_dim",      type=int, default=16,
                    help="Width of the sub-window-id embedding fed to the shared sub-decoder.")
     p.add_argument("--sw_gru_hidden",  type=int, default=32,
@@ -859,6 +879,8 @@ def main():
         concept_emb_dim            = args.concept_emb_dim,
         decoder_hidden      = args.decoder_hidden,
         decoder_depth       = args.decoder_depth,
+        decoder_n_blocks    = args.decoder_n_blocks,
+        decoder_feedback    = bool(args.decoder_feedback),
         sub_window_id_dim   = args.sw_id_dim,
         residual_dim        = args.residual_dim,
         sw_gru_hidden       = args.sw_gru_hidden,

@@ -91,6 +91,59 @@ import torch.nn as nn
 from model.embedding import Embedding_Learning
 
 
+# ---------------------------------------------------------------------------
+# Residual sub-decoder block (NHiTS-style residual stacking)
+# ---------------------------------------------------------------------------
+class ResidualDecoderBlock(nn.Module):
+    """One block of the residual sub-decoder stack.
+
+    Takes concept-derived context (the same ``dec_in`` the original monolithic
+    ``sub_decoder`` used, optionally augmented with the running forecast from
+    previous blocks) and produces a ``(T_sw, out_dim)`` DELTA forecast. The
+    stack sums deltas across blocks -- each block's job is to correct the
+    residual left by the earlier blocks (coarse trend first, mid-scale
+    corrections next, fine detail last).
+
+    INTERPRETABILITY GUARANTEE: every input to this block is concept-derived.
+    - Block 0 receives ``dec_in``, which is the concatenation of the three
+      CEM concept-context vectors + sub-window id embedding + the pre-existing
+      (typically-unused) residual channel.
+    - Blocks i>0 (when ``feedback`` is enabled at the stack level) additionally
+      receive the RUNNING FORECAST produced by blocks 0..i-1. That running
+      forecast is itself a function of concept-derived inputs, so it carries
+      no new information -- it just lets the block condition its correction
+      on "what has been predicted so far".
+
+    Concretely: ablating any concept propagates linearly through every block.
+    NO raw feature / raw future covariate access, so the concept bottleneck
+    remains the ONLY information pathway to the forecast.
+    """
+
+    def __init__(self, in_dim: int, hidden: int, depth: int,
+                 out_len: int, out_dim: int, dropout: float):
+        super().__init__()
+        if depth < 1:
+            raise ValueError(f"ResidualDecoderBlock depth must be >= 1, got {depth}")
+        self.out_len = int(out_len)
+        self.out_dim = int(out_dim)
+        layers: list[nn.Module] = []
+        d = int(in_dim)
+        for _ in range(depth - 1):
+            layers.extend([
+                nn.Linear(d, hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ])
+            d = hidden
+        layers.append(nn.Linear(d, self.out_len * self.out_dim))
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, in_dim) -> returns (B, out_len, out_dim)."""
+        flat = self.mlp(x)
+        return flat.reshape(-1, self.out_len, self.out_dim)
+
+
 class ConceptBottleneckModel(nn.Module):
     def __init__(
         self,
@@ -110,6 +163,33 @@ class ConceptBottleneckModel(nn.Module):
         concept_emb_dim: int = 16,
         decoder_hidden: int = 512,
         decoder_depth: int = 3,
+        # ---- Residual sub-decoder stack (NHiTS-style) -----------------------
+        # The old design was a single monolithic sub-decoder MLP: a big
+        # Sequential mapping ``dec_in`` -> flat forecast. The new design is a
+        # STACK of ``decoder_n_blocks`` ResidualDecoderBlocks. Each block
+        # produces a signed DELTA forecast; the deltas sum to the final
+        # sub-window forecast.
+        #
+        # decoder_n_blocks=1 recovers the OLD behavior exactly (single block,
+        # no delta summation to speak of). decoder_n_blocks=3 is the
+        # recommended default -- the first block predicts a coarse forecast
+        # from the concept context, and subsequent blocks correct the residual.
+        #
+        # decoder_feedback controls whether blocks i>0 also see the running
+        # forecast produced so far. If True (default), each block's input is
+        # ``[dec_in, running.reshape(B, -1)]``; each block then specializes on
+        # a different residual scale (NHiTS-style hierarchical refinement).
+        # If False, every block sees only ``dec_in`` and blocks tend to
+        # collapse into "one block does everything else outputs ~0".
+        #
+        # INTERPRETABILITY: the stack takes ONLY concept-derived inputs. No
+        # raw feature access, no bypass around the concept layer. Ablating a
+        # concept propagates linearly through every block. Concept-only MAE
+        # (residual disabled, everything else on) still measures how much the
+        # concepts alone explain -- the delta sum is a function of the concept
+        # inputs by construction.
+        decoder_n_blocks: int = 3,
+        decoder_feedback: bool = True,
         sub_window_id_dim: int = 16,
         residual_dim: int = 16,
         sw_gru_hidden: int = 32,
@@ -348,17 +428,28 @@ class ConceptBottleneckModel(nn.Module):
                        + sub_window_id_dim + self.residual_dim)
         if decoder_depth < 1:
             raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
-        layers: list[nn.Module] = []
-        in_dim = dec_in_dim
-        for _ in range(decoder_depth - 1):
-            layers.extend([
-                nn.Linear(in_dim, decoder_hidden),
-                nn.GELU(),
-                nn.Dropout(dropout),
-            ])
-            in_dim = decoder_hidden
-        layers.append(nn.Linear(in_dim, self.sub_window_length * output_dim))
-        self.sub_decoder = nn.Sequential(*layers)
+        if decoder_n_blocks < 1:
+            raise ValueError(
+                f"decoder_n_blocks must be >= 1, got {decoder_n_blocks}"
+            )
+        self.decoder_n_blocks = int(decoder_n_blocks)
+        self.decoder_feedback = bool(decoder_feedback)
+        _sw_out_size = self.sub_window_length * output_dim  # flat forecast size per block
+        block_modules: list[nn.Module] = []
+        for i in range(self.decoder_n_blocks):
+            # Blocks i>0 with feedback also see the running forecast so far
+            # (which is a function of concept-derived inputs). Block 0 sees
+            # only dec_in.
+            if self.decoder_feedback and i > 0:
+                b_in = dec_in_dim + _sw_out_size
+            else:
+                b_in = dec_in_dim
+            block_modules.append(ResidualDecoderBlock(
+                in_dim=b_in, hidden=decoder_hidden, depth=decoder_depth,
+                out_len=self.sub_window_length, out_dim=output_dim,
+                dropout=dropout,
+            ))
+        self.decoder_blocks = nn.ModuleList(block_modules)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -611,8 +702,24 @@ class ConceptBottleneckModel(nn.Module):
             if residual_list[k] is not None:
                 parts.append(residual_list[k])                  # (B, residual_dim)
             dec_in = torch.cat(parts, dim=-1)
-            flat   = self.sub_decoder(dec_in)                  # (B, T_sw * O)
-            sub_y  = flat.reshape(B, self.sub_window_length, self.output_dim)
+            # ---- Residual sub-decoder stack (NHiTS-style) ----
+            # Each block produces a signed delta forecast; the deltas sum
+            # into the running forecast. Every block operates on concept-
+            # derived context only, preserving the concept bottleneck as the
+            # single information pathway to the forecast.
+            running = dec_in.new_zeros(
+                (B, self.sub_window_length, self.output_dim)
+            )
+            for bi, block in enumerate(self.decoder_blocks):
+                if self.decoder_feedback and bi > 0:
+                    block_in = torch.cat(
+                        [dec_in, running.reshape(B, -1)], dim=-1,
+                    )
+                else:
+                    block_in = dec_in
+                delta = block(block_in)                          # (B, T_sw, O)
+                running = running + delta
+            sub_y = running
             sub_forecasts.append(sub_y)
         y_hat = torch.cat(sub_forecasts, dim=1)                # (B, T_out, O)
 
