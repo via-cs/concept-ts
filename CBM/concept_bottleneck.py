@@ -43,16 +43,21 @@ Architecture
        |   (MLPs MLP+, MLP- are shared across sub-windows; only inputs    |
        |    z_sw_k differ.)                                               |
        |                                                                  |
-       +-- Residual channel (optional, hybrid CBM) -----------------------+
-       |   residual[k] = Linear(D, residual_dim)(z_sw_k)                   |
-       |   (penalized in loss; concept-only forecast still extractable     |
-       |    by calling forward(..., disable_residual=True))                |
-       |                                                                   |
-       +-- Shared sub-decoder, parameterized by sub-window id k ----------+
+       +-- (STRICT CBM: no residual bypass. Every input to the sub-decoder --+
+       |    is either a CEM concept context or a positional embedding.)     |
+       |                                                                    |
+       +-- Shared sub-decoder, parameterized by sub-window id k ------------+
            for k:
              sw_emb   = Embedding(N, sw_id_dim)(k)
-             dec_in   = concat(lb_ctx, fc_ctx[k], sw_emb, residual[k])
-             sub_y[k] = MLP(dec_in)              # (B, T_sw, output_dim)
+             dec_in   = concat(lb_ctx, fc_ctx[k], gfc_ctx, sw_gru[k], sw_emb)
+             # Residual sub-decoder stack: sum of B block deltas, each a
+             # function of dec_in (with feedback: also the running forecast
+             # from earlier blocks, itself a function of dec_in).
+             running = 0
+             for block in decoder_blocks:
+                 delta = block(dec_in [+ running.flat if feedback and block>0])
+                 running += delta
+             sub_y[k] = running                   # (B, T_sw, output_dim)
            y_hat = concat(sub_y[0], ..., sub_y[N-1])  # (B, T_out, output_dim)
 
 Why this shape:
@@ -83,12 +88,62 @@ BCE losses against the corresponding labels:
 """
 
 import inspect
+import math
 import warnings
 
 import torch
 import torch.nn as nn
 
 from model.embedding import Embedding_Learning
+
+
+# ---------------------------------------------------------------------------
+# Sinusoidal hour-of-day encoding
+# ---------------------------------------------------------------------------
+def _sinusoidal_hour_encoding(hours: torch.Tensor, dim: int) -> torch.Tensor:
+    """Deterministic sinusoidal encoding of hour-of-day (0..23).
+
+    Produces sin/cos pairs at ``dim//2`` different periods, giving a rich,
+    fixed representation of the hour. This is the recommended way to encode
+    a cyclical calendar variable when you want a downstream Linear layer to
+    have a clean, non-competing weight group for time-based concepts (a
+    concept whose truth depends only on hour just puts its weight on these
+    dims; the encoder-side weights stay at zero).
+
+    Periods chosen: [24, 12, 6, 3] hours (daily, half-day, quarter-day,
+    3-hour). Adding more periods captures finer harmonics but for hour-of-day
+    concepts (which typically care about resolutions of 3-6 hours), 4 periods
+    is plenty.
+
+    Args
+    ----
+    hours : (B, N) int/long tensor of hours in [0, 23]
+    dim   : output feature dim. Must be even. Default 8 → 4 sin + 4 cos.
+
+    Returns
+    -------
+    (B, N, dim) float tensor of sinusoidal features.
+    """
+    if dim % 2 != 0:
+        raise ValueError(f"dim must be even (sin+cos pairs), got {dim}")
+    n_freqs = dim // 2
+    # Use the smallest n_freqs periods from [24, 12, 6, 3, 2, ...] -- if dim
+    # is bigger than 8 we extend geometrically.
+    default_periods = [24.0, 12.0, 6.0, 3.0]
+    if n_freqs <= len(default_periods):
+        periods = default_periods[:n_freqs]
+    else:
+        # Extend by halving beyond period 3 (rarely needed).
+        periods = default_periods + [
+            3.0 / (2 ** (i - len(default_periods) + 1))
+            for i in range(len(default_periods), n_freqs)
+        ]
+    periods_t = torch.tensor(
+        periods, device=hours.device, dtype=torch.float32,
+    )                                                       # (n_freqs,)
+    h = hours.float().unsqueeze(-1)                          # (B, N, 1)
+    angles = 2 * math.pi * h / periods_t                     # (B, N, n_freqs)
+    return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (B, N, dim)
 
 
 # ---------------------------------------------------------------------------
@@ -106,8 +161,10 @@ class ResidualDecoderBlock(nn.Module):
 
     INTERPRETABILITY GUARANTEE: every input to this block is concept-derived.
     - Block 0 receives ``dec_in``, which is the concatenation of the three
-      CEM concept-context vectors + sub-window id embedding + the pre-existing
-      (typically-unused) residual channel.
+      CEM concept-context vectors (LOOKBACK, FORECAST-SW, FORECAST-GLOBAL) +
+      cross-sub-window BiGRU refinement + sub-window id embedding. NO
+      residual bypass -- the strict-CBM cleanup removed the residual channel
+      entirely.
     - Blocks i>0 (when ``feedback`` is enabled at the stack level) additionally
       receive the RUNNING FORECAST produced by blocks 0..i-1. That running
       forecast is itself a function of concept-derived inputs, so it carries
@@ -191,7 +248,14 @@ class ConceptBottleneckModel(nn.Module):
         decoder_n_blocks: int = 3,
         decoder_feedback: bool = True,
         sub_window_id_dim: int = 16,
-        residual_dim: int = 16,
+        # NOTE: the ``residual_dim`` argument has been removed. There is NO
+        # encoder-to-decoder residual pathway in this model any more. Every
+        # bit of information reaching the sub-decoder passes through one of
+        # the three concept bottlenecks (LOOKBACK, FORECAST-SUB-WINDOW,
+        # FORECAST-GLOBAL) plus the sub-window id embedding (which carries
+        # NO content -- it's a positional placeholder). This is a strict CBM
+        # by construction: no bypass exists, so ablating a concept mechanically
+        # affects the forecast. See __init__ body for the exact dec_in layout.
         sw_gru_hidden: int = 32,
         sw_summary_dim: int = 64,
         single_forecast_bottleneck: bool = False,
@@ -209,10 +273,22 @@ class ConceptBottleneckModel(nn.Module):
         # learn ``is_morning_rush_block``.
         #
         # Fix: extract each sub-window's actual START HOUR from the input
-        # tensor, embed it via a learnable nn.Embedding(24, mid_dim), and ADD
-        # it to z_per_sw[k] before the concept predictor sees it. Tiny
-        # parameter overhead (24 * mid_dim), large interpretability win on
-        # time-of-day concepts.
+        # tensor and CONCATENATE a small DETERMINISTIC SINUSOIDAL encoding of
+        # that hour to ``z_per_sw[k]`` before the forecast-concept predictor
+        # sees it.
+        #
+        # This design is stronger than the original additive-learned fix
+        # because:
+        #   (a) Concatenation lets the predictor learn an INDEPENDENT weight
+        #       group on the hour dims. A pure-hour concept just zeroes its
+        #       encoder-side weights and puts all mass on the hour-side
+        #       weights -- no entanglement with the encoder features.
+        #   (b) Sinusoidal is a FIXED, KNOWN representation of hour. The
+        #       "morning direction" is a stable target for the predictor's
+        #       weight vector, unlike a randomly-initialised nn.Embedding
+        #       whose morning direction drifts throughout training.
+        #   (c) 8 dims are enough (sin/cos at periods 24, 12, 6, 3 hours),
+        #       much smaller than the previous mid_dim additive vector.
         #
         # ``calendar_hour_channel`` is the channel index of the hour column
         # inside the (B, T, in_dim) input tensor. For PRSA the input layout
@@ -220,6 +296,12 @@ class ConceptBottleneckModel(nn.Module):
         # Set to a negative number to DISABLE the hour augmentation
         # (legacy / ablation; will reintroduce the time-blindness bug).
         calendar_hour_channel: int = 3,
+        # ``hour_encoding_dim`` MUST be an even number (sin + cos pairs).
+        # Default 8 = 4 sin + 4 cos at periods [24, 12, 6, 3] hours -- covers
+        # daily, half-day, quarter-day, and 3-hour cycles which is more than
+        # enough resolution for hour-of-day concepts. Only used when
+        # ``calendar_hour_channel >= 0``.
+        hour_encoding_dim: int = 8,
     ):
         super().__init__()
         if output_length % n_subwindows != 0:
@@ -234,7 +316,6 @@ class ConceptBottleneckModel(nn.Module):
         self.output_length       = output_length
         self.output_dim          = output_dim
         self.sub_window_length   = output_length // n_subwindows
-        self.residual_dim        = int(residual_dim)
         self.concept_emb_dim     = int(concept_emb_dim)
         self.single_forecast_bottleneck = bool(single_forecast_bottleneck)
         self.input_length = int(input_length)
@@ -328,19 +409,34 @@ class ConceptBottleneckModel(nn.Module):
         # K_sw separate PREDICTORS (one per sub-window). The two embedding
         # MLPs are SHARED across sub-windows -- "is_temperature_rising"
         # generates its embedding the same way regardless of which sub-window
-        # fired it; only the input z_per_sw[k] (and thus the resulting
-        # embedding vector) differs. This mirrors how the static embedding
-        # matrix was shared previously.
-        # Number of forecast predictors:
-        #   single_forecast_bottleneck=False (default): N (one per sub-window)
-        #   single_forecast_bottleneck=True            : 1 (shared across all sub-windows)
+        # fired it; only the input (concept-side input = concat of the
+        # sub-window's pooled encoder features and its sinusoidal hour
+        # encoding) differs. This mirrors how the static embedding matrix
+        # was shared previously.
+        #
+        # Input dim is ``mid_dim + hour_encoding_dim`` (or just ``mid_dim`` if
+        # the hour augmentation is disabled via calendar_hour_channel < 0).
+        # Concatenating the sinusoidal hour encoding here rather than adding
+        # it to z_per_sw[k] gives the predictor an INDEPENDENT weight group
+        # on the hour dimensions -- a pure-hour concept just zeros its
+        # encoder-side weights and puts all mass on the hour-side weights.
+        # See the ``calendar_hour_channel`` / ``hour_encoding_dim`` docs in
+        # __init__.
         n_fc_predictors = 1 if self.single_forecast_bottleneck else n_subwindows
+        _use_hour = int(calendar_hour_channel) >= 0
+        self.hour_encoding_dim = int(hour_encoding_dim) if _use_hour else 0
+        if _use_hour and (self.hour_encoding_dim % 2 != 0):
+            raise ValueError(
+                f"hour_encoding_dim must be even (sin+cos pairs), got "
+                f"{self.hour_encoding_dim}"
+            )
+        _fc_input_dim = mid_dim + self.hour_encoding_dim
         self.forecast_concept_predictors = nn.ModuleList([
-            nn.Linear(mid_dim, n_forecast_concepts)
+            nn.Linear(_fc_input_dim, n_forecast_concepts)
             for _ in range(n_fc_predictors)
         ])
-        self.forecast_emb_plus  = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
-        self.forecast_emb_minus = nn.Linear(mid_dim, n_forecast_concepts * self.concept_emb_dim)
+        self.forecast_emb_plus  = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
+        self.forecast_emb_minus = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
 
         # ---- Global forecast bottleneck (full CEM, OPTIONAL) ----
         # When n_global_forecast_concepts > 0, an extra bottleneck reads
@@ -364,28 +460,21 @@ class ConceptBottleneckModel(nn.Module):
         # ---- Sub-window id embedding ----
         self.sub_window_id_embed = nn.Embedding(n_subwindows, sub_window_id_dim)
 
-        # ---- Sub-window TIME-OF-DAY embedding (bug fix; see __init__ doc) ----
+        # ---- Sub-window TIME-OF-DAY encoding (deterministic sinusoidal) ----
+        # The old learned nn.Embedding(24, mid_dim) has been replaced with a
+        # deterministic sinusoidal encoding computed on-the-fly in forward().
+        # No parameters are needed here. See ``calendar_hour_channel`` /
+        # ``hour_encoding_dim`` docs in __init__ and the ``_sinusoidal_hour``
+        # helper below.
         self.calendar_hour_channel = int(calendar_hour_channel)
-        if self.calendar_hour_channel >= 0:
-            self.sw_hour_embed = nn.Embedding(24, mid_dim)
-        else:
-            self.sw_hour_embed = None
+        # self.hour_encoding_dim is already set above where the forecast
+        # concept predictors were built with input dim mid_dim + hour_enc_dim.
 
-        # ---- Residual channel (hybrid CBM, optional) ----
-        # A small linear projection from the per-sub-window encoder summary
-        # straight to the decoder, BYPASSING the concept layer. The trainer
-        # adds an L2 penalty (alpha_residual_reg * ||residual||^2) so the
-        # decoder is incentivized to use it sparingly -- only for forecast
-        # detail the concept activations can't capture. Set residual_dim=0
-        # to recover the strict CBM (no residual path).
-        # The interpretability story stays intact as long as concept_only_MAE
-        # and full_MAE (reported at test time) are close: a small gap means
-        # most of the forecast is concept-driven; a big gap means the
-        # residual is doing the heavy lifting.
-        if self.residual_dim > 0:
-            self.residual_proj = nn.Linear(mid_dim, self.residual_dim)
-        else:
-            self.residual_proj = None
+        # ---- No residual channel (STRICT CBM) ----
+        # There is no residual pathway from the encoder to the sub-decoder.
+        # The residual_proj / residual_list machinery that used to exist here
+        # has been removed entirely. See the "residual_dim was removed"
+        # comment at the top of __init__.
 
         # ---- Sub-window context BiGRU (sequence-aware refinement) ----
         # Each forecast sub-window has its own concept context fc_ctx[k] of
@@ -416,16 +505,17 @@ class ConceptBottleneckModel(nn.Module):
             sw_gru_out_dim = 0
 
         # ---- Shared sub-decoder ----
-        # Input dims (full-CEM layout):
-        #   lookback context        = K_lb         * d   (input-conditional)
-        #   forecast (sub-window)   = K_fc         * d   (input-conditional)
-        #   sw_gru context          = 2 * sw_gru_hidden  (cross-sub-window aware; 0 if disabled)
-        #   forecast (global)       = K_fc_global  * d   (input-conditional; 0 if disabled)
-        #   sub-window id           = sw_id_dim
-        #   residual                = residual_dim
-        # Output: T_sw forecast values. decoder_depth = number of Linear layers (>=1).
+        # dec_in layout (STRICT CBM -- every entry is either a concept-derived
+        # context vector or a positional embedding; NO residual bypass):
+        #   lookback CEM context    = K_lb         * d   (input-conditional)
+        #   forecast-SW CEM context = K_fc         * d   (input-conditional, one per k)
+        #   sw_gru context          = 2 * sw_gru_hidden  (cross-sub-window aware,
+        #                                                 derived from fc_ctx; 0 if disabled)
+        #   forecast-GLOBAL context = K_fc_global  * d   (input-conditional; 0 if disabled)
+        #   sub-window id embedding = sw_id_dim          (positional; no content)
+        # Output: T_sw forecast values. decoder_depth = number of Linear layers per block.
         dec_in_dim  = (lb_ctx_dim + fc_ctx_dim + sw_gru_out_dim + gfc_ctx_dim
-                       + sub_window_id_dim + self.residual_dim)
+                       + sub_window_id_dim)
         if decoder_depth < 1:
             raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
         if decoder_n_blocks < 1:
@@ -533,7 +623,12 @@ class ConceptBottleneckModel(nn.Module):
         Args
         ----
         x : (B, T_in + T_out, C) raw input from LOF_Dataset.
-        disable_residual : if True, the residual channel is zeroed before
+        disable_residual : NO-OP. The residual pathway has been removed
+            from the model entirely; this argument is kept only for backward
+            compatibility with old caller code (concept-only-MAE utilities,
+            saved evaluation scripts, etc.). Passing True has zero effect on
+            the output because there is no residual channel to disable.
+            Legacy docstring for reference: (previously) if True, the residual channel was zeroed before
             entering the decoder. Used at evaluation time to compute the
             "concept-only" MAE for interpretability attribution.
         """
@@ -552,15 +647,32 @@ class ConceptBottleneckModel(nn.Module):
             enc_lb, enc_fc,
         )
 
-        # ---- BUG FIX: augment z_per_sw[k] with the sub-window's actual ----
-        # ---- start-hour-of-day, otherwise mean pooling over a 24-step  ----
-        # ---- sub-window (full daily cycle) destroys time-of-day info    ----
-        # ---- and the forecast concept head cannot tell morning sub-     ----
-        # ---- windows from evening ones. See __init__ docstring.         ----
-        if self.sw_hour_embed is not None and not self.single_forecast_bottleneck:
+        # ---- Augment z_per_sw[k] with the sub-window's actual START HOUR ----
+        # Mean-pooling over a 24-step sub-window destroys time-of-day info
+        # (the mean of any cyclical channel over one full daily cycle is
+        # constant), so without an extra time signal the forecast concept
+        # head cannot tell morning sub-windows from evening ones.
+        #
+        # We CONCATENATE (not add) a deterministic sinusoidal encoding of
+        # each sub-window's start hour to z_per_sw[k]. Concatenation is a
+        # big win over the previous additive-learned design:
+        #
+        #   * Independent weight groups -- the predictor Linear has separate
+        #     weights on the encoder-side vs the hour-side dims. A pure-hour
+        #     concept just zeros its encoder-side weights and puts all mass
+        #     on the hour-side ones; a pure-weather concept does the opposite.
+        #     No entanglement, no competing gradients.
+        #   * Deterministic sinusoidal -- the "morning direction" in the hour
+        #     encoding is a KNOWN, FIXED value (specific sin/cos coefficients),
+        #     not a random-init nn.Embedding vector that drifts during
+        #     training. Much easier optimization target.
+        #   * Tiny -- hour_encoding_dim defaults to 8, much smaller than the
+        #     previous mid_dim additive vector, and no learned parameters.
+        if (self.calendar_hour_channel >= 0
+                and not self.single_forecast_bottleneck
+                and self.hour_encoding_dim > 0):
             sw_len = self.sub_window_length
-            # Index of each sub-window's FIRST step inside the full input
-            # x (which is lookback + forecast back-to-back).
+            # Index of each sub-window's FIRST step inside the full input.
             sw_start_idx = self.input_length + torch.arange(
                 self.n_subwindows, device=x.device,
             ) * sw_len                                                       # (N,)
@@ -572,13 +684,11 @@ class ConceptBottleneckModel(nn.Module):
                 x[:, sw_start_idx, self.calendar_hour_channel]
                 .long().clamp(0, 23)
             )                                                                # (B, N)
-            sw_hour_vecs = self.sw_hour_embed(start_hours)                   # (B, N, mid_dim)
-            # ADD the hour embedding to each sub-window's pooled feature.
-            # An additive correction preserves z_per_sw[k]'s mean magnitude
-            # so the existing predictor weights still operate at the right
-            # scale; we don't widen the predictor's input dimension.
+            sw_hour_vecs = _sinusoidal_hour_encoding(
+                start_hours, self.hour_encoding_dim,
+            )                                                                # (B, N, hour_enc_dim)
             z_per_sw = [
-                z_per_sw[k] + sw_hour_vecs[:, k, :]
+                torch.cat([z_per_sw[k], sw_hour_vecs[:, k, :]], dim=-1)
                 for k in range(self.n_subwindows)
             ]
 
@@ -676,19 +786,12 @@ class ConceptBottleneckModel(nn.Module):
         else:
             sw_enhanced = None
 
-        # 4) Residual channel (hybrid CBM). One projection per sub-window;
-        # the projection module itself is shared.
-        if self.residual_proj is not None:
-            residual_list = [self.residual_proj(z_per_sw[k])
-                              for k in range(self.n_subwindows)]
-            if disable_residual:
-                residual_list = [torch.zeros_like(r) for r in residual_list]
-            residual = torch.stack(residual_list, dim=1)       # (B, N, residual_dim)
-        else:
-            residual_list = [None] * self.n_subwindows
-            residual = x.new_zeros((B, self.n_subwindows, 0))
+        # (Residual channel removed -- this is a strict CBM.
+        #  ``disable_residual`` is retained as a no-op arg so old callers /
+        #  concept-only-MAE eval code paths don't error, but there is no
+        #  residual pathway left to disable.)
 
-        # 5) Shared sub-decoder, parameterized by sub-window id.
+        # 4) Shared sub-decoder, parameterized by sub-window id.
         sub_forecasts = []
         for k in range(self.n_subwindows):
             sw_idx = torch.full((B,), k, dtype=torch.long, device=device)
@@ -699,8 +802,6 @@ class ConceptBottleneckModel(nn.Module):
             if self.n_global_forecast_concepts > 0:
                 parts.append(gfc_ctx)                           # (B, K_gfc * d), shared across sub-windows
             parts.append(sw_emb)
-            if residual_list[k] is not None:
-                parts.append(residual_list[k])                  # (B, residual_dim)
             dec_in = torch.cat(parts, dim=-1)
             # ---- Residual sub-decoder stack (NHiTS-style) ----
             # Each block produces a signed delta forecast; the deltas sum
@@ -731,5 +832,5 @@ class ConceptBottleneckModel(nn.Module):
             "fc_acts":   fc_acts,
             "gfc_logits": gfc_logits, # (B, K_gfc); K_gfc=0 -> empty tensor
             "gfc_acts":   gfc_acts,
-            "residual":  residual,   # (B, N, residual_dim) -- penalize in loss
+            # (residual removed -- strict CBM, no bypass to regularize)
         }
