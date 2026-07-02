@@ -221,18 +221,36 @@ def get_args():
                         "sw_len, 2*sw_len, ..., (N-1)*sw_len). Discourages the "
                         "discontinuities that the piecewise per-sub-window "
                         "decoder otherwise produces. Set 0 to disable.")
-    p.add_argument("--min_pos_rate", type=float, default=0.08,
+    p.add_argument("--min_pos_rate", type=float, default=0.10,
                    help="Drop concepts whose positive_rate is BELOW this value. "
-                        "0.08 (8%%) filters concepts that fire so rarely that BCE "
-                        "supervision degenerates into 'always predict False'. "
-                        "Set 0 to keep all concepts (legacy behavior).")
-    p.add_argument("--max_pos_rate", type=float, default=0.75,
+                        "10%% is the recommended lower bound: below this the "
+                        "CEM gate degenerates because concept activation is "
+                        "near-constant-zero, and e-(z) becomes an ungated "
+                        "bypass around the concept bottleneck. Tightened from "
+                        "the older default 0.08.")
+    p.add_argument("--max_pos_rate", type=float, default=0.65,
                    help="Drop concepts whose positive_rate is ABOVE this value. "
-                        "0.75 (75%%) filters concepts that fire so universally "
-                        "that BCE degenerates into 'always predict True' with no "
-                        "discriminative signal. Set 1 to keep all concepts.")
+                        "65%% is the recommended upper bound: above this the "
+                        "CEM gate degenerates because concept activation is "
+                        "near-constant-one, and e+(z) becomes an ungated "
+                        "bypass around the concept bottleneck. Tightened from "
+                        "the older default 0.75.")
     # NOTE: --alpha_residual_reg has been removed. There is no residual
     # channel any more, so there is nothing to regularize away.
+    p.add_argument("--alpha_concept_collapse", type=float, default=0.05,
+                   help="Weight on the concept-collapse penalty. Penalizes "
+                        "concepts whose batch-variance of activation falls "
+                        "below --concept_var_min -- i.e. concepts that fire "
+                        "near-constantly and would otherwise let the CEM "
+                        "gate (e+_i(z), e-_i(z)) degenerate into an ungated "
+                        "bypass. Set 0 to disable.")
+    p.add_argument("--concept_var_min", type=float, default=0.05,
+                   help="Minimum acceptable batch variance for each concept "
+                        "activation. For reference: a Bernoulli(0.10) has "
+                        "variance ~0.090; Bernoulli(0.05) has variance ~0.048; "
+                        "Bernoulli(0.5) has variance 0.25. Default 0.05 is a "
+                        "soft floor that flags near-constant concepts without "
+                        "over-fighting BCE on rare-but-legitimate concepts.")
     p.add_argument("--concept_warmup_epochs",  type=int,   default=0,
                    help="If > 0, train with alpha_forecast = 0 for this many "
                         "epochs before switching to the user-supplied value. "
@@ -284,13 +302,49 @@ def _boundary_smoothness_loss(y_hat: torch.Tensor, sub_window_length: int,
     return torch.stack(diffs).mean()
 
 
+def _concept_collapse_penalty(acts: torch.Tensor, var_min: float) -> torch.Tensor:
+    """Hinge penalty on near-constant concept activations.
+
+    ``acts`` is a sigmoid activation tensor of shape (B, K) for the
+    lookback / global-forecast bottlenecks, or (B, N_sw, K) for the
+    per-sub-window forecast bottleneck. We flatten all non-concept dims
+    together (so that both batch AND sub-window position count as
+    "samples" whose variance we want) and compute per-concept batch
+    variance. Any concept whose variance falls below ``var_min`` incurs a
+    positive penalty proportional to how far below the threshold it is.
+
+    Why this matters (see train_cbm docstring on CEM bypass):
+      When a concept's activation is near-constant across the batch, the
+      CEM gate ĉ_i = a_i * e+_i + (1 - a_i) * e-_i collapses to (roughly)
+      one branch, which is an ungated linear projection of the encoder
+      feature. That projection then routes information around the concept
+      bottleneck. Requiring a minimum activation variance across every
+      training batch enforces that both branches of the CEM gate see
+      meaningful gradient, preventing the collapse.
+
+    Returns a scalar tensor on ``acts.device``. Zero when ``var_min <= 0``
+    or when every concept's variance already exceeds the threshold.
+    """
+    if var_min <= 0 or acts.numel() == 0:
+        return acts.new_zeros(())
+    # Flatten to (M, K) so variance is taken over batch × any position dims.
+    a = acts.reshape(-1, acts.shape[-1])           # (M, K)
+    if a.shape[0] < 2:
+        return acts.new_zeros(())
+    per_concept_var = a.var(dim=0, unbiased=False)  # (K,)
+    # Hinge: penalty is (var_min - per_concept_var) but clamped at 0 from below,
+    # so only under-threshold concepts contribute.
+    return torch.relu(var_min - per_concept_var).mean()
+
+
 def train_one_epoch(model, loader, optimizer, device,
                     alpha_forecast, alpha_lookback, alpha_forecast_concept,
                     alpha_forecast_global_concept,
-                    alpha_boundary_smooth):
+                    alpha_boundary_smooth,
+                    alpha_concept_collapse, concept_var_min):
     model.train()
-    cum_f, cum_lb, cum_fc, cum_gfc, cum_sm, n = (
-        0.0, 0.0, 0.0, 0.0, 0.0, 0,
+    cum_f, cum_lb, cum_fc, cum_gfc, cum_sm, cum_cc, n = (
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,
     )
     l1_fn  = nn.L1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
@@ -318,11 +372,22 @@ def train_one_epoch(model, loader, optimizer, device,
         # at each sub-window seam. No effect when n_subwindows == 1.
         loss_sm = _boundary_smoothness_loss(out["y_hat"], sw_len, n_sw)
 
+        # Concept-collapse penalty: penalizes near-constant concept
+        # activations across the batch, preventing the CEM-gate degeneracy
+        # where e+(z) or e-(z) becomes an ungated bypass. Applied to all
+        # three concept sets. See _concept_collapse_penalty docstring.
+        loss_cc = (
+            _concept_collapse_penalty(out["lb_acts"],  concept_var_min)
+            + _concept_collapse_penalty(out["fc_acts"],  concept_var_min)
+            + _concept_collapse_penalty(out["gfc_acts"], concept_var_min)
+        )
+
         loss = (alpha_forecast               * loss_f
                 + alpha_lookback                * loss_lb
                 + alpha_forecast_concept        * loss_fc
                 + alpha_forecast_global_concept * loss_gfc
-                + alpha_boundary_smooth         * loss_sm)
+                + alpha_boundary_smooth         * loss_sm
+                + alpha_concept_collapse        * loss_cc)
 
         optimizer.zero_grad()
         loss.backward()
@@ -333,11 +398,12 @@ def train_one_epoch(model, loader, optimizer, device,
         cum_fc  += loss_fc.item()
         cum_gfc += loss_gfc.item()
         cum_sm  += loss_sm.item()
+        cum_cc  += loss_cc.item()
         n       += 1
 
     return (cum_f   / max(1, n), cum_lb / max(1, n),
             cum_fc  / max(1, n), cum_gfc / max(1, n),
-            cum_sm / max(1, n))
+            cum_sm / max(1, n), cum_cc / max(1, n))
 
 
 @torch.no_grad()
@@ -880,23 +946,26 @@ def main():
         eff_alpha_forecast = (0.0
                               if epoch < args.concept_warmup_epochs
                               else args.alpha_forecast)
-        l_f, l_lb, l_fc, l_gfc, l_sm = train_one_epoch(
+        l_f, l_lb, l_fc, l_gfc, l_sm, l_cc = train_one_epoch(
             model, train_loader, optimizer, device,
             eff_alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
             args.alpha_forecast_global_concept,
             args.alpha_boundary_smooth,
+            args.alpha_concept_collapse, args.concept_var_min,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
         improved = val_mae < best_val_mae
         marker = " *" if improved else ""
         gfc_str = f"  train_gfc_BCE={l_gfc:.4f}" if K_gfc > 0 else ""
         sm_str  = f"  train_sm={l_sm:.4f}"        if args.alpha_boundary_smooth > 0 else ""
+        cc_str  = f"  train_cc={l_cc:.4f}"        if args.alpha_concept_collapse > 0 else ""
         print(f"  [epoch {epoch+1:>3d}/{args.epoch}]  "
               f"train_L1={l_f:.4f}  "
               f"train_lb_BCE={l_lb:.4f}  "
               f"train_fc_BCE={l_fc:.4f}"
               f"{gfc_str}"
-              f"{sm_str}  "
+              f"{sm_str}"
+              f"{cc_str}  "
               f"val MAE={val_mae:.4f}{marker}")
         if improved:
             best_val_mae      = val_mae

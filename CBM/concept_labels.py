@@ -69,32 +69,59 @@ def _compile_one(code: str):
 
 def _filter_and_compile(concepts: list[dict],
                         only_ok: bool,
-                        min_pos_rate: float = 0.0,
-                        max_pos_rate: float = 1.0) -> tuple[list[dict], list]:
+                        min_pos_rate: float = 0.10,
+                        max_pos_rate: float = 0.65) -> tuple[list[dict], list]:
     """Filter concepts by validation status AND by positive-rate band.
 
     A concept is kept iff:
       - its validation status is in {ok, warning_balance} (when only_ok=True)
-      - its positive_rate is in [min_pos_rate, max_pos_rate]
+      - ALL of its recorded positive_rate fields fall in [min_pos_rate,
+        max_pos_rate]. We check every field named ``positive_rate``,
+        ``positive_rate_train``, ``positive_rate_val``, ``positive_rate_test``
+        that is present on the concept dict; if any of them falls outside
+        the band, the concept is rejected. Backward-compat: if only
+        ``positive_rate`` is present (older JSON), only that one is checked.
       - its function code compiles
 
-    The positive-rate band exists to drop two failure modes the trainer is
-    sensitive to:
-      - Very-rare concepts (pos_rate < min_pos_rate, e.g. 0.08): the BCE
-        loss can be minimized by trivially predicting False, contributing
-        almost no useful gradient.
-      - Near-universal concepts (pos_rate > max_pos_rate, e.g. 0.75):
-        same story in reverse; trivial-baseline AUROC ~ 0.5 and the encoder
-        just learns 'always say yes'. These also tend to be very brittle
-        to distribution shift between train/val/test.
+    The positive-rate band exists to prevent the CEM bypass:
+      - Every concept i in a CEM bottleneck has TWO input-conditional
+        embedding vectors ``e+_i(z)`` and ``e-_i(z)``, blended by the
+        activation ``a_i``:  ĉ_i = a_i * e+_i + (1 - a_i) * e-_i.
+      - When a concept fires with near-constant activation (either almost
+        always active or almost always absent), the CEM gate degenerates:
+        the decoder effectively sees an ungated projection of the encoder
+        feature z through whichever branch is dominant. This is functionally
+        indistinguishable from a residual channel -- an information leak
+        around the concept bottleneck.
+      - Filtering to [10%, 65%] keeps the gate meaningfully bimodal on both
+        branches, so every concept context vector is actually gated by a
+        varying activation and no branch operates as a hidden bypass.
+      - The default band was previously [0.08, 0.75]; tightened to
+        [0.10, 0.65] to close the near-constant leak that the earlier band
+        permitted.
     """
+    _EXTRA_POS_RATE_KEYS = (
+        "positive_rate", "positive_rate_train",
+        "positive_rate_val", "positive_rate_test",
+    )
     accepted, match_fns = [], []
+    dropped_reasons: list[str] = []
     for c in concepts:
         status = c.get("validation", {}).get("status", "ok")
         if only_ok and status not in ("ok", "warning_balance"):
             continue
-        pr = c.get("positive_rate")
-        if pr is not None and (pr < min_pos_rate or pr > max_pos_rate):
+        # Reject if ANY of the recorded positive-rate fields is out of band.
+        prs = {k: c.get(k) for k in _EXTRA_POS_RATE_KEYS if c.get(k) is not None}
+        out_of_band = False
+        for k, pr in prs.items():
+            if pr < min_pos_rate or pr > max_pos_rate:
+                dropped_reasons.append(
+                    f"concept {c.get('name', '?')}: {k}={pr:.3f} "
+                    f"outside [{min_pos_rate:.2f}, {max_pos_rate:.2f}]"
+                )
+                out_of_band = True
+                break
+        if out_of_band:
             continue
         try:
             fn = _compile_one(c["function"])
@@ -103,13 +130,20 @@ def _filter_and_compile(concepts: list[dict],
             continue
         accepted.append(c)
         match_fns.append(fn)
+    if dropped_reasons:
+        print(f"  [filter] dropped {len(dropped_reasons)} concepts "
+              f"outside pos-rate band [{min_pos_rate:.2f}, {max_pos_rate:.2f}]:")
+        for r in dropped_reasons[:8]:
+            print(f"    - {r}")
+        if len(dropped_reasons) > 8:
+            print(f"    ... and {len(dropped_reasons) - 8} more.")
     return accepted, match_fns
 
 
 def load_concept_sets(concepts_path: str,
                       only_ok: bool = True,
-                      min_pos_rate: float = 0.0,
-                      max_pos_rate: float = 1.0,
+                      min_pos_rate: float = 0.10,
+                      max_pos_rate: float = 0.65,
                       ) -> tuple[tuple[list, list], tuple[list, list], tuple[list, list]]:
     """Load the three-set concepts JSON written by ``concept_proposer``.
 
