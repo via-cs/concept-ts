@@ -145,18 +145,19 @@ def load_concept_sets(concepts_path: str,
                       min_pos_rate: float = 0.10,
                       max_pos_rate: float = 0.65,
                       ) -> tuple[tuple[list, list], tuple[list, list], tuple[list, list]]:
-    """Load the three-set concepts JSON written by ``concept_proposer``.
+    """Load the four-set concepts JSON written by ``concept_proposer``.
 
     Returns
     -------
     (lookback_accepted, lookback_match_fns),
+    (lookback_sub_window_accepted, lookback_sub_window_match_fns),
     (forecast_accepted, forecast_match_fns),
     (forecast_global_accepted, forecast_global_match_fns)
 
-    The third (``forecast_global_concepts``) is OPTIONAL for backward
-    compatibility with older concepts JSONs. If the key is missing it returns
-    ``([], [])`` and downstream code treats K_fc_global = 0 as "no global
-    forecast bottleneck".
+    Any of the last three tuples can be empty. ``forecast_global_concepts``
+    and ``lookback_sub_window_concepts`` are OPTIONAL for backward
+    compatibility with older concept JSONs. Downstream code treats K = 0 as
+    "no bottleneck of that kind".
     """
     with open(concepts_path) as f:
         blob = json.load(f)
@@ -171,12 +172,22 @@ def load_concept_sets(concepts_path: str,
     fc_accepted, fc_fns = _filter_and_compile(
         blob["forecast_concepts"], only_ok, min_pos_rate, max_pos_rate,
     )
-    # New optional set -- absent for older concept files; treated as empty.
+    # Two OPTIONAL sets -- may be absent in older concept files. Empty list
+    # is a valid representation of "no such bottleneck".
+    raw_lb_sw = blob.get("lookback_sub_window_concepts", [])
+    lb_sw_accepted, lb_sw_fns = _filter_and_compile(
+        raw_lb_sw, only_ok, min_pos_rate, max_pos_rate,
+    )
     raw_global = blob.get("forecast_global_concepts", [])
     gfc_accepted, gfc_fns = _filter_and_compile(
         raw_global, only_ok, min_pos_rate, max_pos_rate,
     )
-    return (lb_accepted, lb_fns), (fc_accepted, fc_fns), (gfc_accepted, gfc_fns)
+    return (
+        (lb_accepted, lb_fns),
+        (lb_sw_accepted, lb_sw_fns),
+        (fc_accepted, fc_fns),
+        (gfc_accepted, gfc_fns),
+    )
 
 
 # ===========================================================================
@@ -217,26 +228,35 @@ def compute_segment_label_tensors(
     lookback_match_fns: list,
     forecast_match_fns: list,
     forecast_global_match_fns: list | None = None,
+    lookback_sub_window_match_fns: list | None = None,
     single_forecast_bottleneck: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (lb_labels, fc_labels, gfc_labels).
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Returns (lb_labels, fc_labels, gfc_labels, lb_sw_labels).
 
-    ``gfc_labels`` has shape (N_seg, K_fc_global); rules are applied to a
-    whole-forecast sub_seg synthesized from the segment's ``forecast_stats``.
-    If ``forecast_global_match_fns`` is None / empty, gfc_labels has shape
-    (N_seg, 0) -- safe to ignore downstream when K_fc_global = 0.
+    * ``lb_labels`` shape: (N_seg, K_lb)
+    * ``fc_labels`` shape: (N_seg, K_sw, K_fc) or (N_seg, K_fc) if
+      ``single_forecast_bottleneck=True``
+    * ``gfc_labels`` shape: (N_seg, K_fc_global)
+    * ``lb_sw_labels`` shape: (N_seg, K_lb_sw, K_lb_sw_concepts)
+
+    ``lookback_sub_window_match_fns`` is the new (optional) fourth concept
+    set used by experiment_mode='lookback_only'. When empty, lb_sw_labels
+    has trailing dim 0 -- safe for downstream code to ignore.
     """
-    forecast_global_match_fns = forecast_global_match_fns or []
-    n_seg = len(segments)
-    K_lb  = len(lookback_match_fns)
-    K_fc  = len(forecast_match_fns)
-    K_gfc = len(forecast_global_match_fns)
+    forecast_global_match_fns     = forecast_global_match_fns or []
+    lookback_sub_window_match_fns = lookback_sub_window_match_fns or []
+    n_seg     = len(segments)
+    K_lb      = len(lookback_match_fns)
+    K_fc      = len(forecast_match_fns)
+    K_gfc     = len(forecast_global_match_fns)
+    K_lb_sw   = len(lookback_sub_window_match_fns)
     if n_seg == 0:
-        lb_zero  = np.zeros((0, K_lb),  dtype=np.float32)
-        gfc_zero = np.zeros((0, K_gfc), dtype=np.float32)
+        lb_zero    = np.zeros((0, K_lb),  dtype=np.float32)
+        gfc_zero   = np.zeros((0, K_gfc), dtype=np.float32)
+        lb_sw_zero = np.zeros((0, 0, K_lb_sw), dtype=np.float32)
         if single_forecast_bottleneck:
-            return lb_zero, np.zeros((0, K_fc), dtype=np.float32), gfc_zero
-        return lb_zero, np.zeros((0, 0, K_fc), dtype=np.float32), gfc_zero
+            return lb_zero, np.zeros((0, K_fc), dtype=np.float32), gfc_zero, lb_sw_zero
+        return lb_zero, np.zeros((0, 0, K_fc), dtype=np.float32), gfc_zero, lb_sw_zero
 
     lb_labels  = np.zeros((n_seg, K_lb),  dtype=np.float32)
     gfc_labels = np.zeros((n_seg, K_gfc), dtype=np.float32)
@@ -251,6 +271,20 @@ def compute_segment_label_tensors(
             )
         fc_labels = np.zeros((n_seg, K_sw, K_fc), dtype=np.float32)
 
+    # Lookback sub-window labels: one label per (segment, lookback sub-window,
+    # concept). Present when K_lb_sw > 0.
+    if K_lb_sw > 0:
+        K_lb_sw_dim = len(segments[0].get("lookback_subwindow_stats") or [])
+        if K_lb_sw_dim == 0:
+            raise ValueError(
+                "segments[0] has no 'lookback_subwindow_stats' field. Re-run "
+                "preprocessing to add lookback sub-window blocks (--n_lookback_"
+                "subwindows) -- needed for experiment_mode='lookback_only'."
+            )
+        lb_sw_labels = np.zeros((n_seg, K_lb_sw_dim, K_lb_sw), dtype=np.float32)
+    else:
+        lb_sw_labels = np.zeros((n_seg, 0, 0), dtype=np.float32)
+
     for i, seg in enumerate(segments):
         # Lookback labels: rule sees the whole segment dict.
         for j, fn in enumerate(lookback_match_fns):
@@ -262,7 +296,7 @@ def compute_segment_label_tensors(
             for j, fn in enumerate(forecast_match_fns):
                 fc_labels[i, j] = _safe_call(fn, sub_seg)
         else:
-            # Forecast labels: rule sees a sub_seg dict per sub-window.
+            # Forecast labels: rule sees a sub_seg dict per FORECAST sub-window.
             cross = seg.get("cross_channel_stats", {})
             for k, sw in enumerate(seg.get("subwindow_stats", [])):
                 sub_seg = {
@@ -282,7 +316,21 @@ def compute_segment_label_tensors(
             for j, fn in enumerate(forecast_global_match_fns):
                 gfc_labels[i, j] = _safe_call(fn, whole)
 
-    return lb_labels, fc_labels, gfc_labels
+        # Lookback-sub-window labels: rule sees a sub_seg dict per LOOKBACK
+        # sub-window. Used by experiment_mode='lookback_only'.
+        if K_lb_sw > 0:
+            cross = seg.get("cross_channel_stats", {})
+            for k, sw in enumerate(seg.get("lookback_subwindow_stats", [])):
+                sub_seg = {
+                    "subwindow_idx":       int(sw.get("subwindow_idx", k)),
+                    "stats":               sw.get("stats", {}),
+                    "time_context":        sw.get("time_context", {}),
+                    "cross_channel_stats": cross,
+                }
+                for j, fn in enumerate(lookback_sub_window_match_fns):
+                    lb_sw_labels[i, k, j] = _safe_call(fn, sub_seg)
+
+    return lb_labels, fc_labels, gfc_labels, lb_sw_labels
 
 
 # ===========================================================================
@@ -313,32 +361,39 @@ def build_window_label_tables(
     single_forecast_bottleneck: bool = False,
     min_pos_rate: float = 0.0,
     max_pos_rate: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray,
-           list[dict], list[dict], list[dict]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+           list[dict], list[dict], list[dict], list[dict]]:
     """Top-level helper used by ``train_cbm.py``.
 
     Returns
     -------
-    lb_window_labels   : (n_windows, K_lb)
-    fc_window_labels   :
+    lb_window_labels    : (n_windows, K_lb)
+    fc_window_labels    :
         - shape (n_windows, K_sw, K_fc) when single_forecast_bottleneck=False
         - shape (n_windows, K_fc)       when single_forecast_bottleneck=True
-    gfc_window_labels  : (n_windows, K_fc_global)  -- K_fc_global = 0 when the
-                          concepts JSON has no ``forecast_global_concepts`` key
-                          (backward compat).
-    lb_accepted        : list of accepted lookback concept metadata dicts
-    fc_accepted        : list of accepted forecast (sub-window) concept dicts
-    gfc_accepted       : list of accepted global-forecast concept dicts
+    gfc_window_labels   : (n_windows, K_fc_global) -- K_fc_global = 0 when the
+                           concepts JSON has no ``forecast_global_concepts`` key.
+    lb_sw_window_labels : (n_windows, K_lb_sw, K_lb_sw_concepts) -- trailing dim
+                           = 0 when the concepts JSON has no
+                           ``lookback_sub_window_concepts`` key.
+    lb_accepted         : list of accepted lookback concept metadata dicts
+    fc_accepted         : list of accepted forecast (sub-window) concept dicts
+    gfc_accepted        : list of accepted global-forecast concept dicts
+    lb_sw_accepted      : list of accepted lookback-sub-window concept dicts
     """
-    (lb_accepted, lb_fns), (fc_accepted, fc_fns), (gfc_accepted, gfc_fns) = \
-        load_concept_sets(
-            concepts_path, only_ok=only_ok,
-            min_pos_rate=min_pos_rate, max_pos_rate=max_pos_rate,
-        )
-    if not lb_accepted and not fc_accepted and not gfc_accepted:
+    ((lb_accepted, lb_fns),
+     (lb_sw_accepted, lb_sw_fns),
+     (fc_accepted, fc_fns),
+     (gfc_accepted, gfc_fns)) = load_concept_sets(
+        concepts_path, only_ok=only_ok,
+        min_pos_rate=min_pos_rate, max_pos_rate=max_pos_rate,
+    )
+    if (not lb_accepted and not lb_sw_accepted
+            and not fc_accepted and not gfc_accepted):
         raise RuntimeError(f"No OK concepts loaded from {concepts_path}.")
-    print(f"  loaded {len(lb_accepted)} lookback + {len(fc_accepted)} forecast "
-          f"+ {len(gfc_accepted)} forecast-global concepts "
+    print(f"  loaded {len(lb_accepted)} lookback + {len(lb_sw_accepted)} "
+          f"lookback-sub-window + {len(fc_accepted)} forecast + "
+          f"{len(gfc_accepted)} forecast-global concepts "
           f"(pos_rate band [{min_pos_rate:.2f}, {max_pos_rate:.2f}])")
 
     with open(segments_path) as f:
@@ -351,12 +406,17 @@ def build_window_label_tables(
         segment_stride = int(segments[1]["start_idx"] - segments[0]["start_idx"])
     print(f"  segment stride = {segment_stride}")
 
-    lb_seg, fc_seg, gfc_seg = compute_segment_label_tensors(
+    lb_seg, fc_seg, gfc_seg, lb_sw_seg = compute_segment_label_tensors(
         segments, lb_fns, fc_fns, gfc_fns,
+        lookback_sub_window_match_fns=lb_sw_fns,
         single_forecast_bottleneck=single_forecast_bottleneck,
     )
     print(f"  lookback label positive rates: "
           f"{[round(float(lb_seg[:, j].mean()), 3) for j in range(lb_seg.shape[1])]}")
+    if lb_sw_seg.size and lb_sw_seg.shape[-1] > 0:
+        lb_sw_flat = lb_sw_seg.reshape(-1, lb_sw_seg.shape[-1])
+        print(f"  lookback-sub-window label positive rates (avg across sub-windows): "
+              f"{[round(float(lb_sw_flat[:, j].mean()), 3) for j in range(lb_sw_flat.shape[1])]}")
     if fc_seg.size:
         fc_flat = fc_seg.reshape(-1, fc_seg.shape[-1])
         scope_note = ("whole forecast window"
@@ -368,7 +428,9 @@ def build_window_label_tables(
         print(f"  forecast-global label positive rates: "
               f"{[round(float(gfc_seg[:, j].mean()), 3) for j in range(gfc_seg.shape[1])]}")
 
-    lb_win  = _broadcast_seg_to_windows(lb_seg,  n_windows, segment_stride)
-    fc_win  = _broadcast_seg_to_windows(fc_seg,  n_windows, segment_stride)
-    gfc_win = _broadcast_seg_to_windows(gfc_seg, n_windows, segment_stride)
-    return lb_win, fc_win, gfc_win, lb_accepted, fc_accepted, gfc_accepted
+    lb_win    = _broadcast_seg_to_windows(lb_seg,    n_windows, segment_stride)
+    fc_win    = _broadcast_seg_to_windows(fc_seg,    n_windows, segment_stride)
+    gfc_win   = _broadcast_seg_to_windows(gfc_seg,   n_windows, segment_stride)
+    lb_sw_win = _broadcast_seg_to_windows(lb_sw_seg, n_windows, segment_stride)
+    return (lb_win, fc_win, gfc_win, lb_sw_win,
+            lb_accepted, fc_accepted, gfc_accepted, lb_sw_accepted)

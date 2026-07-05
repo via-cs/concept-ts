@@ -76,7 +76,10 @@ class CBMDataset(Dataset):
     def __init__(self, base: Dataset,
                  lb_labels: np.ndarray,
                  fc_labels: np.ndarray,
-                 gfc_labels: np.ndarray):
+                 gfc_labels: np.ndarray,
+                 lb_sw_labels: np.ndarray | None = None,
+                 lookback_only_mask_future: bool = False,
+                 input_length: int | None = None):
         assert len(base) == len(lb_labels) == len(fc_labels) == len(gfc_labels), (
             f"len(base)={len(base)} vs lb={len(lb_labels)} vs "
             f"fc={len(fc_labels)} vs gfc={len(gfc_labels)}"
@@ -85,13 +88,36 @@ class CBMDataset(Dataset):
         self.lb_labels  = torch.from_numpy(lb_labels).float()    # (N, K_lb)
         self.fc_labels  = torch.from_numpy(fc_labels).float()    # (N, K_sw, K_fc)
         self.gfc_labels = torch.from_numpy(gfc_labels).float()   # (N, K_gfc); K_gfc may be 0
+        if lb_sw_labels is None:
+            lb_sw_labels = np.zeros((len(base), 0, 0), dtype=np.float32)
+        assert len(base) == len(lb_sw_labels), (
+            f"len(base)={len(base)} vs lb_sw={len(lb_sw_labels)}"
+        )
+        self.lb_sw_labels = torch.from_numpy(lb_sw_labels).float()  # (N, N_lb_sw, K_lb_sw)
+        # Strict lookback-only masking: zero out the FUTURE portion of x so
+        # the model literally cannot see any feature past the lookback
+        # boundary. Applied per-sample in __getitem__ so it's compatible
+        # with the base dataset's normal (x, y) contract.
+        self.lookback_only_mask_future = bool(lookback_only_mask_future)
+        self.input_length = int(input_length) if input_length is not None else None
 
     def __len__(self) -> int:
         return len(self.base)
 
     def __getitem__(self, idx: int):
         x, y = self.base[idx]
-        return x, y, self.lb_labels[idx], self.fc_labels[idx], self.gfc_labels[idx]
+        if self.lookback_only_mask_future and self.input_length is not None:
+            # Zero out every feature after the lookback boundary. This is a
+            # paranoid guarantee -- the model in lookback_only mode is already
+            # architected to only consume x[:, :T_in, :], but this ensures no
+            # accidental leakage even if a downstream helper touches x[T_in:].
+            x = x.clone()
+            x[self.input_length:, :] = 0
+        return (x, y,
+                self.lb_labels[idx],
+                self.fc_labels[idx],
+                self.gfc_labels[idx],
+                self.lb_sw_labels[idx])
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +153,20 @@ def get_args():
 
     p.add_argument("--n_subwindows",   type=int, default=4,
                    help="Forecast-side bottlenecks (must equal preprocessing's --n_subwindows).")
+    p.add_argument("--experiment_mode", type=str, default="future_aware",
+                   choices=["future_aware", "lookback_only"],
+                   help="'future_aware' (default): the model sees future "
+                        "covariates -- x[:, T_in:, :] -- through a separate "
+                        "forecast encoder and three concept bottlenecks "
+                        "(LOOKBACK, FORECAST-SUB-WINDOW, FORECAST-GLOBAL). "
+                        "'lookback_only': the strict no-future-features "
+                        "setting for fair comparison against Time-Series-"
+                        "Library-style baselines. NO forecast encoder is "
+                        "built; the future portion of every input tensor is "
+                        "zeroed. Concept bottlenecks are LOOKBACK (global) "
+                        "and LOOKBACK-SUB-WINDOW (new). Requires a concepts "
+                        "JSON with lookback_sub_window_concepts populated "
+                        "(re-run concept_proposer with the updated prompt).")
     p.add_argument("--concept_emb_dim", type=int, default=16,
                    help="Per-concept embedding dimensionality d in the full-CEM "
                         "design. Each concept owns two MLPs producing input-"
@@ -351,41 +391,49 @@ def train_one_epoch(model, loader, optimizer, device,
     sw_len = int(getattr(model, "sub_window_length", 0))
     n_sw   = int(getattr(model, "n_subwindows", 1))
 
-    for x, y, lb_lab, fc_lab, gfc_lab in loader:
-        x       = x.to(device)
-        y       = y.to(device)
-        lb_lab  = lb_lab.to(device)
-        fc_lab  = fc_lab.to(device)
-        gfc_lab = gfc_lab.to(device)
+    for batch in loader:
+        # batch: (x, y, lb_lab, fc_lab, gfc_lab, lb_sw_lab).
+        x, y, lb_lab, fc_lab, gfc_lab, lb_sw_lab = batch
+        x         = x.to(device)
+        y         = y.to(device)
+        lb_lab    = lb_lab.to(device)
+        fc_lab    = fc_lab.to(device)
+        gfc_lab   = gfc_lab.to(device)
+        lb_sw_lab = lb_sw_lab.to(device)
         out = model(x)
 
         loss_f   = l1_fn(out["y_hat"],     y)
         loss_lb  = bce_fn(out["lb_logits"], lb_lab)
-        loss_fc  = bce_fn(out["fc_logits"], fc_lab)
+        # Forecast-side BCEs: skipped when the forecast side is disabled
+        # (experiment_mode='lookback_only' -> both fc_logits and gfc_logits
+        # are empty tensors from the model).
+        if out["fc_logits"].numel() > 0:
+            loss_fc = bce_fn(out["fc_logits"], fc_lab)
+        else:
+            loss_fc = torch.zeros((), device=device)
         if out["gfc_logits"].numel() > 0:
             loss_gfc = bce_fn(out["gfc_logits"], gfc_lab)
         else:
             loss_gfc = torch.zeros((), device=device)
-        # (Residual regularization removed -- the residual channel no longer
-        # exists in the model.)
-        # Boundary smoothness: small L1 penalty on |y_hat[bd] - y_hat[bd-1]|
-        # at each sub-window seam. No effect when n_subwindows == 1.
+        # Lookback-SW BCE (lookback_only mode only).
+        if out["lb_sw_logits"].numel() > 0:
+            loss_lb_sw = bce_fn(out["lb_sw_logits"], lb_sw_lab)
+        else:
+            loss_lb_sw = torch.zeros((), device=device)
+        # Boundary smoothness + concept-collapse penalties.
         loss_sm = _boundary_smoothness_loss(out["y_hat"], sw_len, n_sw)
-
-        # Concept-collapse penalty: penalizes near-constant concept
-        # activations across the batch, preventing the CEM-gate degeneracy
-        # where e+(z) or e-(z) becomes an ungated bypass. Applied to all
-        # three concept sets. See _concept_collapse_penalty docstring.
         loss_cc = (
-            _concept_collapse_penalty(out["lb_acts"],  concept_var_min)
-            + _concept_collapse_penalty(out["fc_acts"],  concept_var_min)
-            + _concept_collapse_penalty(out["gfc_acts"], concept_var_min)
+            _concept_collapse_penalty(out["lb_acts"],    concept_var_min)
+            + _concept_collapse_penalty(out["fc_acts"],    concept_var_min)
+            + _concept_collapse_penalty(out["gfc_acts"],   concept_var_min)
+            + _concept_collapse_penalty(out["lb_sw_acts"], concept_var_min)
         )
 
         loss = (alpha_forecast               * loss_f
                 + alpha_lookback                * loss_lb
                 + alpha_forecast_concept        * loss_fc
                 + alpha_forecast_global_concept * loss_gfc
+                + alpha_forecast_concept        * loss_lb_sw
                 + alpha_boundary_smooth         * loss_sm
                 + alpha_concept_collapse        * loss_cc)
 
@@ -409,38 +457,44 @@ def train_one_epoch(model, loader, optimizer, device,
 @torch.no_grad()
 def evaluate(model, loader, device):
     """Run forward over a dataset. Returns:
-        (mae, mse,
-         all lb_logits   (N, K_lb),
-         all lb_labels   (N, K_lb),
-         all fc_logits   (N, N_sw, K_fc),
-         all fc_labels   (N, N_sw, K_fc),
-         all y_hat       (N, T_out, O),
-         all y_true      (N, T_out, O))
+        (mse, mae,
+         all lb_logits    (N, K_lb),           all lb_labels    (same),
+         all fc_logits    (N, N_sw, K_fc),     all fc_labels    (same),
+         all gfc_logits   (N, K_gfc),          all gfc_labels   (same),
+         all y_hat        (N, T_out, O),       all y_true       (same),
+         all lb_sw_logits (N, N_lb_sw, K_lb_sw),  all lb_sw_labels (same))
+
+    ``lb_sw_*`` tensors have trailing dim 0 in future_aware mode.
+    ``fc_*`` / ``gfc_*`` have trailing dim 0 in lookback_only mode.
     """
     model.eval()
-    all_lb_lg,  all_lb_la  = [], []
-    all_fc_lg,  all_fc_la  = [], []
-    all_gfc_lg, all_gfc_la = [], []
+    all_lb_lg,    all_lb_la    = [], []
+    all_fc_lg,    all_fc_la    = [], []
+    all_gfc_lg,   all_gfc_la   = [], []
+    all_lb_sw_lg, all_lb_sw_la = [], []
     all_yh, all_yt = [], []
     mae_sum, mse_sum, denom = 0.0, 0.0, 0
 
-    for x, y, lb_lab, fc_lab, gfc_lab in loader:
+    for batch in loader:
+        x, y, lb_lab, fc_lab, gfc_lab, lb_sw_lab = batch
         x = x.to(device); y = y.to(device)
         out = model(x)
         y_hat = out["y_hat"]
         mae_sum += (y_hat - y).abs().sum().item()
         mse_sum += ((y_hat - y) ** 2).sum().item()
         denom   += y.numel()
-        all_lb_lg.append(out["lb_logits"].cpu());  all_lb_la.append(lb_lab)
-        all_fc_lg.append(out["fc_logits"].cpu());  all_fc_la.append(fc_lab)
-        all_gfc_lg.append(out["gfc_logits"].cpu()); all_gfc_la.append(gfc_lab)
-        all_yh.append(y_hat.cpu());                all_yt.append(y.cpu())
+        all_lb_lg.append(out["lb_logits"].cpu());     all_lb_la.append(lb_lab)
+        all_fc_lg.append(out["fc_logits"].cpu());     all_fc_la.append(fc_lab)
+        all_gfc_lg.append(out["gfc_logits"].cpu());   all_gfc_la.append(gfc_lab)
+        all_lb_sw_lg.append(out["lb_sw_logits"].cpu()); all_lb_sw_la.append(lb_sw_lab)
+        all_yh.append(y_hat.cpu());                   all_yt.append(y.cpu())
 
     return (mse_sum / denom, mae_sum / denom,
-            torch.cat(all_lb_lg),  torch.cat(all_lb_la),
-            torch.cat(all_fc_lg),  torch.cat(all_fc_la),
-            torch.cat(all_gfc_lg), torch.cat(all_gfc_la),
-            torch.cat(all_yh),     torch.cat(all_yt))
+            torch.cat(all_lb_lg),    torch.cat(all_lb_la),
+            torch.cat(all_fc_lg),    torch.cat(all_fc_la),
+            torch.cat(all_gfc_lg),   torch.cat(all_gfc_la),
+            torch.cat(all_yh),       torch.cat(all_yt),
+            torch.cat(all_lb_sw_lg), torch.cat(all_lb_sw_la))
 
 
 def per_concept_auroc(logits_2d: torch.Tensor, labels_2d: torch.Tensor) -> list[float]:
@@ -801,7 +855,8 @@ def main():
     if args.single_forecast_bottleneck:
         print("  [ABLATION] Single global forecast bottleneck -- "
               "labels computed on whole forecast window.")
-    lb_train, fc_train, gfc_train, lb_meta, fc_meta, gfc_meta = build_window_label_tables(
+    (lb_train, fc_train, gfc_train, lb_sw_train,
+     lb_meta, fc_meta, gfc_meta, lb_sw_meta) = build_window_label_tables(
         concepts_path=args.concepts_path,
         segments_path=args.segments_path,
         n_windows=len(train_data),
@@ -812,6 +867,8 @@ def main():
     )
     K_lb  = lb_train.shape[1]
     K_gfc = gfc_train.shape[1]
+    K_lb_sw          = lb_sw_train.shape[2] if lb_sw_train.ndim == 3 else 0
+    K_lb_sw_windows  = lb_sw_train.shape[1] if lb_sw_train.ndim == 3 else 0
     if args.single_forecast_bottleneck:
         K_sw = 0
         K_fc = fc_train.shape[1]
@@ -821,7 +878,8 @@ def main():
         K_sw = fc_train.shape[1] if fc_train.ndim == 3 else 0
         K_fc = fc_train.shape[2] if fc_train.ndim == 3 else 0
         print(f"  K_lookback = {K_lb}, K_subwindows = {K_sw}, "
-              f"K_forecast = {K_fc}, K_forecast_global = {K_gfc}")
+              f"K_forecast = {K_fc}, K_forecast_global = {K_gfc}, "
+              f"K_lb_subwindows = {K_lb_sw_windows}, K_lb_sw_concepts = {K_lb_sw}")
         if K_sw != args.n_subwindows:
             print(f"  WARNING: --n_subwindows={args.n_subwindows} != K_sw={K_sw} from segments file. "
                   f"Using {K_sw} (taken from preprocessing).")
@@ -833,16 +891,20 @@ def main():
             return np.zeros((n_windows, K_fc), dtype=np.float32)
         return np.zeros((n_windows, K_sw, K_fc), dtype=np.float32)
 
+    def _zero_lb_sw(n_windows: int) -> np.ndarray:
+        return np.zeros((n_windows, K_lb_sw_windows, K_lb_sw), dtype=np.float32)
+
     def _load_split_labels(name: str, path: str | None, n_windows: int):
-        """Return (lb_labels, fc_labels, gfc_labels, is_real) for a split."""
+        """Return (lb_labels, fc_labels, gfc_labels, lb_sw_labels, is_real)."""
         if path is None:
             print(f"  {name}: NO segments path supplied -> labels are placeholder zeros, "
                   "per-concept stats will not be reported for this split.")
             return (np.zeros((n_windows, K_lb), dtype=np.float32),
                     _zero_fc(n_windows),
                     np.zeros((n_windows, K_gfc), dtype=np.float32),
+                    _zero_lb_sw(n_windows),
                     False)
-        lb, fc, gfc, _, _, _ = build_window_label_tables(
+        lb, fc, gfc, lb_sw, _, _, _, _ = build_window_label_tables(
             concepts_path=args.concepts_path,
             segments_path=path,
             n_windows=n_windows,
@@ -870,23 +932,31 @@ def main():
                 f"train produced (W, {K_gfc})."
             )
         print(f"  {name}: REAL concept labels loaded "
-              f"(lb {lb.shape}, fc {fc.shape}, gfc {gfc.shape}).")
+              f"(lb {lb.shape}, fc {fc.shape}, gfc {gfc.shape}, lb_sw {lb_sw.shape}).")
         return (lb.astype(np.float32),
                 fc.astype(np.float32),
                 gfc.astype(np.float32),
+                lb_sw.astype(np.float32),
                 True)
 
     print("\n── Building concept labels (val / test) ──")
-    lb_val,  fc_val,  gfc_val,  val_labels_real  = _load_split_labels(
+    (lb_val,  fc_val,  gfc_val,  lb_sw_val,  val_labels_real)  = _load_split_labels(
         "val",  args.val_segments_path,  len(val_data),
     )
-    lb_test, fc_test, gfc_test, test_labels_real = _load_split_labels(
+    (lb_test, fc_test, gfc_test, lb_sw_test, test_labels_real) = _load_split_labels(
         "test", args.test_segments_path, len(test_data),
     )
 
-    train_ds = CBMDataset(train_data, lb_train, fc_train, gfc_train)
-    val_ds   = CBMDataset(val_data,   lb_val,   fc_val,   gfc_val)
-    test_ds  = CBMDataset(test_data,  lb_test,  fc_test,  gfc_test)
+    _mask_future = (args.experiment_mode == "lookback_only")
+    train_ds = CBMDataset(train_data, lb_train, fc_train, gfc_train, lb_sw_train,
+                           lookback_only_mask_future=_mask_future,
+                           input_length=args.input_length)
+    val_ds   = CBMDataset(val_data,   lb_val,   fc_val,   gfc_val,   lb_sw_val,
+                           lookback_only_mask_future=_mask_future,
+                           input_length=args.input_length)
+    test_ds  = CBMDataset(test_data,  lb_test,  fc_test,  gfc_test,  lb_sw_test,
+                           lookback_only_mask_future=_mask_future,
+                           input_length=args.input_length)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                shuffle=True, drop_last=True)
@@ -909,6 +979,9 @@ def main():
         n_forecast_concepts        = K_fc,
         n_global_forecast_concepts = K_gfc,
         n_subwindows               = args.n_subwindows,
+        experiment_mode              = args.experiment_mode,
+        n_lookback_subwindows        = K_lb_sw_windows if K_lb_sw_windows > 0 else args.n_subwindows,
+        n_lookback_subwindow_concepts = K_lb_sw,
         concept_emb_dim            = args.concept_emb_dim,
         decoder_hidden      = args.decoder_hidden,
         decoder_depth       = args.decoder_depth,
@@ -992,10 +1065,11 @@ def main():
 
     print("\n── Test forecast results ──")
     (test_mse, test_mae,
-     t_lb_lg,  t_lb_la,
-     t_fc_lg,  t_fc_la,
-     t_gfc_lg, t_gfc_la,
-     t_yh,     t_yt) = evaluate(model, test_loader, device)
+     t_lb_lg,    t_lb_la,
+     t_fc_lg,    t_fc_la,
+     t_gfc_lg,   t_gfc_la,
+     t_yh,       t_yt,
+     t_lb_sw_lg, t_lb_sw_la) = evaluate(model, test_loader, device)
     print(f"  test MSE      = {test_mse:.6f}  (full model, z-scored)")
     print(f"  test MAE      = {test_mae:.6f}  (full model, z-scored)")
 
@@ -1051,7 +1125,7 @@ def main():
         tr_gfc_lg, tr_gfc_la = [], []
         model.eval()
         with torch.no_grad():
-            for x, _, lb_lab, fc_lab, gfc_lab in train_loader:
+            for x, _, lb_lab, fc_lab, gfc_lab, _lb_sw_lab in train_loader:
                 x = x.to(device)
                 out = model(x)
                 tr_lb_lg.append(out["lb_logits"].cpu());  tr_lb_la.append(lb_lab)

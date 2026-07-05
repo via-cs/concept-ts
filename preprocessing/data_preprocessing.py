@@ -492,12 +492,49 @@ def build_subwindow_blocks(forecast_df: pd.DataFrame,
     return blocks
 
 
+def build_lookback_subwindow_blocks(lookback_df: pd.DataFrame,
+                                    n_lookback_subwindows: int) -> list:
+    """Slice the LOOKBACK window into ``n_lookback_subwindows`` equal chunks
+    and compute per-chunk per-channel stats + a local time_context.
+
+    Mirrors ``build_subwindow_blocks`` but operates on the lookback slice.
+    Used by the "lookback_only" experiment mode where the model doesn't have
+    access to any future feature -- concepts are proposed about the lookback
+    sub-windows instead of the forecast sub-windows.
+
+    Both blocks (forecast subwindow_stats AND lookback_subwindow_stats) are
+    emitted in every segment regardless of which mode the trainer will use,
+    so switching modes doesn't require re-preprocessing.
+
+    Unlike ``extract_segment_stats`` on the whole lookback, sub-window stats
+    skip the frequency-domain features -- individual 6-hour sub-windows are
+    typically too short for informative FFT (fewer than one 24h cycle).
+    """
+    lb_len = len(lookback_df)
+    if lb_len % n_lookback_subwindows != 0:
+        raise ValueError(
+            f"lookback length {lb_len} not divisible by "
+            f"n_lookback_subwindows={n_lookback_subwindows}"
+        )
+    sw_len = lb_len // n_lookback_subwindows
+    blocks = []
+    for k in range(n_lookback_subwindows):
+        sw_df = lookback_df.iloc[k * sw_len : (k + 1) * sw_len]
+        blocks.append({
+            "subwindow_idx": int(k),
+            "stats":         extract_segment_stats(sw_df, CHANNEL_META),
+            "time_context":  _extract_subwindow_time_context(sw_df, k),
+        })
+    return blocks
+
+
 def segment_time_series(
     df: pd.DataFrame,
     input_length: int = 384,
     output_length: int = 96,
     stride: int = 96,
     n_subwindows: int = 4,
+    n_lookback_subwindows: int = None,
 ) -> list:
     """Segment the time series into non-overlapping (or strided) windows.
 
@@ -555,6 +592,18 @@ def segment_time_series(
         # forecast-side concept layers in the CBM (one rule per sub-window).
         subwindow_blocks = build_subwindow_blocks(forecast_df, n_subwindows=n_subwindows)
 
+        # Per-sub-window stats over the LOOKBACK window — consumed by the
+        # lookback-side concept layers when the trainer runs in
+        # experiment_mode='lookback_only'. Emitted unconditionally so that
+        # switching modes doesn't require re-preprocessing. Falls back to
+        # n_subwindows (same value) when n_lookback_subwindows is not given.
+        _n_lb_sw = (n_lookback_subwindows
+                    if n_lookback_subwindows is not None
+                    else n_subwindows)
+        lookback_subwindow_blocks = build_lookback_subwindow_blocks(
+            lookback_df, n_lookback_subwindows=_n_lb_sw,
+        )
+
         segments.append({
             "segment_id": seg_id,
             "start_idx": int(start),
@@ -562,6 +611,7 @@ def segment_time_series(
             "lookback_stats": lookback_stats,
             "forecast_stats": forecast_stats,
             "subwindow_stats": subwindow_blocks,
+            "lookback_subwindow_stats": lookback_subwindow_blocks,
             "cross_channel_stats": cross_stats,
             "time_context": time_context,
         })
@@ -718,6 +768,7 @@ def run_preprocessing(
     stride: int = 96,
     max_segments_for_llm: int = 300,
     n_subwindows: int = 4,
+    n_lookback_subwindows: int = None,
     split: str = "train",
 ):
     """Run the full Part A preprocessing pipeline.
@@ -774,6 +825,7 @@ def run_preprocessing(
         output_length=output_length,
         stride=stride,
         n_subwindows=n_subwindows,
+        n_lookback_subwindows=n_lookback_subwindows,
     )
     print(f"  Total segments in {split}: {len(all_segments)}")
 
@@ -796,6 +848,7 @@ def run_preprocessing(
         _time_res, _tgt, _tgt_desc = "unknown", "unknown", "unknown"
 
     # Step 4: Build metadata
+    _n_lb_sw = n_lookback_subwindows if n_lookback_subwindows is not None else n_subwindows
     metadata = {
         "dataset_name": dataset_name,
         "data_path": data_path,
@@ -807,6 +860,8 @@ def run_preprocessing(
         "stride": stride,
         "n_subwindows": n_subwindows,
         "subwindow_length": output_length // n_subwindows,
+        "n_lookback_subwindows": _n_lb_sw,
+        "lookback_subwindow_length": input_length // _n_lb_sw,
         "total_segments": len(all_segments),
         "sampled_segments": len(sampled_segments),
         "target_variable": _tgt,
@@ -912,6 +967,13 @@ def main():
                              "Each sub-window gets its own per-channel stats block "
                              "used by the CBM's forecast concept layers. Default 4 "
                              "(96 forecast steps -> 4 x 24-step sub-windows = 4 x 6h).")
+    parser.add_argument("--n_lookback_subwindows", type=int, default=None,
+                        help="Lookback window split into this many equal sub-windows. "
+                             "Emits ``lookback_subwindow_stats`` in every segment for "
+                             "use by the CBM's experiment_mode='lookback_only' path. "
+                             "Default = --n_subwindows (symmetric sub-window count on "
+                             "both sides). Both blocks are always emitted so switching "
+                             "mode later doesn't require re-preprocessing.")
     parser.add_argument("--split", type=str, default="all",
                         choices=["train", "vali", "test", "all"],
                         help="Which slice of the CSV to segment. Output filename "
@@ -936,6 +998,7 @@ def main():
             stride=args.stride,
             max_segments_for_llm=args.max_segments,
             n_subwindows=args.n_subwindows,
+            n_lookback_subwindows=args.n_lookback_subwindows,
             split=s,
         )
 

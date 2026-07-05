@@ -217,6 +217,22 @@ class ConceptBottleneckModel(nn.Module):
         n_forecast_concepts: int,
         n_global_forecast_concepts: int = 0,
         n_subwindows: int = 4,
+        # ---- Experiment mode -----------------------------------------------
+        # "future_aware" (default): current behavior. Forecast encoder sees
+        #     x[:, T_in:, :] (future covariates). Three concept bottlenecks:
+        #     LOOKBACK (global), FORECAST-SUB-WINDOW, FORECAST-GLOBAL.
+        # "lookback_only": strict no-future-features setting. Forecast
+        #     encoder is skipped entirely. Two concept bottlenecks:
+        #     LOOKBACK (global) and LOOKBACK-SUB-WINDOW (new). Decoder still
+        #     produces per-forecast-sub-window forecasts, but everything it
+        #     conditions on is derived from the lookback alone.
+        experiment_mode: str = "future_aware",
+        # LOOKBACK sub-window bottleneck config (only used when
+        # experiment_mode='lookback_only'). n_lookback_subwindows defaults to
+        # n_subwindows for symmetry. n_lookback_subwindow_concepts=0 skips
+        # the LB-SW bottleneck (in that mode, only LOOKBACK-GLOBAL remains).
+        n_lookback_subwindows: int = None,
+        n_lookback_subwindow_concepts: int = 0,
         concept_emb_dim: int = 16,
         decoder_hidden: int = 512,
         decoder_depth: int = 3,
@@ -320,6 +336,32 @@ class ConceptBottleneckModel(nn.Module):
         self.single_forecast_bottleneck = bool(single_forecast_bottleneck)
         self.input_length = int(input_length)
 
+        # Experiment mode + lookback-sub-window config.
+        if experiment_mode not in ("future_aware", "lookback_only"):
+            raise ValueError(
+                f"experiment_mode must be 'future_aware' or 'lookback_only', "
+                f"got {experiment_mode!r}."
+            )
+        self.experiment_mode = experiment_mode
+        _n_lb_sw = (n_lookback_subwindows if n_lookback_subwindows is not None
+                    else n_subwindows)
+        if input_length % _n_lb_sw != 0:
+            raise ValueError(
+                f"input_length ({input_length}) must be divisible by "
+                f"n_lookback_subwindows ({_n_lb_sw})."
+            )
+        self.n_lookback_subwindows = int(_n_lb_sw)
+        self.lookback_sub_window_length = input_length // self.n_lookback_subwindows
+        self.n_lookback_subwindow_concepts = int(n_lookback_subwindow_concepts)
+
+        # In lookback_only mode, forecast-side concept counts are ZEROED out
+        # regardless of what the constructor was passed. All forecast-side
+        # sub-modules will not be constructed below.
+        self._forecast_side_active = (self.experiment_mode == "future_aware")
+        if not self._forecast_side_active:
+            self.n_forecast_concepts        = 0
+            self.n_global_forecast_concepts = 0
+
         # ---- Encoder backbones (TWO separate-weight encoders) ----
         # To give a HARD lookback/forecast information barrier, the lookback
         # and forecast concept bottlenecks read from two physically separate
@@ -379,10 +421,15 @@ class ConceptBottleneckModel(nn.Module):
             window_len=input_length, target_mode="revin_all",
             use_rev_in_flag=use_rev_in,
         )
-        self.forecast_encoder = _make_window_encoder(
-            window_len=output_length, target_mode="mask_all",
-            use_rev_in_flag=0,
-        )
+        if self._forecast_side_active:
+            self.forecast_encoder = _make_window_encoder(
+                window_len=output_length, target_mode="mask_all",
+                use_rev_in_flag=0,
+            )
+        else:
+            # experiment_mode='lookback_only': no forecast encoder at all.
+            # The lookback encoder alone supplies all concept-side signal.
+            self.forecast_encoder = None
 
         # ---- Lookback concept bottleneck (full CEM) ----
         # Predictor stays the same: encoder feature -> K_lb concept logits.
@@ -422,7 +469,6 @@ class ConceptBottleneckModel(nn.Module):
         # encoder-side weights and puts all mass on the hour-side weights.
         # See the ``calendar_hour_channel`` / ``hour_encoding_dim`` docs in
         # __init__.
-        n_fc_predictors = 1 if self.single_forecast_bottleneck else n_subwindows
         _use_hour = int(calendar_hour_channel) >= 0
         self.hour_encoding_dim = int(hour_encoding_dim) if _use_hour else 0
         if _use_hour and (self.hour_encoding_dim % 2 != 0):
@@ -431,12 +477,43 @@ class ConceptBottleneckModel(nn.Module):
                 f"{self.hour_encoding_dim}"
             )
         _fc_input_dim = mid_dim + self.hour_encoding_dim
-        self.forecast_concept_predictors = nn.ModuleList([
-            nn.Linear(_fc_input_dim, n_forecast_concepts)
-            for _ in range(n_fc_predictors)
-        ])
-        self.forecast_emb_plus  = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
-        self.forecast_emb_minus = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
+
+        # Forecast sub-window / global concept predictors ONLY in future_aware.
+        if self._forecast_side_active:
+            n_fc_predictors = 1 if self.single_forecast_bottleneck else n_subwindows
+            self.forecast_concept_predictors = nn.ModuleList([
+                nn.Linear(_fc_input_dim, n_forecast_concepts)
+                for _ in range(n_fc_predictors)
+            ])
+            self.forecast_emb_plus  = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
+            self.forecast_emb_minus = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
+        else:
+            self.forecast_concept_predictors = nn.ModuleList()
+            self.forecast_emb_plus  = None
+            self.forecast_emb_minus = None
+
+        # LOOKBACK-SUB-WINDOW concept predictors ONLY when lookback_only + K_lb_sw>0.
+        # Mirrors the forecast-side wiring but reads from z_per_lb_sw[k] (per
+        # lookback sub-window pooled feature) + sinusoidal hour encoding of
+        # the lookback sub-window's start hour.
+        if (self.experiment_mode == "lookback_only"
+                and self.n_lookback_subwindow_concepts > 0):
+            self.lookback_sw_concept_predictors = nn.ModuleList([
+                nn.Linear(_fc_input_dim, self.n_lookback_subwindow_concepts)
+                for _ in range(self.n_lookback_subwindows)
+            ])
+            self.lookback_sw_emb_plus  = nn.Linear(
+                _fc_input_dim,
+                self.n_lookback_subwindow_concepts * self.concept_emb_dim,
+            )
+            self.lookback_sw_emb_minus = nn.Linear(
+                _fc_input_dim,
+                self.n_lookback_subwindow_concepts * self.concept_emb_dim,
+            )
+        else:
+            self.lookback_sw_concept_predictors = nn.ModuleList()
+            self.lookback_sw_emb_plus  = None
+            self.lookback_sw_emb_minus = None
 
         # ---- Global forecast bottleneck (full CEM, OPTIONAL) ----
         # When n_global_forecast_concepts > 0, an extra bottleneck reads
@@ -488,14 +565,33 @@ class ConceptBottleneckModel(nn.Module):
         # forecast side has been collapsed to a single global bottleneck
         # (--single_forecast_bottleneck makes the GRU degenerate -- same
         # context at every position).
-        lb_ctx_dim  = n_lookback_concepts             * self.concept_emb_dim
-        fc_ctx_dim  = n_forecast_concepts             * self.concept_emb_dim
-        gfc_ctx_dim = self.n_global_forecast_concepts * self.concept_emb_dim
+        lb_ctx_dim    = n_lookback_concepts                     * self.concept_emb_dim
+        fc_ctx_dim    = self.n_forecast_concepts                * self.concept_emb_dim
+        gfc_ctx_dim   = self.n_global_forecast_concepts         * self.concept_emb_dim
+        lb_sw_ctx_dim = self.n_lookback_subwindow_concepts      * self.concept_emb_dim
 
+        # ---- Sub-window context BiGRU (sequence-aware refinement) ----
+        # In future_aware mode: BiGRU walks over FORECAST sub-window concept
+        #     contexts. Its refined output per forecast sub-window is fed into
+        #     the decoder for that sub-window.
+        # In lookback_only mode: BiGRU walks over LOOKBACK sub-window concept
+        #     contexts. The refined output is FINAL-STATE-POOLED and reused as
+        #     a single shared "lookback sequence summary" for every forecast
+        #     sub-window's decoding, because forecast sub-windows have no
+        #     per-position concept context of their own in this mode.
         self.sw_gru_hidden = int(sw_gru_hidden)
-        if self.sw_gru_hidden > 0 and not self.single_forecast_bottleneck:
+        _bigru_input_ctx_dim = (
+            lb_sw_ctx_dim if self.experiment_mode == "lookback_only"
+            else fc_ctx_dim
+        )
+        _bigru_enabled = (
+            self.sw_gru_hidden > 0
+            and not self.single_forecast_bottleneck
+            and _bigru_input_ctx_dim > 0
+        )
+        if _bigru_enabled:
             self.sw_summary_dim = int(sw_summary_dim)
-            self.sw_context_summary = nn.Linear(fc_ctx_dim, self.sw_summary_dim)
+            self.sw_context_summary = nn.Linear(_bigru_input_ctx_dim, self.sw_summary_dim)
             self.sw_context_gru = nn.GRU(
                 self.sw_summary_dim, self.sw_gru_hidden,
                 bidirectional=True, batch_first=True,
@@ -506,13 +602,24 @@ class ConceptBottleneckModel(nn.Module):
 
         # ---- Shared sub-decoder ----
         # dec_in layout (STRICT CBM -- every entry is either a concept-derived
-        # context vector or a positional embedding; NO residual bypass):
-        #   lookback CEM context    = K_lb         * d   (input-conditional)
-        #   forecast-SW CEM context = K_fc         * d   (input-conditional, one per k)
-        #   sw_gru context          = 2 * sw_gru_hidden  (cross-sub-window aware,
-        #                                                 derived from fc_ctx; 0 if disabled)
-        #   forecast-GLOBAL context = K_fc_global  * d   (input-conditional; 0 if disabled)
-        #   sub-window id embedding = sw_id_dim          (positional; no content)
+        # context vector or a positional embedding; NO residual bypass).
+        #
+        # In experiment_mode='future_aware':
+        #   lookback CEM context     = K_lb         * d   (input-conditional)
+        #   forecast-SW CEM context  = K_fc         * d   (input-conditional, one per k)
+        #   sw_gru context (per k)   = 2 * sw_gru_hidden  (BiGRU over FORECAST sub-windows)
+        #   forecast-GLOBAL context  = K_fc_global  * d   (input-conditional; 0 if disabled)
+        #   sub-window id embedding  = sw_id_dim          (positional)
+        #
+        # In experiment_mode='lookback_only':
+        #   lookback CEM context     = K_lb         * d   (input-conditional)
+        #   sw_gru context (shared)  = 2 * sw_gru_hidden  (BiGRU over LOOKBACK sub-windows,
+        #                                                  final-state summary reused for
+        #                                                  every forecast sub-window)
+        #   sub-window id embedding  = sw_id_dim          (positional)
+        #   (no forecast-SW / forecast-GLOBAL contexts -- those bottlenecks are
+        #    disabled in lookback_only mode)
+        #
         # Output: T_sw forecast values. decoder_depth = number of Linear layers per block.
         dec_in_dim  = (lb_ctx_dim + fc_ctx_dim + sw_gru_out_dim + gfc_ctx_dim
                        + sub_window_id_dim)
@@ -613,6 +720,40 @@ class ConceptBottleneckModel(nn.Module):
         ]
         return z_global, z_per_sw, z_global_forecast
 
+    def _pool_lookback_encoder(self, enc_lb: torch.Tensor
+                                ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Pool the LOOKBACK encoder's per-timestep features into:
+
+          z_global    : (B, D) mean over the whole lookback
+                        -> LOOKBACK-GLOBAL concept bottleneck
+          z_per_lb_sw : list of N_lb_sw (B, D) tensors, one per lookback
+                        sub-window slice mean
+                        -> LOOKBACK-SUB-WINDOW concept bottleneck
+
+        Only called in experiment_mode='lookback_only'. Symmetric to how
+        _pool_encoder_features slices the forecast encoder in future_aware
+        mode, but the slicing here is over the LOOKBACK axis (input_length,
+        n_lookback_subwindows).
+        """
+        if enc_lb.dim() == 2:
+            # Encoder returned pooled (B, D). Can't split by sub-window.
+            return enc_lb, [enc_lb] * self.n_lookback_subwindows
+        if enc_lb.dim() != 3:
+            raise ValueError(
+                f"lookback encoder output has unexpected ndim={enc_lb.dim()}; "
+                f"expected 2 or 3."
+            )
+        T = enc_lb.shape[1]
+        if T != self.input_length:
+            enc_lb = enc_lb[:, -self.input_length:, :]
+        z_global = enc_lb.mean(dim=1)                        # (B, D)
+        lb_sw_len = self.lookback_sub_window_length
+        z_per_lb_sw = [
+            enc_lb[:, k * lb_sw_len : (k + 1) * lb_sw_len, :].mean(dim=1)
+            for k in range(self.n_lookback_subwindows)
+        ]
+        return z_global, z_per_lb_sw
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -635,62 +776,73 @@ class ConceptBottleneckModel(nn.Module):
         B = x.shape[0]
         device = x.device
 
-        # 1) Encode with TWO separate encoders over disjoint windows.
-        #    Clone the slices: PerChannelEmbedding overwrites the target column
-        #    in-place, and cloning prevents the two encoder passes from
-        #    aliasing each other's region of x.
+        # 1) Encode. In future_aware: two separate encoders over disjoint
+        #    windows. In lookback_only: only the lookback encoder is used;
+        #    the forecast encoder was not even constructed.
         x_lb = x[:, : self.input_length, :].clone()       # lookback window
-        x_fc = x[:, self.input_length :, :].clone()       # forecast window
         _, enc_lb = self.lookback_encoder(x_lb)           # (B, T_in,  D)
-        _, enc_fc = self.forecast_encoder(x_fc)           # (B, T_out, D)
-        z_global, z_per_sw, z_global_forecast = self._pool_encoder_features(
-            enc_lb, enc_fc,
-        )
 
-        # ---- Augment z_per_sw[k] with the sub-window's actual START HOUR ----
-        # Mean-pooling over a 24-step sub-window destroys time-of-day info
-        # (the mean of any cyclical channel over one full daily cycle is
-        # constant), so without an extra time signal the forecast concept
-        # head cannot tell morning sub-windows from evening ones.
-        #
-        # We CONCATENATE (not add) a deterministic sinusoidal encoding of
-        # each sub-window's start hour to z_per_sw[k]. Concatenation is a
-        # big win over the previous additive-learned design:
-        #
-        #   * Independent weight groups -- the predictor Linear has separate
-        #     weights on the encoder-side vs the hour-side dims. A pure-hour
-        #     concept just zeros its encoder-side weights and puts all mass
-        #     on the hour-side ones; a pure-weather concept does the opposite.
-        #     No entanglement, no competing gradients.
-        #   * Deterministic sinusoidal -- the "morning direction" in the hour
-        #     encoding is a KNOWN, FIXED value (specific sin/cos coefficients),
-        #     not a random-init nn.Embedding vector that drifts during
-        #     training. Much easier optimization target.
-        #   * Tiny -- hour_encoding_dim defaults to 8, much smaller than the
-        #     previous mid_dim additive vector, and no learned parameters.
+        if self._forecast_side_active:
+            x_fc = x[:, self.input_length :, :].clone()   # forecast window
+            _, enc_fc = self.forecast_encoder(x_fc)       # (B, T_out, D)
+            z_global, z_per_sw, z_global_forecast = self._pool_encoder_features(
+                enc_lb, enc_fc,
+            )
+            # z_per_lb_sw not needed in future_aware mode.
+            z_per_lb_sw = []
+        else:
+            # lookback_only mode: no forecast encoder, no forecast features.
+            z_global, z_per_lb_sw = self._pool_lookback_encoder(enc_lb)
+            z_per_sw          = []
+            z_global_forecast = z_global   # unused; kept for API symmetry
+
+        # ---- Augment per-sub-window features with sinusoidal HOUR encoding ---
+        # In future_aware mode: augment z_per_sw (per FORECAST sub-window),
+        # extracting the hour from the FORECAST slice of x.
+        # In lookback_only mode: augment z_per_lb_sw (per LOOKBACK sub-window),
+        # extracting the hour from the LOOKBACK slice of x.
+        # See __init__ for the design rationale (independent weight groups +
+        # deterministic sinusoidal + tiny param footprint).
         if (self.calendar_hour_channel >= 0
                 and not self.single_forecast_bottleneck
                 and self.hour_encoding_dim > 0):
-            sw_len = self.sub_window_length
-            # Index of each sub-window's FIRST step inside the full input.
-            sw_start_idx = self.input_length + torch.arange(
-                self.n_subwindows, device=x.device,
-            ) * sw_len                                                       # (N,)
-            # x[:, sw_start_idx, hour_ch] -> (B, N) integer hours 0..23.
-            # The hour column in the input is the RAW (non-z-scored) value
-            # straight out of the CSV per LOF_Dataset.get_data, so casting
-            # to .long() and clamping is safe.
-            start_hours = (
-                x[:, sw_start_idx, self.calendar_hour_channel]
-                .long().clamp(0, 23)
-            )                                                                # (B, N)
-            sw_hour_vecs = _sinusoidal_hour_encoding(
-                start_hours, self.hour_encoding_dim,
-            )                                                                # (B, N, hour_enc_dim)
-            z_per_sw = [
-                torch.cat([z_per_sw[k], sw_hour_vecs[:, k, :]], dim=-1)
-                for k in range(self.n_subwindows)
-            ]
+            if self._forecast_side_active:
+                # forecast sub-window start hours
+                sw_len_ = self.sub_window_length
+                n_sw_   = self.n_subwindows
+                base_offset = self.input_length
+                sw_start_idx = base_offset + torch.arange(
+                    n_sw_, device=x.device,
+                ) * sw_len_                                                    # (N,)
+                start_hours = (
+                    x[:, sw_start_idx, self.calendar_hour_channel]
+                    .long().clamp(0, 23)
+                )                                                              # (B, N)
+                sw_hour_vecs = _sinusoidal_hour_encoding(
+                    start_hours, self.hour_encoding_dim,
+                )                                                              # (B, N, hour_enc_dim)
+                z_per_sw = [
+                    torch.cat([z_per_sw[k], sw_hour_vecs[:, k, :]], dim=-1)
+                    for k in range(n_sw_)
+                ]
+            else:
+                # lookback sub-window start hours (from the LOOKBACK slice)
+                lb_sw_len_ = self.lookback_sub_window_length
+                n_lb_sw_   = self.n_lookback_subwindows
+                lb_sw_start_idx = torch.arange(
+                    n_lb_sw_, device=x.device,
+                ) * lb_sw_len_                                                  # (N_lb_sw,)
+                lb_start_hours = (
+                    x[:, lb_sw_start_idx, self.calendar_hour_channel]
+                    .long().clamp(0, 23)
+                )                                                              # (B, N_lb_sw)
+                lb_sw_hour_vecs = _sinusoidal_hour_encoding(
+                    lb_start_hours, self.hour_encoding_dim,
+                )                                                              # (B, N_lb_sw, hour_enc_dim)
+                z_per_lb_sw = [
+                    torch.cat([z_per_lb_sw[k], lb_sw_hour_vecs[:, k, :]], dim=-1)
+                    for k in range(n_lb_sw_)
+                ]
 
         # 2) Lookback concept layer. Activations from the standard predictor,
         # embeddings INPUT-CONDITIONAL via two MLP branches:
@@ -706,14 +858,11 @@ class ConceptBottleneckModel(nn.Module):
         lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
         lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
 
-        # 2b) Global forecast concept layer (OPTIONAL). Reads z_global to
-        # produce ONE concept activation pattern characterizing the WHOLE
-        # forecast window. Its context is reused across every sub-window's
-        # decoding.
-        if self.n_global_forecast_concepts > 0:
-            # Reads the FORECAST encoder's whole-window summary (not the
-            # lookback z_global) so global-forecast concepts derive from the
-            # forecast window, matching how their labels are computed.
+        # 2b) Global forecast concept layer (OPTIONAL, future_aware only).
+        # Reads the FORECAST encoder's whole-window summary to produce one
+        # concept activation pattern characterizing the WHOLE forecast window.
+        # Skipped entirely in lookback_only mode.
+        if self._forecast_side_active and self.n_global_forecast_concepts > 0:
             gfc_logits = self.global_forecast_concept_predictor(z_global_forecast)   # (B, K_gfc)
             gfc_acts   = torch.sigmoid(gfc_logits)
             g_ep = self.global_forecast_emb_plus(z_global_forecast).reshape(
@@ -730,8 +879,45 @@ class ConceptBottleneckModel(nn.Module):
             gfc_acts   = x.new_zeros((B, 0))
             gfc_ctx    = x.new_zeros((B, 0))
 
-        # 3) Forecast concept layer(s).
-        if self.single_forecast_bottleneck:
+        # 2c) LOOKBACK-SUB-WINDOW concept layer (lookback_only only).
+        # Per-lookback-sub-window predictor + shared CEM ± MLPs. Structure
+        # mirrors the forecast sub-window layer. Produces:
+        #   lb_sw_logits : (B, N_lb_sw, K_lb_sw)  -- for BCE loss
+        #   lb_sw_ctx_list: list of N_lb_sw (B, K_lb_sw * d) tensors --
+        #                   fed to the BiGRU
+        lb_sw_ctx_list: list = []
+        if (self.experiment_mode == "lookback_only"
+                and self.n_lookback_subwindow_concepts > 0):
+            lb_sw_logits_list = []
+            lb_sw_acts_list   = []
+            for k in range(self.n_lookback_subwindows):
+                lg = self.lookback_sw_concept_predictors[k](z_per_lb_sw[k])    # (B, K_lb_sw)
+                ac = torch.sigmoid(lg)                                          # (B, K_lb_sw)
+                ep = self.lookback_sw_emb_plus(z_per_lb_sw[k]).reshape(
+                    B, self.n_lookback_subwindow_concepts, self.concept_emb_dim,
+                )
+                em = self.lookback_sw_emb_minus(z_per_lb_sw[k]).reshape(
+                    B, self.n_lookback_subwindow_concepts, self.concept_emb_dim,
+                )
+                a_k = ac.unsqueeze(-1)                                          # (B, K_lb_sw, 1)
+                ctx_3d_k = a_k * ep + (1.0 - a_k) * em                          # (B, K_lb_sw, d)
+                ctx_k = ctx_3d_k.reshape(B, -1)                                 # (B, K_lb_sw * d)
+                lb_sw_logits_list.append(lg)
+                lb_sw_acts_list.append(ac)
+                lb_sw_ctx_list.append(ctx_k)
+            lb_sw_logits = torch.stack(lb_sw_logits_list, dim=1)                # (B, N_lb_sw, K_lb_sw)
+            lb_sw_acts   = torch.stack(lb_sw_acts_list,   dim=1)                # (B, N_lb_sw, K_lb_sw)
+        else:
+            lb_sw_logits = x.new_zeros((B, 0, 0))
+            lb_sw_acts   = x.new_zeros((B, 0, 0))
+
+        # 3) Forecast concept layer(s). Only active in future_aware mode.
+        if not self._forecast_side_active:
+            # In lookback_only, no forecast SW concept computation happens.
+            fc_ctx_list = []
+            fc_logits   = x.new_zeros((B, 0, 0))
+            fc_acts     = x.new_zeros((B, 0, 0))
+        elif self.single_forecast_bottleneck:
             # Ablation mode: ONE forecast predictor on the FORECAST encoder's
             # whole-window summary (z_global_forecast). The same concept
             # context is reused for every sub-window's decoding.
@@ -772,19 +958,35 @@ class ConceptBottleneckModel(nn.Module):
             fc_logits = torch.stack(fc_logits_list, dim=1)         # (B, N, K_fc)
             fc_acts   = torch.stack(fc_acts_list,   dim=1)         # (B, N, K_fc)
 
-        # 3b) Sequence-aware refinement: BiGRU over the N sub-window contexts.
-        # Projects each fc_ctx[k] to a small summary, runs a bidirectional GRU
-        # across sub-windows, and yields a per-sub-window cross-context vector
-        # that the decoder consumes alongside fc_ctx[k]. Skipped in single-
-        # forecast-bottleneck mode (degenerate -- same context at every k).
+        # 3b) Sequence-aware refinement: BiGRU over per-sub-window contexts.
+        # In future_aware mode: BiGRU walks FORECAST sub-window contexts
+        #     (fc_ctx_list). Per-position output is fed into that sub-window's
+        #     decoder input.
+        # In lookback_only mode: BiGRU walks LOOKBACK sub-window contexts
+        #     (lb_sw_ctx_list). Final-position output is a SINGLE VECTOR
+        #     summarising the whole lookback sequence, reused as-is for
+        #     every FORECAST sub-window's decoder input.
+        sw_enhanced_forecast_side: torch.Tensor | None = None   # per-forecast-sw
+        sw_enhanced_lookback_shared: torch.Tensor | None = None  # single vector
+
         if (self.sw_gru_hidden > 0
                 and not self.single_forecast_bottleneck
                 and hasattr(self, "sw_context_gru")):
-            fc_ctx_stack = torch.stack(fc_ctx_list, dim=1)           # (B, N, K_fc*d)
-            sw_summaries = self.sw_context_summary(fc_ctx_stack)      # (B, N, sw_summary_dim)
-            sw_enhanced, _ = self.sw_context_gru(sw_summaries)        # (B, N, 2*sw_gru_hidden)
-        else:
-            sw_enhanced = None
+            if self._forecast_side_active and fc_ctx_list:
+                fc_ctx_stack = torch.stack(fc_ctx_list, dim=1)           # (B, N, K_fc*d)
+                sw_summaries = self.sw_context_summary(fc_ctx_stack)      # (B, N, sw_summary_dim)
+                sw_enhanced, _ = self.sw_context_gru(sw_summaries)        # (B, N, 2*sw_gru_hidden)
+                sw_enhanced_forecast_side = sw_enhanced
+            elif (not self._forecast_side_active) and lb_sw_ctx_list:
+                lb_sw_ctx_stack = torch.stack(lb_sw_ctx_list, dim=1)      # (B, N_lb_sw, K_lb_sw*d)
+                lb_summaries = self.sw_context_summary(lb_sw_ctx_stack)   # (B, N_lb_sw, sw_summary_dim)
+                lb_enhanced, _ = self.sw_context_gru(lb_summaries)        # (B, N_lb_sw, 2*sw_gru_hidden)
+                # Pool across the LOOKBACK sub-window axis to get a single
+                # shared vector reused for every forecast-side decoding.
+                # Mean-pool works fine here because we already stacked the
+                # BiGRU's per-position outputs; mean over N_lb_sw retains the
+                # sequence summary.
+                sw_enhanced_lookback_shared = lb_enhanced.mean(dim=1)      # (B, 2*sw_gru_hidden)
 
         # (Residual channel removed -- this is a strict CBM.
         #  ``disable_residual`` is retained as a no-op arg so old callers /
@@ -796,12 +998,20 @@ class ConceptBottleneckModel(nn.Module):
         for k in range(self.n_subwindows):
             sw_idx = torch.full((B,), k, dtype=torch.long, device=device)
             sw_emb = self.sub_window_id_embed(sw_idx)          # (B, sw_id_dim)
-            parts = [lb_ctx, fc_ctx_list[k]]
-            if sw_enhanced is not None:
-                parts.append(sw_enhanced[:, k, :])              # (B, 2*sw_gru_hidden), cross-sub-window context
-            if self.n_global_forecast_concepts > 0:
-                parts.append(gfc_ctx)                           # (B, K_gfc * d), shared across sub-windows
-            parts.append(sw_emb)
+
+            if self._forecast_side_active:
+                parts = [lb_ctx, fc_ctx_list[k]]
+                if sw_enhanced_forecast_side is not None:
+                    parts.append(sw_enhanced_forecast_side[:, k, :])
+                if self.n_global_forecast_concepts > 0:
+                    parts.append(gfc_ctx)
+                parts.append(sw_emb)
+            else:
+                # lookback_only: dec_in = lb_ctx + (shared LB-BiGRU summary) + sw_emb
+                parts = [lb_ctx]
+                if sw_enhanced_lookback_shared is not None:
+                    parts.append(sw_enhanced_lookback_shared)
+                parts.append(sw_emb)
             dec_in = torch.cat(parts, dim=-1)
             # ---- Residual sub-decoder stack (NHiTS-style) ----
             # Each block produces a signed delta forecast; the deltas sum
@@ -832,5 +1042,9 @@ class ConceptBottleneckModel(nn.Module):
             "fc_acts":   fc_acts,
             "gfc_logits": gfc_logits, # (B, K_gfc); K_gfc=0 -> empty tensor
             "gfc_acts":   gfc_acts,
+            # LOOKBACK-SUB-WINDOW concept outputs (lookback_only mode only).
+            # Shapes: (B, N_lb_sw, K_lb_sw). Empty tensor in future_aware mode.
+            "lb_sw_logits": lb_sw_logits,
+            "lb_sw_acts":   lb_sw_acts,
             # (residual removed -- strict CBM, no bypass to regularize)
         }

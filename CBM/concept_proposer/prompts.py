@@ -348,6 +348,37 @@ ONLY lookback concepts may use PM2.5, because the history is observed.""",
   }}
 ]""",
 
+    "example_lookback_sub_window_concepts": """[
+  {{
+    "id": 0,
+    "name": "is_lookback_morning_rush_block",
+    "description": "Lookback sub-window starts in the morning rush hour (7-10).",
+    "category": "time_of_day",
+    "function": "def matches(sub_seg):\\n    h = sub_seg.get('time_context', {{}}).get('start', {{}}).get('hour')\\n    return h is not None and 7 <= h <= 10"
+  }},
+  {{
+    "id": 1,
+    "name": "is_lookback_humid_block",
+    "description": "Lookback sub-window dew point mean above 10 deg C (high absolute humidity in this recent chunk of history).",
+    "category": "weather_other",
+    "function": "def matches(sub_seg):\\n    d = sub_seg.get('stats', {{}}).get('DEWP', {{}}).get('mean')\\n    return d is not None and d > 10"
+  }},
+  {{
+    "id": 2,
+    "name": "is_lookback_pm25_spike_block",
+    "description": "Lookback sub-window PM2.5 max above 100 ug/m3 -- a pollution spike in this recent 6-hour history chunk. This concept CAN reference PM2.5 because the lookback is observed (unlike forecast sub-window concepts which cannot).",
+    "category": "pollutant_chemistry",
+    "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('PM2.5', {{}}).get('max')\\n    return m is not None and m > 100"
+  }},
+  {{
+    "id": 3,
+    "name": "is_lookback_calm_block",
+    "description": "Lookback sub-window wind speed mean below 1.5 m/s -- stagnant air in this recent history chunk.",
+    "category": "weather_dynamics",
+    "function": "def matches(sub_seg):\\n    w = sub_seg.get('stats', {{}}).get('WSPM', {{}}).get('mean')\\n    return w is not None and w < 1.5"
+  }}
+]""",
+
     "example_forecast_global_concepts": """[
   {{
     "id": 0,
@@ -493,7 +524,7 @@ have at test time?" If yes (or unsure), REPLACE IT with a covariate-only rule.
 
 ============================================================================
 
-Propose THREE concept sets:
+Propose FOUR concept sets:
 
   * Exactly **{{n_lookback_concepts}} LOOKBACK concepts**. These probe the HISTORY:
     things like "lookback temperature was cold", "lookback load was high",
@@ -502,6 +533,20 @@ Propose THREE concept sets:
     `lookback_start`/`lookback_end`).
     LOOKBACK concepts MAY use ``lookback_stats['PM2.5']`` because the history
     is observed.
+
+  * Exactly **{{n_lookback_sub_window_concepts}} LOOKBACK-SUB-WINDOW concepts**.
+    These probe ONE sub-window of the LOOKBACK history at a time (each rule
+    fires {{n_lookback_subwindows}} times per segment, once per lookback
+    sub-window): things like "this lookback sub-window is calm", "this
+    lookback sub-window had a PM2.5 spike", "this lookback sub-window is
+    morning rush hour". Operate on ``sub_seg['stats']`` and
+    ``sub_seg['time_context']`` (especially ``start.hour``, ``season``).
+    These are LOCAL, time-resolved descriptors of the RECENT HISTORY.
+    LOOKBACK-SUB-WINDOW concepts MAY use ``stats['PM2.5']`` because the
+    lookback is observed. They're intended for the ``experiment_mode=
+    'lookback_only'`` training path (no future features available), where
+    all forecasting signal has to come from characterising recent history
+    chunks.
 
   * Exactly **{{n_forecast_concepts}} FORECAST-SUB-WINDOW concepts**. These probe
     ONE sub-window of the forecast at a time (each rule fires {{n_subwindows}}
@@ -598,14 +643,21 @@ Return a single JSON object with this exact shape:
 
 ```json
 {{{{
-  "lookback_concepts":        [...{_BLOCK['example_lookback_concepts']}...],
-  "forecast_concepts":        [...{_BLOCK['example_forecast_concepts']}...],
-  "forecast_global_concepts": [...{_BLOCK['example_forecast_global_concepts']}...]
+  "lookback_concepts":            [...{_BLOCK['example_lookback_concepts']}...],
+  "lookback_sub_window_concepts": [...{_BLOCK['example_lookback_sub_window_concepts']}...],
+  "forecast_concepts":            [...{_BLOCK['example_forecast_concepts']}...],
+  "forecast_global_concepts":     [...{_BLOCK['example_forecast_global_concepts']}...]
 }}}}
 ```
 
-IDs in each array run 0..K-1 independently (lookback ids start at 0, forecast
-sub-window ids start at 0, forecast-global ids start at 0).
+IDs in each array run 0..K-1 independently (lookback ids start at 0,
+lookback-sub-window ids start at 0, forecast-sub-window ids start at 0,
+forecast-global ids start at 0).
+
+The trainer uses either the forecast side (in ``experiment_mode='future_aware'``)
+OR the lookback-sub-window side (in ``experiment_mode='lookback_only'``);
+the LOOKBACK (global) set is always used. Emitting all four in one shot means
+one LLM run supports both experiment modes.
 
 Return ONLY the JSON object. No prose before or after.
 """

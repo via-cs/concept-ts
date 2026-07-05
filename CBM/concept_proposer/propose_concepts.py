@@ -116,6 +116,7 @@ def _minutes_per_step(metadata: dict) -> float:
 
 
 def _render_prompt(n_lookback_concepts: int,
+                   n_lookback_sub_window_concepts: int,
                    n_forecast_concepts: int,
                    n_forecast_global_concepts: int,
                    cluster_bundle: dict,
@@ -123,6 +124,9 @@ def _render_prompt(n_lookback_concepts: int,
     n_sw = int(metadata.get("n_subwindows", 4))
     out_len = int(metadata.get("output_length", 96))
     sw_len = int(metadata.get("subwindow_length", out_len // n_sw))
+    n_lb_sw = int(metadata.get("n_lookback_subwindows", n_sw))
+    lb_sw_len = int(metadata.get("lookback_subwindow_length",
+                                  int(metadata.get("input_length", 96)) // n_lb_sw))
     # Derive hours-per-sub-window from the dataset's actual sampling period
     # (parsed from metadata) rather than assuming 15-min resolution — PRSA is
     # hourly, LOF is 15-min, and the surrounding prompt text already states
@@ -131,9 +135,11 @@ def _render_prompt(n_lookback_concepts: int,
 
     return INITIAL_PROMPT.format(
         n_lookback_concepts=n_lookback_concepts,
+        n_lookback_sub_window_concepts=n_lookback_sub_window_concepts,
         n_forecast_concepts=n_forecast_concepts,
         n_forecast_global_concepts=n_forecast_global_concepts,
         n_subwindows=n_sw,
+        n_lookback_subwindows=n_lb_sw,
         subwindow_length=sw_len,
         subwindow_hours=f"{sw_hours:.1f}",
         n_clusters=len(cluster_bundle["cluster_summaries"]),
@@ -157,13 +163,16 @@ def _render_prompt(n_lookback_concepts: int,
 
 def _call_llm(prompt: str,
               n_lookback_concepts: int,
+              n_lookback_sub_window_concepts: int,
               n_forecast_concepts: int,
               n_forecast_global_concepts: int,
-              model: str = DEFAULT_MODEL) -> tuple[list[dict], list[dict], list[dict]]:
-    """Returns (lookback_concepts, forecast_concepts, forecast_global_concepts)."""
+              model: str = DEFAULT_MODEL) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Returns (lookback_concepts, lookback_sub_window_concepts,
+    forecast_concepts, forecast_global_concepts)."""
     print("\n" + "=" * 72)
     print(f"STAGE 3 — CALLING CLAUDE  "
           f"(model={model}, requesting {n_lookback_concepts} lookback + "
+          f"{n_lookback_sub_window_concepts} lookback-sub-window + "
           f"{n_forecast_concepts} forecast sub-window + "
           f"{n_forecast_global_concepts} forecast-global concepts)")
     print("=" * 72)
@@ -175,30 +184,37 @@ def _call_llm(prompt: str,
     response_text = call_claude(prompt, system_prompt=system_prompt, model=model)
     obj = extract_json_object(response_text)
 
-    lb_list  = obj.get("lookback_concepts")
-    fc_list  = obj.get("forecast_concepts")
-    gfc_list = obj.get("forecast_global_concepts", [])  # optional for backward compat
+    lb_list     = obj.get("lookback_concepts")
+    lb_sw_list  = obj.get("lookback_sub_window_concepts", [])  # optional (new field)
+    fc_list     = obj.get("forecast_concepts")
+    gfc_list    = obj.get("forecast_global_concepts", [])  # optional for backward compat
     if not isinstance(lb_list, list) or not isinstance(fc_list, list):
         raise ValueError(
             "Claude response missing required keys 'lookback_concepts' and "
             f"'forecast_concepts'. Got keys: {list(obj.keys())}"
         )
+    if not isinstance(lb_sw_list, list):
+        lb_sw_list = []
     if not isinstance(gfc_list, list):
         gfc_list = []
-    print(f"  Received {len(lb_list)} lookback + {len(fc_list)} forecast + "
-          f"{len(gfc_list)} forecast-global concepts.")
+    print(f"  Received {len(lb_list)} lookback + {len(lb_sw_list)} lookback-sub-window "
+          f"+ {len(fc_list)} forecast + {len(gfc_list)} forecast-global concepts.")
     if len(lb_list) != n_lookback_concepts:
         print(f"  WARNING: requested {n_lookback_concepts} lookback, got {len(lb_list)}.")
+    if len(lb_sw_list) != n_lookback_sub_window_concepts:
+        print(f"  WARNING: requested {n_lookback_sub_window_concepts} lookback-sub-window, "
+              f"got {len(lb_sw_list)}.")
     if len(fc_list) != n_forecast_concepts:
         print(f"  WARNING: requested {n_forecast_concepts} forecast, got {len(fc_list)}.")
     if len(gfc_list) != n_forecast_global_concepts:
         print(f"  WARNING: requested {n_forecast_global_concepts} forecast-global, "
               f"got {len(gfc_list)}.")
 
-    for c in lb_list:  validate_concept_schema(c)
-    for c in fc_list:  validate_concept_schema(c)
-    for c in gfc_list: validate_concept_schema(c)
-    return lb_list, fc_list, gfc_list
+    for c in lb_list:     validate_concept_schema(c)
+    for c in lb_sw_list:  validate_concept_schema(c)
+    for c in fc_list:     validate_concept_schema(c)
+    for c in gfc_list:    validate_concept_schema(c)
+    return lb_list, lb_sw_list, fc_list, gfc_list
 
 
 # ===========================================================================
@@ -261,11 +277,31 @@ def _validate_one_lookback(c: dict, segments: list) -> dict:
 
 
 def _build_sub_segs(segments: list) -> list:
-    """Flatten segments into a list of sub_seg dicts: one per (seg, sub-window)."""
+    """Flatten segments into a list of sub_seg dicts: one per (seg, FORECAST-sub-window)."""
     sub_segs = []
     for seg in segments:
         cross = seg.get("cross_channel_stats", {})
         for k, sw in enumerate(seg.get("subwindow_stats") or []):
+            sub_segs.append({
+                "subwindow_idx":       int(sw.get("subwindow_idx", k)),
+                "stats":               sw.get("stats", {}),
+                "time_context":        sw.get("time_context", {}),
+                "cross_channel_stats": cross,
+            })
+    return sub_segs
+
+
+def _build_lb_sub_segs(segments: list) -> list:
+    """Flatten segments into a list of sub_seg dicts: one per (seg, LOOKBACK-sub-window).
+
+    Mirrors ``_build_sub_segs`` but reads from ``lookback_subwindow_stats``
+    (the field added by the preprocessing step for the ``lookback_only``
+    experiment mode).
+    """
+    sub_segs = []
+    for seg in segments:
+        cross = seg.get("cross_channel_stats", {})
+        for k, sw in enumerate(seg.get("lookback_subwindow_stats") or []):
             sub_segs.append({
                 "subwindow_idx":       int(sw.get("subwindow_idx", k)),
                 "stats":               sw.get("stats", {}),
@@ -346,11 +382,12 @@ def _build_whole_forecast_sub_segs(segments: list[dict]) -> list:
 
 
 def _validate_and_print(lookback_concepts: list[dict],
+                        lookback_sub_window_concepts: list[dict],
                         forecast_concepts: list[dict],
                         forecast_global_concepts: list[dict],
                         segments: list[dict]
-                        ) -> tuple[list[dict], list[dict], list[dict],
-                                    dict, dict, dict]:
+                        ) -> tuple[list[dict], list[dict], list[dict], list[dict],
+                                    dict, dict, dict, dict]:
     print("\n" + "=" * 72)
     print(f"STAGE 4 — VALIDATING CONCEPTS")
     print("=" * 72)
@@ -360,15 +397,29 @@ def _validate_and_print(lookback_concepts: list[dict],
     assert n_sub == len(sub_segs)
     whole_fc_segs = _build_whole_forecast_sub_segs(segments)
 
-    lb_validated  = [_validate_one_lookback(c, segments) for c in lookback_concepts]
-    fc_validated  = [_validate_one_forecast(c, sub_segs) for c in forecast_concepts]
-    gfc_validated = [_validate_one_forecast(c, whole_fc_segs) for c in forecast_global_concepts]
+    # Lookback sub-window (used by experiment_mode='lookback_only')
+    lb_sub_segs = _build_lb_sub_segs(segments)
+    n_lb_sub = sum(len(s.get("lookback_subwindow_stats") or []) for s in segments)
+
+    lb_validated    = [_validate_one_lookback(c, segments) for c in lookback_concepts]
+    lb_sw_validated = [_validate_one_forecast(c, lb_sub_segs) for c in lookback_sub_window_concepts]
+    fc_validated    = [_validate_one_forecast(c, sub_segs) for c in forecast_concepts]
+    gfc_validated   = [_validate_one_forecast(c, whole_fc_segs) for c in forecast_global_concepts]
 
     lb_summary = _print_table(
         "LOOKBACK concepts",
         f"{len(segments)} segments",
         lb_validated,
     )
+    if lookback_sub_window_concepts:
+        lb_sw_summary = _print_table(
+            "LOOKBACK-SUB-WINDOW concepts (one rule applied to each lookback sub-window)",
+            f"{len(segments)} segments x {n_lb_sub // max(1, len(segments))} sub-windows "
+            f"= {n_lb_sub} sub_segs",
+            lb_sw_validated,
+        )
+    else:
+        lb_sw_summary = {}
     fc_summary = _print_table(
         "FORECAST concepts (one rule applied to each sub-window)",
         f"{len(segments)} segments x {n_sub // max(1, len(segments))} sub-windows = {n_sub} sub_segs",
@@ -382,15 +433,17 @@ def _validate_and_print(lookback_concepts: list[dict],
         )
     else:
         gfc_summary = {}
-    return lb_validated, fc_validated, gfc_validated, lb_summary, fc_summary, gfc_summary
+    return (lb_validated, lb_sw_validated, fc_validated, gfc_validated,
+            lb_summary,  lb_sw_summary,  fc_summary,  gfc_summary)
 
 
 # ===========================================================================
 # Step 5 — save
 # ===========================================================================
 
-def _save_results(lookback_raw, forecast_raw, forecast_global_raw,
-                  lookback_validated, forecast_validated, forecast_global_validated,
+def _save_results(lookback_raw, lookback_sub_window_raw, forecast_raw, forecast_global_raw,
+                  lookback_validated, lookback_sub_window_validated,
+                  forecast_validated, forecast_global_validated,
                   output_dir: str, metadata_extra: dict
                   ) -> tuple[str, str]:
     os.makedirs(output_dir, exist_ok=True)
@@ -400,9 +453,10 @@ def _save_results(lookback_raw, forecast_raw, forecast_global_raw,
     with open(raw_path, "w") as f:
         json.dump({
             "metadata": {"timestamp": timestamp, **metadata_extra},
-            "lookback_concepts":        lookback_raw,
-            "forecast_concepts":        forecast_raw,
-            "forecast_global_concepts": forecast_global_raw,
+            "lookback_concepts":            lookback_raw,
+            "lookback_sub_window_concepts": lookback_sub_window_raw,
+            "forecast_concepts":            forecast_raw,
+            "forecast_global_concepts":     forecast_global_raw,
         }, f, indent=2)
 
     def _summarise(validated):
@@ -413,26 +467,30 @@ def _save_results(lookback_raw, forecast_raw, forecast_global_raw,
         n_usable = by_status.get("ok", 0) + by_status.get("warning_balance", 0)
         return by_status, n_usable
 
-    lb_summary,  lb_usable  = _summarise(lookback_validated)
-    fc_summary,  fc_usable  = _summarise(forecast_validated)
-    gfc_summary, gfc_usable = _summarise(forecast_global_validated)
+    lb_summary,     lb_usable     = _summarise(lookback_validated)
+    lb_sw_summary,  lb_sw_usable  = _summarise(lookback_sub_window_validated)
+    fc_summary,     fc_usable     = _summarise(forecast_validated)
+    gfc_summary,    gfc_usable    = _summarise(forecast_global_validated)
 
     val_path = os.path.join(output_dir, f"concepts_validated_{timestamp}.json")
     with open(val_path, "w") as f:
         json.dump({
             "metadata": {
                 "timestamp": timestamp,
-                "lookback_validation_summary":        lb_summary,
-                "forecast_validation_summary":        fc_summary,
-                "forecast_global_validation_summary": gfc_summary,
-                "n_lookback_usable":        lb_usable,
-                "n_forecast_usable":        fc_usable,
-                "n_forecast_global_usable": gfc_usable,
+                "lookback_validation_summary":             lb_summary,
+                "lookback_sub_window_validation_summary":  lb_sw_summary,
+                "forecast_validation_summary":             fc_summary,
+                "forecast_global_validation_summary":      gfc_summary,
+                "n_lookback_usable":            lb_usable,
+                "n_lookback_sub_window_usable": lb_sw_usable,
+                "n_forecast_usable":            fc_usable,
+                "n_forecast_global_usable":     gfc_usable,
                 **metadata_extra,
             },
-            "lookback_concepts":        lookback_validated,
-            "forecast_concepts":        forecast_validated,
-            "forecast_global_concepts": forecast_global_validated,
+            "lookback_concepts":            lookback_validated,
+            "lookback_sub_window_concepts": lookback_sub_window_validated,
+            "forecast_concepts":            forecast_validated,
+            "forecast_global_concepts":     forecast_global_validated,
         }, f, indent=2)
 
     print(f"\nWrote raw concepts       -> {raw_path}")
@@ -454,6 +512,12 @@ def main():
                    help="K_lb -- concepts for the lookback bottleneck. Default 20 "
                         "(was 10) -- a wider concept channel gives the encoder "
                         "more legitimate concept-routed capacity.")
+    p.add_argument("--n_lookback_sub_window_concepts", type=int, default=30,
+                   help="K_lb_sw -- concepts shared across the LOOKBACK sub-window "
+                        "bottlenecks (used by experiment_mode='lookback_only'). "
+                        "One rule fires N_lb_sw times per segment (once per lookback "
+                        "sub-window). Default 30. Set 0 to have the proposer not "
+                        "request this concept type at all.")
     p.add_argument("--n_forecast_concepts", type=int, default=50,
                    help="K_fc -- concepts shared across the forecast sub-window "
                         "bottlenecks. Default 50 (was 25) -- same motivation as "
@@ -490,20 +554,26 @@ def main():
             p.error("--concepts_path is required when --validate_only is set.")
         with open(args.concepts_path) as f:
             blob = json.load(f)
-        lb_raw  = blob.get("lookback_concepts") or []
-        fc_raw  = blob.get("forecast_concepts") or []
-        gfc_raw = blob.get("forecast_global_concepts") or []
+        lb_raw     = blob.get("lookback_concepts") or []
+        lb_sw_raw  = blob.get("lookback_sub_window_concepts") or []
+        fc_raw     = blob.get("forecast_concepts") or []
+        gfc_raw    = blob.get("forecast_global_concepts") or []
         with open(args.segments_path) as f:
             segments = json.load(f)["segments"]
-        print(f"Loaded {len(lb_raw)} lookback + {len(fc_raw)} forecast + "
-              f"{len(gfc_raw)} forecast-global concepts.")
+        print(f"Loaded {len(lb_raw)} lookback + {len(lb_sw_raw)} lookback-sub-window + "
+              f"{len(fc_raw)} forecast + {len(gfc_raw)} forecast-global concepts.")
         print(f"Loaded {len(segments)} segments.")
-        lb_val, fc_val, gfc_val, _, _, _ = _validate_and_print(
-            lb_raw, fc_raw, gfc_raw, segments,
+        lb_val, lb_sw_val, fc_val, gfc_val, _, _, _, _ = _validate_and_print(
+            lb_raw, lb_sw_raw, fc_raw, gfc_raw, segments,
         )
         _save_results(
-            lookback_raw=lb_raw, forecast_raw=fc_raw, forecast_global_raw=gfc_raw,
-            lookback_validated=lb_val, forecast_validated=fc_val,
+            lookback_raw=lb_raw,
+            lookback_sub_window_raw=lb_sw_raw,
+            forecast_raw=fc_raw,
+            forecast_global_raw=gfc_raw,
+            lookback_validated=lb_val,
+            lookback_sub_window_validated=lb_sw_val,
+            forecast_validated=fc_val,
             forecast_global_validated=gfc_val,
             output_dir=args.output_dir,
             metadata_extra={
@@ -528,6 +598,7 @@ def main():
 
     prompt = _render_prompt(
         n_lookback_concepts=args.n_lookback_concepts,
+        n_lookback_sub_window_concepts=args.n_lookback_sub_window_concepts,
         n_forecast_concepts=args.n_forecast_concepts,
         n_forecast_global_concepts=args.n_forecast_global_concepts,
         cluster_bundle=bundle,
@@ -539,31 +610,39 @@ def main():
         f.write(prompt)
     print(f"  (Rendered prompt saved to {prompt_path})")
 
-    lb_raw, fc_raw, gfc_raw = _call_llm(
+    lb_raw, lb_sw_raw, fc_raw, gfc_raw = _call_llm(
         prompt,
         n_lookback_concepts=args.n_lookback_concepts,
+        n_lookback_sub_window_concepts=args.n_lookback_sub_window_concepts,
         n_forecast_concepts=args.n_forecast_concepts,
         n_forecast_global_concepts=args.n_forecast_global_concepts,
         model=args.model,
     )
-    lb_val, fc_val, gfc_val, _, _, _ = _validate_and_print(
-        lb_raw, fc_raw, gfc_raw, bundle["segments"],
+    lb_val, lb_sw_val, fc_val, gfc_val, _, _, _, _ = _validate_and_print(
+        lb_raw, lb_sw_raw, fc_raw, gfc_raw, bundle["segments"],
     )
 
     _save_results(
-        lookback_raw=lb_raw, forecast_raw=fc_raw, forecast_global_raw=gfc_raw,
-        lookback_validated=lb_val, forecast_validated=fc_val,
+        lookback_raw=lb_raw,
+        lookback_sub_window_raw=lb_sw_raw,
+        forecast_raw=fc_raw,
+        forecast_global_raw=gfc_raw,
+        lookback_validated=lb_val,
+        lookback_sub_window_validated=lb_sw_val,
+        forecast_validated=fc_val,
         forecast_global_validated=gfc_val,
         output_dir=args.output_dir,
         metadata_extra={
             "mode": "propose",
-            "n_lookback_concepts_requested":        args.n_lookback_concepts,
-            "n_forecast_concepts_requested":        args.n_forecast_concepts,
-            "n_forecast_global_concepts_requested": args.n_forecast_global_concepts,
-            "n_clusters":                           args.n_clusters,
-            "n_subwindows":                         metadata.get("n_subwindows"),
-            "segments_path":                        args.segments_path,
-            "dataset":                              metadata.get("dataset_name", "LOF/RE"),
+            "n_lookback_concepts_requested":            args.n_lookback_concepts,
+            "n_lookback_sub_window_concepts_requested": args.n_lookback_sub_window_concepts,
+            "n_forecast_concepts_requested":            args.n_forecast_concepts,
+            "n_forecast_global_concepts_requested":     args.n_forecast_global_concepts,
+            "n_clusters":                               args.n_clusters,
+            "n_subwindows":                             metadata.get("n_subwindows"),
+            "n_lookback_subwindows":                    metadata.get("n_lookback_subwindows"),
+            "segments_path":                            args.segments_path,
+            "dataset":                                  metadata.get("dataset_name", "LOF/RE"),
         },
     )
 
