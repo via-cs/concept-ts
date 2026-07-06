@@ -211,6 +211,29 @@ def get_args():
     p.add_argument("--sw_summary_dim", type=int, default=64,
                    help="Width of the Linear projection (K_fc*d -> this) applied "
                         "before the BiGRU. Only used when --sw_gru_hidden > 0.")
+    # ---- Attention-weighted temporal pool (replaces mean pooling) ----------
+    p.add_argument("--attn_pool_hidden", type=int, default=32,
+                   help="Hidden width of the additive-attention MLP inside "
+                        "each AttentionPool. The concept-side pools "
+                        "(LOOKBACK-global, FORECAST-global, per-FORECAST-SW, "
+                        "per-LOOKBACK-SW) all use pools of this width. Set "
+                        "small (32 default) -- the module is a pooling layer, "
+                        "not a mixer.")
+    # ---- CEM RandInt training ---------------------------------------------
+    p.add_argument("--randint_p", type=float, default=0.25,
+                   help="Random-Intervention probability (Zarlenga et al. "
+                        "2022). During training only, each concept "
+                        "activation is REPLACED with its ground-truth label "
+                        "with this probability, independently per concept, "
+                        "per sample, per step. The intervened activation "
+                        "flows into the CEM +/- embedding mixing, teaching "
+                        "the decoder to interpret the activation VALUE "
+                        "instead of leaking information through the "
+                        "embedding heads. Set 0.0 to disable and recover "
+                        "pre-RandInt behavior. Typical values 0.1 - 0.5; "
+                        "the paper's default is 0.25. RandInt is applied to "
+                        "ALL four CEM concept layers (LB, FC-SW, GFC, LB-SW) "
+                        "when their labels are provided.")
     # NOTE: --residual_dim has been removed. The model is now a STRICT CBM
     # with no encoder-to-decoder residual bypass. Every input to the sub-
     # decoder is a concept-derived context vector or a positional embedding.
@@ -400,7 +423,20 @@ def train_one_epoch(model, loader, optimizer, device,
         fc_lab    = fc_lab.to(device)
         gfc_lab   = gfc_lab.to(device)
         lb_sw_lab = lb_sw_lab.to(device)
-        out = model(x)
+        # Pass concept labels for CEM Random-Intervention. Only entries with
+        # a non-empty label tensor are forwarded; empty labels (e.g. fc_lab
+        # in lookback_only mode) are omitted so the model skips RandInt for
+        # that layer instead of touching an empty tensor.
+        concept_labels: dict[str, torch.Tensor] = {}
+        if lb_lab.numel() > 0:
+            concept_labels["lb"] = lb_lab
+        if fc_lab.numel() > 0:
+            concept_labels["fc"] = fc_lab
+        if gfc_lab.numel() > 0:
+            concept_labels["gfc"] = gfc_lab
+        if lb_sw_lab.numel() > 0:
+            concept_labels["lb_sw"] = lb_sw_lab
+        out = model(x, concept_labels=concept_labels)
 
         loss_f   = l1_fn(out["y_hat"],     y)
         loss_lb  = bce_fn(out["lb_logits"], lb_lab)
@@ -993,6 +1029,16 @@ def main():
         single_forecast_bottleneck = args.single_forecast_bottleneck,
         use_rev_in   = 1,
         norm_type    = "B",
+        # ---- Attention-weighted temporal pool + CEM RandInt ----------------
+        # Two structural fixes for CEM leakage / sequence-invariance issues:
+        # * attn_pool_hidden: width of the attention MLP that REPLACES the
+        #   ``mean(dim=1)`` calls previously used to feed the concept-side
+        #   predictors. See AttentionPool in concept_bottleneck.py.
+        # * randint_p: probability of CEM Random-Intervention per concept
+        #   during training. Requires the trainer to pass concept_labels
+        #   to model.forward() (which it does; see train_one_epoch).
+        attn_pool_hidden = args.attn_pool_hidden,
+        randint_p        = args.randint_p,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  total trainable params: {n_params/1e6:.2f} M")

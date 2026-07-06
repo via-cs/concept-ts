@@ -9,17 +9,26 @@ Architecture
        |
        +-- lookback_encoder( x[:, :T_in, :] )    # SEES ONLY THE HISTORY
        |     enc_lb in (B, T_in, D)              # target RevIN'd (revin_all)
-       |     z_global = enc_lb.mean(dim=1)       # (B, D) -> LOOKBACK bottleneck
+       |     z_global = AttnPool(enc_lb)         # (B, D) -> LOOKBACK bottleneck
        |
        +-- forecast_encoder( x[:, T_in:, :] )    # SEES ONLY THE FORECAST WINDOW
              enc_fc in (B, T_out, D)             # target masked (mask_all)
-             z_sw_k            = enc_fc[:, k*T_sw:(k+1)*T_sw, :].mean(dim=1)  # per sub-window
-             z_global_forecast = enc_fc.mean(dim=1)   # (B, D) -> GLOBAL-FORECAST bottleneck
+             z_sw_k            = AttnPool(enc_fc[:, k*T_sw:(k+1)*T_sw, :])  # per sub-window
+             z_global_forecast = AttnPool(enc_fc)     # (B, D) -> GLOBAL-FORECAST bottleneck
 
     Two SEPARATE-WEIGHT encoders give a HARD lookback/forecast information
     barrier: lookback concepts are provably a function of the history, and
     forecast concepts a function of the forecast window. (use_time_pool=False
     on both; the CBM does the pooling.)
+
+    Temporal pooling is a LEARNED, ORDER-DEPENDENT attention pool (AttnPool,
+    additive Bahdanau attention over the time axis) -- NOT a plain mean --
+    so order-sensitive concepts (is_pm25_increasing / _declining, etc.) are
+    visible to the concept predictors. Training also uses CEM Random-
+    Intervention (randint_p): during training only, each concept activation
+    is swapped for its ground-truth label with prob randint_p before entering
+    the +/- embedding mix, reducing information leakage through the concept
+    activation channel.
        |
        +-- Lookback concept layer (full CEM) -----------------------------+
        |   lb_logits = Linear(D, K_lb)(z_global)                          |
@@ -144,6 +153,63 @@ def _sinusoidal_hour_encoding(hours: torch.Tensor, dim: int) -> torch.Tensor:
     h = hours.float().unsqueeze(-1)                          # (B, N, 1)
     angles = 2 * math.pi * h / periods_t                     # (B, N, n_freqs)
     return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (B, N, dim)
+
+
+# ---------------------------------------------------------------------------
+# Attention-weighted temporal pool
+# ---------------------------------------------------------------------------
+class AttentionPool(nn.Module):
+    """Bahdanau-style additive attention pool over the TIME axis.
+
+    Replaces a permutation-invariant ``x.mean(dim=1)`` with a learned
+    weighted average where the weights are computed from x itself. This
+    lets downstream layers see an ORDER-DEPENDENT summary of a temporal
+    slice -- the same slice with its timesteps shuffled would yield the
+    same mean pool, but a different attention pool.
+
+    Why this matters here: the CBM's concept predictors sit on top of
+    these pooled vectors. Concepts whose truth values depend on ORDER
+    (e.g. ``is_pm25_increasing``, ``is_pm25_declining``,
+    ``peak_in_first_half``) cannot be reliably decoded from a mean pool
+    because two temporal slices with identical means and different
+    orderings look identical to the predictor. An attention pool can
+    up-weight the endpoints, or the trend-changing sections, so the
+    pooled vector actually reflects the ordering.
+
+    Design
+    ------
+    scores = W2 · tanh(W1 · x)           # (B, T, 1)
+    alpha  = softmax(scores, dim=T)      # (B, T, 1)  positional weights
+    pooled = sum_t alpha_t * x_t         # (B, D)
+
+    ``hidden`` is the intermediate width of the attention MLP. Small by
+    design (default 32) -- this module is a pooling layer, not a mixer.
+
+    ``mask`` (optional) can be used to exclude timesteps (e.g. padding).
+    True marks a VALID position; False marks a masked-out one.
+    """
+
+    def __init__(self, d_model: int, hidden: int = 32, dropout: float = 0.0):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(int(d_model), int(hidden)),
+            nn.Tanh(),
+            nn.Linear(int(hidden), 1),
+        )
+        self.dropout = nn.Dropout(float(dropout)) if dropout and dropout > 0 else None
+
+    def forward(self, x: torch.Tensor,
+                mask: torch.Tensor | None = None) -> torch.Tensor:
+        # x: (B, T, D) -> pooled: (B, D)
+        scores = self.proj(x)                                                    # (B, T, 1)
+        if mask is not None:
+            # mask: (B, T) with True = valid
+            scores = scores.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        alpha = torch.softmax(scores, dim=1)                                     # (B, T, 1)
+        if self.dropout is not None:
+            alpha = self.dropout(alpha)
+        pooled = (alpha * x).sum(dim=1)                                          # (B, D)
+        return pooled
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +384,32 @@ class ConceptBottleneckModel(nn.Module):
         # enough resolution for hour-of-day concepts. Only used when
         # ``calendar_hour_channel >= 0``.
         hour_encoding_dim: int = 8,
+        # ---- Attention-weighted temporal pool ------------------------------
+        # Replaces the sequence-destroying ``mean(dim=1)`` pool that used to
+        # feed the concept predictors. Each pooled tensor (LOOKBACK global,
+        # FORECAST global, per-FORECAST-SW, per-LOOKBACK-SW) now goes through
+        # an AttentionPool module which computes learned per-timestep weights
+        # via a two-layer additive-attention MLP (Bahdanau-style). This gives
+        # the concept predictors an ORDER-DEPENDENT summary of each temporal
+        # slice, so concepts like ``is_pm25_increasing`` are no longer
+        # invisible to the concept head at pool time. ``attn_pool_hidden`` is
+        # the intermediate width of the attention MLP -- small by design.
+        attn_pool_hidden: int = 32,
+        # ---- Random-Intervention (RandInt) training -------------------------
+        # CEM training trick from Zarlenga et al. 2022. During training only,
+        # each concept activation is REPLACED with its ground-truth label
+        # with probability ``randint_p`` (independently per concept, per
+        # sample, per training step). The intervened activation flows into
+        # the CEM ± embedding mixing, so the decoder learns to correctly
+        # respond to concept-activation VALUES (0 vs 1) rather than to
+        # information leaked through the two embedding heads.
+        #
+        # Set ``randint_p = 0.0`` to disable and recover the original
+        # CEM-without-intervention behavior. Typical values are 0.1 - 0.5;
+        # the CEM paper defaults to 0.25. Interventions are only applied
+        # when ``concept_labels`` is passed to ``forward``, so evaluation
+        # never intervenes -- only training does.
+        randint_p: float = 0.0,
     ):
         super().__init__()
         if output_length % n_subwindows != 0:
@@ -547,6 +639,42 @@ class ConceptBottleneckModel(nn.Module):
         # self.hour_encoding_dim is already set above where the forecast
         # concept predictors were built with input dim mid_dim + hour_enc_dim.
 
+        # ---- Attention-weighted temporal pools ----
+        # One pool per temporal-scale × experiment-mode combination:
+        #   * LOOKBACK-global pool  -- always built (used in both modes)
+        #   * FORECAST-global pool  -- future_aware only
+        #   * FORECAST-SW pool      -- future_aware only, SHARED across the N
+        #                              forecast sub-windows (they are all the
+        #                              same task, applied to same-length slices)
+        #   * LOOKBACK-SW pool      -- lookback_only only, SHARED across the
+        #                              N_lb lookback sub-windows
+        # Sharing the sub-window pools across positions keeps the parameter
+        # count low; each pool learns a POSITION-INDEPENDENT rule for "which
+        # timesteps within a sub-window matter most" and lets the concept
+        # predictor at each sub-window see its own attention-weighted summary.
+        self.attn_pool_hidden = int(attn_pool_hidden)
+        self.attn_pool_lookback_global = AttentionPool(mid_dim, hidden=self.attn_pool_hidden)
+        if self._forecast_side_active:
+            self.attn_pool_forecast_global = AttentionPool(mid_dim, hidden=self.attn_pool_hidden)
+            self.attn_pool_forecast_sw     = AttentionPool(mid_dim, hidden=self.attn_pool_hidden)
+        else:
+            self.attn_pool_forecast_global = None
+            self.attn_pool_forecast_sw     = None
+        if (self.experiment_mode == "lookback_only"
+                and self.n_lookback_subwindow_concepts > 0):
+            self.attn_pool_lookback_sw = AttentionPool(mid_dim, hidden=self.attn_pool_hidden)
+        else:
+            self.attn_pool_lookback_sw = None
+
+        # ---- RandInt state ----
+        # Intervention probability; forward() reads this to gate the
+        # per-concept swap of predicted activation with ground-truth label.
+        self.randint_p = float(randint_p)
+        if not (0.0 <= self.randint_p <= 1.0):
+            raise ValueError(
+                f"randint_p must be in [0, 1], got {self.randint_p}"
+            )
+
         # ---- No residual channel (STRICT CBM) ----
         # There is no residual pathway from the encoder to the sub-decoder.
         # The residual_proj / residual_list machinery that used to exist here
@@ -660,27 +788,29 @@ class ConceptBottleneckModel(nn.Module):
 
         Returns
         -------
-        z_global           : (B, D) -- mean over the LOOKBACK encoder's
-                             per-timestep features. Fed to the LOOKBACK
-                             concept bottleneck. Provably a function of the
-                             history alone (the lookback encoder never sees
-                             the forecast window).
-        z_per_sw           : list of N (B, D) tensors -- mean over each
-                             forecast sub-window slice of the FORECAST
-                             encoder's features. Fed to the per-sub-window
-                             forecast bottlenecks (and the residual channel).
-        z_global_forecast  : (B, D) -- mean over the FORECAST encoder's whole
-                             output. Fed to the GLOBAL-FORECAST bottleneck.
+        z_global           : (B, D) -- ATTENTION-weighted pool over the
+                             LOOKBACK encoder's per-timestep features. Fed
+                             to the LOOKBACK concept bottleneck. Provably a
+                             function of the history alone (the lookback
+                             encoder never sees the forecast window).
+        z_per_sw           : list of N (B, D) tensors -- ATTENTION-weighted
+                             pool over each forecast sub-window slice of
+                             the FORECAST encoder's features. Fed to the
+                             per-sub-window forecast bottlenecks.
+        z_global_forecast  : (B, D) -- ATTENTION-weighted pool over the
+                             FORECAST encoder's whole output. Fed to the
+                             GLOBAL-FORECAST bottleneck.
 
         Both encoders run with use_time_pool=False, so enc_lb / enc_fc are
         (B, T, D). A 2D fallback is kept for robustness if an encoder ever
-        returns a pooled (B, D) vector.
+        returns a pooled (B, D) vector; in that fallback the attention pool
+        is skipped (there is nothing to attend over).
         """
         # ---- lookback summary ----
         if enc_lb.dim() == 2:
             z_global = enc_lb
         elif enc_lb.dim() == 3:
-            z_global = enc_lb.mean(dim=1)                 # (B, D)
+            z_global = self.attn_pool_lookback_global(enc_lb)   # (B, D)
         else:
             raise ValueError(
                 f"lookback encoder output has unexpected ndim={enc_lb.dim()}; "
@@ -712,10 +842,12 @@ class ConceptBottleneckModel(nn.Module):
         if T != self.output_length:
             enc_fc = enc_fc[:, -self.output_length:, :]
 
-        z_global_forecast = enc_fc.mean(dim=1)            # (B, D)
+        z_global_forecast = self.attn_pool_forecast_global(enc_fc)  # (B, D)
         sw_len = self.sub_window_length
         z_per_sw = [
-            enc_fc[:, k * sw_len : (k + 1) * sw_len, :].mean(dim=1)
+            self.attn_pool_forecast_sw(
+                enc_fc[:, k * sw_len : (k + 1) * sw_len, :]
+            )
             for k in range(self.n_subwindows)
         ]
         return z_global, z_per_sw, z_global_forecast
@@ -724,16 +856,20 @@ class ConceptBottleneckModel(nn.Module):
                                 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Pool the LOOKBACK encoder's per-timestep features into:
 
-          z_global    : (B, D) mean over the whole lookback
+          z_global    : (B, D) ATTENTION-weighted pool over the whole lookback
                         -> LOOKBACK-GLOBAL concept bottleneck
-          z_per_lb_sw : list of N_lb_sw (B, D) tensors, one per lookback
-                        sub-window slice mean
+          z_per_lb_sw : list of N_lb_sw (B, D) tensors, one ATTENTION-weighted
+                        pool per lookback sub-window slice
                         -> LOOKBACK-SUB-WINDOW concept bottleneck
 
         Only called in experiment_mode='lookback_only'. Symmetric to how
         _pool_encoder_features slices the forecast encoder in future_aware
         mode, but the slicing here is over the LOOKBACK axis (input_length,
         n_lookback_subwindows).
+
+        If ``self.attn_pool_lookback_sw`` was not built (because
+        ``n_lookback_subwindow_concepts == 0``), the per-sub-window list
+        falls back to a mean pool so callers still get well-formed tensors.
         """
         if enc_lb.dim() == 2:
             # Encoder returned pooled (B, D). Can't split by sub-window.
@@ -746,19 +882,66 @@ class ConceptBottleneckModel(nn.Module):
         T = enc_lb.shape[1]
         if T != self.input_length:
             enc_lb = enc_lb[:, -self.input_length:, :]
-        z_global = enc_lb.mean(dim=1)                        # (B, D)
+
+        z_global = self.attn_pool_lookback_global(enc_lb)                        # (B, D)
+
         lb_sw_len = self.lookback_sub_window_length
-        z_per_lb_sw = [
-            enc_lb[:, k * lb_sw_len : (k + 1) * lb_sw_len, :].mean(dim=1)
-            for k in range(self.n_lookback_subwindows)
-        ]
+        if self.attn_pool_lookback_sw is not None:
+            z_per_lb_sw = [
+                self.attn_pool_lookback_sw(
+                    enc_lb[:, k * lb_sw_len : (k + 1) * lb_sw_len, :]
+                )
+                for k in range(self.n_lookback_subwindows)
+            ]
+        else:
+            # No LB-SW concept bottleneck configured; downstream code will
+            # produce empty concept tensors, so this list is unused. Keep the
+            # legacy mean pool as a well-defined placeholder.
+            z_per_lb_sw = [
+                enc_lb[:, k * lb_sw_len : (k + 1) * lb_sw_len, :].mean(dim=1)
+                for k in range(self.n_lookback_subwindows)
+            ]
         return z_global, z_per_lb_sw
 
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor, disable_residual: bool = False) -> dict:
+    # ------------------------------------------------------------------
+    # RandInt helper
+    # ------------------------------------------------------------------
+    def _randint(self, acts: torch.Tensor,
+                 labels: torch.Tensor | None) -> torch.Tensor:
+        """Apply CEM's Random-Intervention swap.
+
+        During training only, and only if ``labels`` is not None, each
+        element of ``acts`` is independently REPLACED with the corresponding
+        ground-truth label value with probability ``self.randint_p``.
+
+        Semantics (from Zarlenga et al. 2022):
+        * intervened element    → hard binary label (0 or 1)
+        * un-intervened element → the model's own sigmoid output
+
+        The intervened tensor is what flows into the CEM ± embedding
+        mixing, so the decoder learns to interpret the activation VALUE
+        (not the embedding IDENTITY) as the concept signal. Interventions
+        do NOT affect the raw logits/acts tensors that are returned as
+        outputs -- those still reflect the model's actual predictions.
+
+        Args
+        ----
+        acts   : (B, ..., K) sigmoid activations in [0, 1]
+        labels : (B, ..., K) binary {0, 1} labels, or None to skip
+        """
+        if (not self.training
+                or labels is None
+                or self.randint_p <= 0.0):
+            return acts
+        mask = torch.bernoulli(torch.full_like(acts, float(self.randint_p)))
+        return mask * labels.to(acts.dtype) + (1.0 - mask) * acts
+
+    def forward(self, x: torch.Tensor, disable_residual: bool = False,
+                concept_labels: dict | None = None) -> dict:
         """Forward pass.
 
         Args
@@ -772,7 +955,25 @@ class ConceptBottleneckModel(nn.Module):
             Legacy docstring for reference: (previously) if True, the residual channel was zeroed before
             entering the decoder. Used at evaluation time to compute the
             "concept-only" MAE for interpretability attribution.
+        concept_labels : optional dict enabling CEM RandInt training.
+            When present AND the model is in ``.train()`` mode AND
+            ``self.randint_p > 0``, per-concept ground-truth labels are
+            swapped into the corresponding activations with probability
+            ``randint_p`` before they enter the CEM ± embedding mixing.
+            Keys (all optional -- any missing key skips RandInt for that
+            layer):
+
+              * "lb"    : (B, K_lb)                lookback concept labels
+              * "fc"    : (B, N_sw,  K_fc)         per-forecast-SW labels
+              * "gfc"   : (B, K_gfc)               global-forecast labels
+              * "lb_sw" : (B, N_lb_sw, K_lb_sw)    per-lookback-SW labels
+
+            Callers pass this dict during TRAINING only; pass None during
+            eval / inference (or simply omit it) so the model uses its own
+            predicted activations end-to-end.
         """
+        if concept_labels is None:
+            concept_labels = {}
         B = x.shape[0]
         device = x.device
 
@@ -854,7 +1055,12 @@ class ConceptBottleneckModel(nn.Module):
                         self.n_lookback_concepts, self.concept_emb_dim)
         lb_eminus = self.lookback_emb_minus(z_global).reshape(B,
                         self.n_lookback_concepts, self.concept_emb_dim)
-        a_lb = lb_acts.unsqueeze(-1)                            # (B, K_lb, 1)
+        # RandInt: per-concept swap of activation with ground-truth label
+        # during training; identity during eval. lb_acts (the model's own
+        # prediction) is what we RETURN, but lb_acts_used flows into the CEM
+        # mixing so the decoder learns to interpret activation VALUES.
+        lb_acts_used = self._randint(lb_acts, concept_labels.get("lb"))
+        a_lb = lb_acts_used.unsqueeze(-1)                       # (B, K_lb, 1)
         lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
         lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
 
@@ -871,7 +1077,9 @@ class ConceptBottleneckModel(nn.Module):
             g_em = self.global_forecast_emb_minus(z_global_forecast).reshape(
                 B, self.n_global_forecast_concepts, self.concept_emb_dim,
             )
-            a_g  = gfc_acts.unsqueeze(-1)                                    # (B, K_gfc, 1)
+            # RandInt on global-forecast activations.
+            gfc_acts_used = self._randint(gfc_acts, concept_labels.get("gfc"))
+            a_g  = gfc_acts_used.unsqueeze(-1)                               # (B, K_gfc, 1)
             gfc_ctx_3d = a_g * g_ep + (1.0 - a_g) * g_em                     # (B, K_gfc, d)
             gfc_ctx    = gfc_ctx_3d.reshape(B, -1)                           # (B, K_gfc * d)
         else:
@@ -890,6 +1098,7 @@ class ConceptBottleneckModel(nn.Module):
                 and self.n_lookback_subwindow_concepts > 0):
             lb_sw_logits_list = []
             lb_sw_acts_list   = []
+            lb_sw_labels_all = concept_labels.get("lb_sw")  # (B, N_lb_sw, K_lb_sw) or None
             for k in range(self.n_lookback_subwindows):
                 lg = self.lookback_sw_concept_predictors[k](z_per_lb_sw[k])    # (B, K_lb_sw)
                 ac = torch.sigmoid(lg)                                          # (B, K_lb_sw)
@@ -899,7 +1108,13 @@ class ConceptBottleneckModel(nn.Module):
                 em = self.lookback_sw_emb_minus(z_per_lb_sw[k]).reshape(
                     B, self.n_lookback_subwindow_concepts, self.concept_emb_dim,
                 )
-                a_k = ac.unsqueeze(-1)                                          # (B, K_lb_sw, 1)
+                # RandInt on per-lookback-SW activations using the k-th slice
+                # of the (B, N_lb_sw, K_lb_sw) label tensor.
+                labels_k = (
+                    lb_sw_labels_all[:, k, :] if lb_sw_labels_all is not None else None
+                )
+                ac_used = self._randint(ac, labels_k)
+                a_k = ac_used.unsqueeze(-1)                                     # (B, K_lb_sw, 1)
                 ctx_3d_k = a_k * ep + (1.0 - a_k) * em                          # (B, K_lb_sw, d)
                 ctx_k = ctx_3d_k.reshape(B, -1)                                 # (B, K_lb_sw * d)
                 lb_sw_logits_list.append(lg)
@@ -927,7 +1142,22 @@ class ConceptBottleneckModel(nn.Module):
                         self.n_forecast_concepts, self.concept_emb_dim)
             em = self.forecast_emb_minus(z_global_forecast).reshape(B,
                         self.n_forecast_concepts, self.concept_emb_dim)
-            a_g = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
+            # RandInt on the single (global-collapsed) forecast bottleneck.
+            # In --single_forecast_bottleneck mode concept_labels.build_window_
+            # label_tables produces fc labels on the WHOLE forecast window with
+            # shape (B, K_fc) -- already the right target shape, so use them
+            # as-is. Guard against a stray (B, N_sw, K_fc) tensor (e.g. if a
+            # future caller passes per-sub-window labels here) by mean-collapsing
+            # the sub-window axis only when it is present.
+            fc_labels_full = concept_labels.get("fc")
+            if fc_labels_full is None:
+                fc_labels_collapsed = None
+            elif fc_labels_full.dim() == 3:
+                fc_labels_collapsed = fc_labels_full.mean(dim=1)             # (B, K_fc)
+            else:
+                fc_labels_collapsed = fc_labels_full                        # (B, K_fc)
+            ac_used = self._randint(ac, fc_labels_collapsed)
+            a_g = ac_used.unsqueeze(-1)                               # (B, K_fc, 1)
             ctx_3d = a_g * ep + (1.0 - a_g) * em                      # (B, K_fc, d)
             ctx_global = ctx_3d.reshape(B, -1)                        # (B, K_fc * d)
             # Reuse this single context for all sub-window decodings.
@@ -942,6 +1172,7 @@ class ConceptBottleneckModel(nn.Module):
             fc_logits_list = []
             fc_acts_list   = []
             fc_ctx_list    = []
+            fc_labels_all  = concept_labels.get("fc")  # (B, N_sw, K_fc) or None
             for k in range(self.n_subwindows):
                 lg = self.forecast_concept_predictors[k](z_per_sw[k])    # (B, K_fc)
                 ac = torch.sigmoid(lg)                                    # (B, K_fc)
@@ -949,7 +1180,13 @@ class ConceptBottleneckModel(nn.Module):
                             self.n_forecast_concepts, self.concept_emb_dim)
                 em = self.forecast_emb_minus(z_per_sw[k]).reshape(B,
                             self.n_forecast_concepts, self.concept_emb_dim)
-                a_k = ac.unsqueeze(-1)                                    # (B, K_fc, 1)
+                # RandInt on per-forecast-SW activations using the k-th
+                # slice of the (B, N_sw, K_fc) label tensor.
+                labels_k = (
+                    fc_labels_all[:, k, :] if fc_labels_all is not None else None
+                )
+                ac_used = self._randint(ac, labels_k)
+                a_k = ac_used.unsqueeze(-1)                               # (B, K_fc, 1)
                 ctx_3d_k = a_k * ep + (1.0 - a_k) * em                    # (B, K_fc, d)
                 ctx_k = ctx_3d_k.reshape(B, -1)                           # (B, K_fc * d)
                 fc_logits_list.append(lg)
