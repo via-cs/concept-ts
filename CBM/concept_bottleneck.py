@@ -910,29 +910,57 @@ class ConceptBottleneckModel(nn.Module):
     # ------------------------------------------------------------------
     # RandInt helper
     # ------------------------------------------------------------------
-    def _randint(self, acts: torch.Tensor,
-                 labels: torch.Tensor | None) -> torch.Tensor:
-        """Apply CEM's Random-Intervention swap.
+    def _gate_activation(self, acts: torch.Tensor,
+                         labels: torch.Tensor | None,
+                         intervention: str | None = None) -> torch.Tensor:
+        """Decide which activation feeds the CEM ± embedding mixing.
 
-        During training only, and only if ``labels`` is not None, each
-        element of ``acts`` is independently REPLACED with the corresponding
-        ground-truth label value with probability ``self.randint_p``.
+        Priority:
 
-        Semantics (from Zarlenga et al. 2022):
-        * intervened element    → hard binary label (0 or 1)
-        * un-intervened element → the model's own sigmoid output
+        1. Eval-time DETERMINISTIC INTERVENTION (leak diagnostic), when
+           ``intervention`` is not None -- the activation of EVERY concept is
+           replaced (probability 1.0):
+             * "oracle" → ground-truth labels          (needs labels)
+             * "flip"   → 1 - labels                    (needs labels)
+             * "random" → Bernoulli(0.5)                (label-independent)
+           If a layer has no labels this batch (labels is None) the "oracle"/
+           "flip" modes leave the prediction unchanged for that layer.
 
-        The intervened tensor is what flows into the CEM ± embedding
-        mixing, so the decoder learns to interpret the activation VALUE
-        (not the embedding IDENTITY) as the concept signal. Interventions
-        do NOT affect the raw logits/acts tensors that are returned as
-        outputs -- those still reflect the model's actual predictions.
+           Only the activation CHANNEL is intervened; the ± embeddings
+           e+/e-(z) are NOT touched. So comparing forecast MAE under these
+           modes vs. baseline measures how much the forecast actually depends
+           on the concept-activation channel rather than leaking through the
+           embeddings: a large "flip"/"random" degradation ⇒ concepts matter
+           (leak contained); near-zero degradation ⇒ the decoder bypasses the
+           activations via e+/e- (leak).
+
+        2. Training RandInt (Zarlenga et al. 2022): probabilistic per-element
+           swap with ground-truth labels at rate ``self.randint_p``.
+
+        3. Otherwise: the model's own activations, unchanged.
+
+        Never alters the raw acts/logits the model returns as outputs.
 
         Args
         ----
-        acts   : (B, ..., K) sigmoid activations in [0, 1]
-        labels : (B, ..., K) binary {0, 1} labels, or None to skip
+        acts         : (B, ..., K) sigmoid activations in [0, 1]
+        labels       : (B, ..., K) binary {0, 1} labels, or None
+        intervention : None | "oracle" | "flip" | "random"
         """
+        if intervention is not None:
+            if intervention == "random":
+                return torch.bernoulli(torch.full_like(acts, 0.5))
+            if labels is None:
+                return acts
+            labels = labels.to(acts.dtype)
+            if intervention == "oracle":
+                return labels
+            if intervention == "flip":
+                return 1.0 - labels
+            raise ValueError(
+                f"unknown intervention {intervention!r}; expected "
+                f"None | 'oracle' | 'flip' | 'random'."
+            )
         if (not self.training
                 or labels is None
                 or self.randint_p <= 0.0):
@@ -941,7 +969,8 @@ class ConceptBottleneckModel(nn.Module):
         return mask * labels.to(acts.dtype) + (1.0 - mask) * acts
 
     def forward(self, x: torch.Tensor, disable_residual: bool = False,
-                concept_labels: dict | None = None) -> dict:
+                concept_labels: dict | None = None,
+                intervention: str | None = None) -> dict:
         """Forward pass.
 
         Args
@@ -1059,7 +1088,7 @@ class ConceptBottleneckModel(nn.Module):
         # during training; identity during eval. lb_acts (the model's own
         # prediction) is what we RETURN, but lb_acts_used flows into the CEM
         # mixing so the decoder learns to interpret activation VALUES.
-        lb_acts_used = self._randint(lb_acts, concept_labels.get("lb"))
+        lb_acts_used = self._gate_activation(lb_acts, concept_labels.get("lb"), intervention)
         a_lb = lb_acts_used.unsqueeze(-1)                       # (B, K_lb, 1)
         lb_ctx_3d = a_lb * lb_eplus + (1.0 - a_lb) * lb_eminus  # (B, K_lb, d)
         lb_ctx    = lb_ctx_3d.reshape(B, -1)                    # (B, K_lb * d)
@@ -1078,7 +1107,7 @@ class ConceptBottleneckModel(nn.Module):
                 B, self.n_global_forecast_concepts, self.concept_emb_dim,
             )
             # RandInt on global-forecast activations.
-            gfc_acts_used = self._randint(gfc_acts, concept_labels.get("gfc"))
+            gfc_acts_used = self._gate_activation(gfc_acts, concept_labels.get("gfc"), intervention)
             a_g  = gfc_acts_used.unsqueeze(-1)                               # (B, K_gfc, 1)
             gfc_ctx_3d = a_g * g_ep + (1.0 - a_g) * g_em                     # (B, K_gfc, d)
             gfc_ctx    = gfc_ctx_3d.reshape(B, -1)                           # (B, K_gfc * d)
@@ -1113,7 +1142,7 @@ class ConceptBottleneckModel(nn.Module):
                 labels_k = (
                     lb_sw_labels_all[:, k, :] if lb_sw_labels_all is not None else None
                 )
-                ac_used = self._randint(ac, labels_k)
+                ac_used = self._gate_activation(ac, labels_k, intervention)
                 a_k = ac_used.unsqueeze(-1)                                     # (B, K_lb_sw, 1)
                 ctx_3d_k = a_k * ep + (1.0 - a_k) * em                          # (B, K_lb_sw, d)
                 ctx_k = ctx_3d_k.reshape(B, -1)                                 # (B, K_lb_sw * d)
@@ -1156,7 +1185,7 @@ class ConceptBottleneckModel(nn.Module):
                 fc_labels_collapsed = fc_labels_full.mean(dim=1)             # (B, K_fc)
             else:
                 fc_labels_collapsed = fc_labels_full                        # (B, K_fc)
-            ac_used = self._randint(ac, fc_labels_collapsed)
+            ac_used = self._gate_activation(ac, fc_labels_collapsed, intervention)
             a_g = ac_used.unsqueeze(-1)                               # (B, K_fc, 1)
             ctx_3d = a_g * ep + (1.0 - a_g) * em                      # (B, K_fc, d)
             ctx_global = ctx_3d.reshape(B, -1)                        # (B, K_fc * d)
@@ -1185,7 +1214,7 @@ class ConceptBottleneckModel(nn.Module):
                 labels_k = (
                     fc_labels_all[:, k, :] if fc_labels_all is not None else None
                 )
-                ac_used = self._randint(ac, labels_k)
+                ac_used = self._gate_activation(ac, labels_k, intervention)
                 a_k = ac_used.unsqueeze(-1)                               # (B, K_fc, 1)
                 ctx_3d_k = a_k * ep + (1.0 - a_k) * em                    # (B, K_fc, d)
                 ctx_k = ctx_3d_k.reshape(B, -1)                           # (B, K_fc * d)

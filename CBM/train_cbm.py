@@ -323,6 +323,14 @@ def get_args():
 
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/cbm")
     p.add_argument("--case_studies",   type=int, default=5)
+    p.add_argument("--leak_diagnostic", type=int, default=1,
+                   help="Run the concept-intervention leak diagnostic at test "
+                        "time (1=on, 0=off). Re-evaluates test MAE with concept "
+                        "ACTIVATIONS forced to oracle / flipped / random values "
+                        "(embeddings untouched). Large flip/random degradation "
+                        "=> concepts drive the forecast (activation-channel leak "
+                        "contained); near-zero degradation => the decoder "
+                        "bypasses activations via e+/e-. Needs --test_segments_path.")
     p.add_argument("--interp_cases",   type=int, default=6,
                    help="Number of GOOD (low-MAE) test windows to render as "
                         "per-case interpretability figures (continuous-feature "
@@ -531,6 +539,83 @@ def evaluate(model, loader, device):
             torch.cat(all_gfc_lg),   torch.cat(all_gfc_la),
             torch.cat(all_yh),       torch.cat(all_yt),
             torch.cat(all_lb_sw_lg), torch.cat(all_lb_sw_la))
+
+
+@torch.no_grad()
+def _leakage_diagnostic(model, loader, device, tgt_scale: float) -> dict:
+    """Concept-intervention leak test.
+
+    Runs the loader under four activation regimes and returns z-scored MAE for
+    each (aggregated over every forecast element, same as ``evaluate``):
+
+        baseline : the model's own predicted concept activations
+        oracle   : activations forced to the ground-truth labels
+        flip     : activations forced to (1 - label)
+        random   : activations replaced by Bernoulli(0.5)
+
+    ONLY the concept-activation channel is intervened; the ± embeddings
+    e+/e-(z) are untouched. Interpretation:
+      * baseline -> oracle : how much CORRECT concepts would help (small gap
+        means the predictor is already near-oracle on concepts).
+      * baseline -> flip / random : how much the forecast DEPENDS on the
+        concept activations. A large degradation means the concepts are
+        genuinely driving the forecast (leak contained). A near-zero
+        degradation means the decoder ignores the activation channel and
+        reads the answer from e+/e- instead (LEAK).
+
+    Requires REAL per-batch concept labels (i.e. --test_segments_path given).
+    """
+    model.eval()
+    modes = {"baseline": None, "oracle": "oracle", "flip": "flip", "random": "random"}
+    mae_sum = {m: 0.0 for m in modes}
+    denom = 0
+    for batch in loader:
+        x, y, lb_lab, fc_lab, gfc_lab, lb_sw_lab = batch
+        x = x.to(device); y = y.to(device)
+        cl = {}
+        if lb_lab.numel()    > 0: cl["lb"]    = lb_lab.to(device)
+        if fc_lab.numel()    > 0: cl["fc"]    = fc_lab.to(device)
+        if gfc_lab.numel()   > 0: cl["gfc"]   = gfc_lab.to(device)
+        if lb_sw_lab.numel() > 0: cl["lb_sw"] = lb_sw_lab.to(device)
+        for name, mode in modes.items():
+            out = model(x, concept_labels=cl, intervention=mode)
+            mae_sum[name] += (out["y_hat"] - y).abs().sum().item()
+        denom += y.numel()
+    mae_z = {m: mae_sum[m] / max(1, denom) for m in modes}
+    return {m: {"z": mae_z[m], "raw": mae_z[m] * tgt_scale} for m in modes}
+
+
+def _print_leakage_diagnostic(diag: dict) -> None:
+    base = diag["baseline"]["raw"]
+    print("\n── Concept-intervention leak diagnostic ──")
+    print("   (only concept ACTIVATIONS are intervened; e+/e- embeddings untouched)")
+    bar = "─" * 68
+    print(bar)
+    print(f"   {'regime':10s}  {'MAE z':>9}  {'MAE µg/m³':>10}  {'Δ vs baseline µg/m³':>20}")
+    print(bar)
+    for name in ("baseline", "oracle", "flip", "random"):
+        d = diag[name]
+        delta = d["raw"] - base
+        dstr = "  —" if name == "baseline" else f"{delta:+.3f}"
+        print(f"   {name:10s}  {d['z']:>9.4f}  {d['raw']:>10.3f}  {dstr:>20}")
+    print(bar)
+    flip_deg = diag["flip"]["raw"] - base
+    rand_deg = diag["random"]["raw"] - base
+    rel = (flip_deg / max(1e-9, base)) * 100
+    print(f"   flip degradation  = {flip_deg:+.3f} µg/m³  ({rel:+.1f}% vs baseline)")
+    print(f"   random degradation= {rand_deg:+.3f} µg/m³")
+    # Heuristic read (guidance only; the user should judge in context).
+    if flip_deg < 0.02 * base:
+        print("   ⚠ LEAK LIKELY: flipping concepts barely changes the forecast, "
+              "so the decoder is bypassing the activation channel (reading e+/e-).")
+    elif flip_deg < 0.10 * base:
+        print("   ~ PARTIAL: concepts move the forecast a little; some reliance "
+              "on e+/e- remains.")
+    else:
+        print("   ✓ Concepts genuinely drive the forecast (flipping them hurts a "
+              "lot) -- activation-channel leak looks contained.")
+    print("   NOTE: this tests the ACTIVATION channel. e+/e- can still leak even "
+          "when this looks healthy; lower --concept_emb_dim to shrink that path.")
 
 
 def per_concept_auroc(logits_2d: torch.Tensor, labels_2d: torch.Tensor) -> list[float]:
@@ -1137,6 +1222,20 @@ def main():
     #  Every forecast is a function of concept-derived context alone.)
     print(f"  (strict CBM: the MAE above IS the concept-only MAE by "
           f"construction -- no residual bypass exists.)")
+
+    # ----- Concept-intervention leak diagnostic -----
+    # Forces the concept ACTIVATIONS to oracle / flipped / random values (the
+    # ± embeddings are left untouched) and re-measures MAE. If flipping the
+    # concepts barely changes the forecast, the decoder is bypassing the
+    # activation channel and reading the answer from the embeddings (leak).
+    # Needs real test labels, so it is skipped when --test_segments_path is
+    # absent.
+    if args.leak_diagnostic and test_labels_real:
+        diag = _leakage_diagnostic(model, test_loader, device, tgt_scale)
+        _print_leakage_diagnostic(diag)
+    elif args.leak_diagnostic and not test_labels_real:
+        print("\n  (leak diagnostic skipped: needs --test_segments_path for real "
+              "concept labels.)")
 
     # ----- Per-concept TEST stats (real labels if --test_segments_path was given) -----
     # Falls back to a TRAIN evaluation when the user didn't supply test segments,
