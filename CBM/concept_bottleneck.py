@@ -746,9 +746,13 @@ class ConceptBottleneckModel(nn.Module):
         # zeroable at eval (disable_residual) for the concept-only forecast.
         self.residual_dim = int(residual_dim)
         if self.residual_dim > 0:
+            # z_global is the raw lookback pool (mid_dim); z_per_sw[k] is the
+            # forecast sub-window pool AUGMENTED with the hour encoding, so it
+            # has width _fc_input_dim (== mid_dim + hour_encoding_dim) -- the
+            # same input the forecast concept predictors take.
             self.residual_lb_proj = nn.Linear(mid_dim, self.residual_dim)
             if self._forecast_side_active:
-                self.residual_fc_proj = nn.Linear(mid_dim, self.residual_dim)
+                self.residual_fc_proj = nn.Linear(_fc_input_dim, self.residual_dim)
             else:
                 self.residual_fc_proj = None
         else:
