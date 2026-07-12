@@ -173,6 +173,15 @@ def get_args():
                         "conditional vectors in R^d; the decoder reads K*d dims "
                         "instead of D dims. Default 16 -- effective bottleneck "
                         "rank K*d (much wider than the old static rank K).")
+    p.add_argument("--static_concept_emb", action="store_true",
+                   help="Make the CEM +/- embeddings (e+/e-) INPUT-INDEPENDENT "
+                        "learned vectors instead of Linear(z -> K*d). This closes "
+                        "the embedding-path leak: with static embeddings the "
+                        "decoder's only input-dependent signal from each "
+                        "bottleneck is the K concept ACTIVATIONS (classic-CBM "
+                        "bottleneck), so information must genuinely route through "
+                        "the concepts. Default off = full CEM (input-conditional "
+                        "embeddings). Toggle this to compare leak vs. accuracy.")
     p.add_argument("--decoder_hidden", type=int, default=512,
                    help="Hidden width of the shared sub-decoder MLP (default 512).")
     p.add_argument("--decoder_depth",  type=int, default=3,
@@ -247,6 +256,22 @@ def get_args():
                         "if test MAE goes up here, the N-sub-window design is "
                         "doing real work; if it stays the same or improves, "
                         "the sub-window split is unnecessary on this dataset.")
+
+    p.add_argument("--residual_dim", type=int, default=0,
+                   help="Width r of the OPTIONAL hybrid residual channel "
+                        "(Option 1). 0 = strict CBM (no encoder->decoder "
+                        "bypass). r>0 adds a small learned Linear(encoder -> r) "
+                        "from the lookback encoder (recent PM2.5 level) and, in "
+                        "future_aware mode, one per forecast sub-window (block "
+                        "covariate magnitudes), concatenated into the decoder "
+                        "input. Carries the continuous level/scale the concepts "
+                        "can't. Keep small (2-8). Penalized by "
+                        "--alpha_residual_reg; zeroed for the concept-only MAE.")
+    p.add_argument("--alpha_residual_reg", type=float, default=1e-3,
+                   help="L2 penalty weight on the residual channel magnitude "
+                        "(||residual||^2). Higher = decoder leans more on "
+                        "concepts (residual carries less); lower = residual is "
+                        "freer. Only used when --residual_dim > 0.")
 
     p.add_argument("--lr",             type=float, default=3e-4,
                    help="Initial learning rate. Lowered from 1e-3 to stabilize "
@@ -323,6 +348,21 @@ def get_args():
 
     p.add_argument("--checkpoint_dir", type=str, default="./checkpoint/cbm")
     p.add_argument("--case_studies",   type=int, default=5)
+    p.add_argument("--cap_lb_concepts", type=int, default=0,
+                   help="Hard cap on the number of LOOKBACK concepts actually "
+                        "used (keeps the first N that pass the pos-rate filter). "
+                        "0 = no cap. Set to 2 or 3 for the capacity/leak "
+                        "experiment: if forecast MAE barely rises when each "
+                        "bottleneck is squeezed to a handful of concepts, the "
+                        "decoder is shortcutting through the CEM embeddings.")
+    p.add_argument("--cap_fc_concepts", type=int, default=0,
+                   help="Hard cap on FORECAST sub-window concepts (0 = no cap).")
+    p.add_argument("--cap_gfc_concepts", type=int, default=0,
+                   help="Hard cap on GLOBAL-FORECAST concepts (0 = no cap). "
+                        "Can also be 0 to disable that bottleneck entirely.")
+    p.add_argument("--cap_lb_sw_concepts", type=int, default=0,
+                   help="Hard cap on LOOKBACK-sub-window concepts (0 = no cap; "
+                        "lookback_only mode).")
     p.add_argument("--leak_diagnostic", type=int, default=1,
                    help="Run the concept-intervention leak diagnostic at test "
                         "time (1=on, 0=off). Re-evaluates test MAE with concept "
@@ -412,10 +452,11 @@ def train_one_epoch(model, loader, optimizer, device,
                     alpha_forecast, alpha_lookback, alpha_forecast_concept,
                     alpha_forecast_global_concept,
                     alpha_boundary_smooth,
-                    alpha_concept_collapse, concept_var_min):
+                    alpha_concept_collapse, concept_var_min,
+                    alpha_residual_reg=0.0):
     model.train()
-    cum_f, cum_lb, cum_fc, cum_gfc, cum_sm, cum_cc, n = (
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,
+    cum_f, cum_lb, cum_fc, cum_gfc, cum_sm, cum_cc, cum_res, n = (
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,
     )
     l1_fn  = nn.L1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
@@ -472,6 +513,11 @@ def train_one_epoch(model, loader, optimizer, device,
             + _concept_collapse_penalty(out["gfc_acts"],   concept_var_min)
             + _concept_collapse_penalty(out["lb_sw_acts"], concept_var_min)
         )
+        # Hybrid residual channel L2 penalty (Option 1). Zero when residual_dim==0.
+        if out["residual"].numel() > 0:
+            loss_res = out["residual"].pow(2).mean()
+        else:
+            loss_res = torch.zeros((), device=device)
 
         loss = (alpha_forecast               * loss_f
                 + alpha_lookback                * loss_lb
@@ -479,7 +525,8 @@ def train_one_epoch(model, loader, optimizer, device,
                 + alpha_forecast_global_concept * loss_gfc
                 + alpha_forecast_concept        * loss_lb_sw
                 + alpha_boundary_smooth         * loss_sm
-                + alpha_concept_collapse        * loss_cc)
+                + alpha_concept_collapse        * loss_cc
+                + alpha_residual_reg            * loss_res)
 
         optimizer.zero_grad()
         loss.backward()
@@ -491,11 +538,13 @@ def train_one_epoch(model, loader, optimizer, device,
         cum_gfc += loss_gfc.item()
         cum_sm  += loss_sm.item()
         cum_cc  += loss_cc.item()
+        cum_res += loss_res.item()
         n       += 1
 
     return (cum_f   / max(1, n), cum_lb / max(1, n),
             cum_fc  / max(1, n), cum_gfc / max(1, n),
-            cum_sm / max(1, n), cum_cc / max(1, n))
+            cum_sm / max(1, n), cum_cc / max(1, n),
+            cum_res / max(1, n))
 
 
 @torch.no_grad()
@@ -539,6 +588,23 @@ def evaluate(model, loader, device):
             torch.cat(all_gfc_lg),   torch.cat(all_gfc_la),
             torch.cat(all_yh),       torch.cat(all_yt),
             torch.cat(all_lb_sw_lg), torch.cat(all_lb_sw_la))
+
+
+@torch.no_grad()
+def _evaluate_concept_only(model, loader, device) -> tuple[float, float]:
+    """Run the model with the hybrid residual channel ZEROED
+    (disable_residual=True) and return (mse_z, mae_z). Only meaningful when
+    residual_dim > 0; measures how much of the forecast is concept-driven vs.
+    carried by the residual level/scale channel."""
+    model.eval()
+    mae_sum, mse_sum, denom = 0.0, 0.0, 0
+    for batch in loader:
+        x, y = batch[0].to(device), batch[1].to(device)
+        y_hat = model(x, disable_residual=True)["y_hat"]
+        mae_sum += (y_hat - y).abs().sum().item()
+        mse_sum += ((y_hat - y) ** 2).sum().item()
+        denom   += y.numel()
+    return mse_sum / max(1, denom), mae_sum / max(1, denom)
 
 
 @torch.no_grad()
@@ -985,6 +1051,10 @@ def main():
         single_forecast_bottleneck=args.single_forecast_bottleneck,
         min_pos_rate=args.min_pos_rate,
         max_pos_rate=args.max_pos_rate,
+        cap_lb=args.cap_lb_concepts,
+        cap_fc=args.cap_fc_concepts,
+        cap_gfc=args.cap_gfc_concepts,
+        cap_lb_sw=args.cap_lb_sw_concepts,
     )
     K_lb  = lb_train.shape[1]
     K_gfc = gfc_train.shape[1]
@@ -1033,6 +1103,10 @@ def main():
             single_forecast_bottleneck=args.single_forecast_bottleneck,
             min_pos_rate=args.min_pos_rate,
             max_pos_rate=args.max_pos_rate,
+            cap_lb=args.cap_lb_concepts,
+            cap_fc=args.cap_fc_concepts,
+            cap_gfc=args.cap_gfc_concepts,
+            cap_lb_sw=args.cap_lb_sw_concepts,
         )
         # Shape match check.
         if args.single_forecast_bottleneck:
@@ -1104,6 +1178,8 @@ def main():
         n_lookback_subwindows        = K_lb_sw_windows if K_lb_sw_windows > 0 else args.n_subwindows,
         n_lookback_subwindow_concepts = K_lb_sw,
         concept_emb_dim            = args.concept_emb_dim,
+        static_concept_emb         = args.static_concept_emb,
+        residual_dim               = args.residual_dim,
         decoder_hidden      = args.decoder_hidden,
         decoder_depth       = args.decoder_depth,
         decoder_n_blocks    = args.decoder_n_blocks,
@@ -1150,12 +1226,13 @@ def main():
         eff_alpha_forecast = (0.0
                               if epoch < args.concept_warmup_epochs
                               else args.alpha_forecast)
-        l_f, l_lb, l_fc, l_gfc, l_sm, l_cc = train_one_epoch(
+        l_f, l_lb, l_fc, l_gfc, l_sm, l_cc, l_res = train_one_epoch(
             model, train_loader, optimizer, device,
             eff_alpha_forecast, args.alpha_lookback, args.alpha_forecast_concept,
             args.alpha_forecast_global_concept,
             args.alpha_boundary_smooth,
             args.alpha_concept_collapse, args.concept_var_min,
+            args.alpha_residual_reg,
         )
         val_mse, val_mae, *_ = evaluate(model, val_loader, device)
         improved = val_mae < best_val_mae
@@ -1163,13 +1240,15 @@ def main():
         gfc_str = f"  train_gfc_BCE={l_gfc:.4f}" if K_gfc > 0 else ""
         sm_str  = f"  train_sm={l_sm:.4f}"        if args.alpha_boundary_smooth > 0 else ""
         cc_str  = f"  train_cc={l_cc:.4f}"        if args.alpha_concept_collapse > 0 else ""
+        res_str = f"  train_res={l_res:.4f}"      if args.residual_dim > 0 else ""
         print(f"  [epoch {epoch+1:>3d}/{args.epoch}]  "
               f"train_L1={l_f:.4f}  "
               f"train_lb_BCE={l_lb:.4f}  "
               f"train_fc_BCE={l_fc:.4f}"
               f"{gfc_str}"
               f"{sm_str}"
-              f"{cc_str}  "
+              f"{cc_str}"
+              f"{res_str}  "
               f"val MAE={val_mae:.4f}{marker}")
         if improved:
             best_val_mae      = val_mae
@@ -1220,8 +1299,20 @@ def main():
     # (Concept-only-MAE reporting removed: the model is now strict CBM, so
     #  the full MAE reported above IS the concept-only MAE by construction.
     #  Every forecast is a function of concept-derived context alone.)
-    print(f"  (strict CBM: the MAE above IS the concept-only MAE by "
-          f"construction -- no residual bypass exists.)")
+    if args.residual_dim > 0:
+        # Hybrid CBM: measure how much of the forecast is concept-driven by
+        # re-evaluating with the residual channel zeroed.
+        co_mse, co_mae = _evaluate_concept_only(model, test_loader, device)
+        co_mae_raw = co_mae * tgt_scale
+        gap = co_mae - test_mae
+        rel = (gap / max(1e-9, test_mae)) * 100
+        print(f"  test MAE      = {co_mae:.6f}  (CONCEPT-ONLY, residual zeroed, z-scored)")
+        print(f"  test MAE      = {co_mae_raw:.4f}  (CONCEPT-ONLY, residual zeroed, RAW µg/m³)")
+        print(f"  residual gain = {gap*tgt_scale:+.4f} µg/m³  ({rel:+.1f}% of MAE); "
+              f"concepts alone reach {(test_mae/max(1e-9,co_mae))*100:.1f}% of concept-only MAE.")
+    else:
+        print(f"  (strict CBM: residual_dim=0, so the MAE above IS the "
+              f"concept-only MAE by construction -- no residual bypass.)")
 
     # ----- Concept-intervention leak diagnostic -----
     # Forces the concept ACTIVATIONS to oracle / flipped / random values (the

@@ -213,6 +213,41 @@ class AttentionPool(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Static (input-independent) concept embedding head
+# ---------------------------------------------------------------------------
+class _StaticConceptEmb(nn.Module):
+    """Input-INDEPENDENT concept embedding head for the CEM ± mixing.
+
+    Drop-in replacement for ``nn.Linear(in_dim, K*d)``: it accepts the encoder
+    feature but IGNORES it, returning a learned ``(K*d)`` parameter broadcast
+    over the batch. So the per-concept context
+
+        ĉ_i = a_i · e+_i + (1 - a_i) · e-_i
+            = e-_i + a_i · (e+_i - e-_i)
+
+    depends on the input ONLY through the scalar activation ``a_i`` (a fixed
+    vector plus a scalar times a fixed direction). This converts the full CEM
+    -- whose input-conditional ``e+/e-(z)`` form a K*d-dimensional continuous
+    channel of encoder information straight to the decoder -- into a
+    classic-CBM-style bottleneck whose only input-dependent signal is the K
+    concept activations. Used to test / remove the embedding-path leakage.
+
+    Output shape ``(B, K*d)`` matches the Linear path exactly, so callers can
+    ``.reshape(B, K, d)`` unchanged.
+    """
+
+    def __init__(self, n_concepts: int, emb_dim: int):
+        super().__init__()
+        self.out_dim = int(n_concepts) * int(emb_dim)
+        # Small random init so the K*d columns (and e+ vs e-) start distinct.
+        self.emb = nn.Parameter(torch.randn(self.out_dim) * 0.1)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # z is used only for batch size / device; its VALUES are ignored.
+        return self.emb.unsqueeze(0).expand(z.shape[0], -1)     # (B, K*d)
+
+
+# ---------------------------------------------------------------------------
 # Residual sub-decoder block (NHiTS-style residual stacking)
 # ---------------------------------------------------------------------------
 class ResidualDecoderBlock(nn.Module):
@@ -300,6 +335,23 @@ class ConceptBottleneckModel(nn.Module):
         n_lookback_subwindows: int = None,
         n_lookback_subwindow_concepts: int = 0,
         concept_emb_dim: int = 16,
+        # When True, the CEM ± embedding heads (e+/e-) are INPUT-INDEPENDENT
+        # learned vectors (see _StaticConceptEmb) instead of Linear(z -> K*d).
+        # This closes the embedding-path leak: the decoder's only input-
+        # dependent signal from each bottleneck becomes the K concept
+        # activations (classic-CBM bottleneck). Default False = full CEM.
+        static_concept_emb: bool = False,
+        # Optional hybrid-CBM residual channel (Option 1). When residual_dim>0,
+        # a small learned Linear(encoder feature -> residual_dim) runs from the
+        # LOOKBACK encoder (z_global; carries the recent PM2.5 level) and, in
+        # future_aware mode, from each FORECAST sub-window (z_per_sw[k]; carries
+        # that block's covariate magnitudes). These are concatenated into the
+        # decoder input and are meant to be L2-penalized by the trainer
+        # (alpha_residual_reg) so the decoder uses them ONLY for the continuous
+        # level/scale the concepts can't encode. residual_dim=0 => strict CBM
+        # (no bypass). forward(..., disable_residual=True) zeroes them to give
+        # the concept-only forecast.
+        residual_dim: int = 0,
         decoder_hidden: int = 512,
         decoder_depth: int = 3,
         # ---- Residual sub-decoder stack (NHiTS-style) -----------------------
@@ -425,6 +477,7 @@ class ConceptBottleneckModel(nn.Module):
         self.output_dim          = output_dim
         self.sub_window_length   = output_length // n_subwindows
         self.concept_emb_dim     = int(concept_emb_dim)
+        self.static_concept_emb  = bool(static_concept_emb)
         self.single_forecast_bottleneck = bool(single_forecast_bottleneck)
         self.input_length = int(input_length)
 
@@ -540,9 +593,17 @@ class ConceptBottleneckModel(nn.Module):
         # help and inflated parameter count for redundant supervision, since
         # most lookback concepts are summary-style (season, weather regime)
         # and don't differ between halves of the same 96-hour history.
+        def _make_concept_emb(in_dim: int, n_concepts: int) -> nn.Module:
+            """CEM ± embedding head: input-conditional Linear (full CEM) or an
+            input-independent static head (--static_concept_emb). Both return
+            (B, K*d) so downstream reshape/mixing is identical."""
+            if self.static_concept_emb:
+                return _StaticConceptEmb(n_concepts, self.concept_emb_dim)
+            return nn.Linear(in_dim, n_concepts * self.concept_emb_dim)
+
         self.lookback_concept_predictor = nn.Linear(mid_dim, n_lookback_concepts)
-        self.lookback_emb_plus  = nn.Linear(mid_dim, n_lookback_concepts * self.concept_emb_dim)
-        self.lookback_emb_minus = nn.Linear(mid_dim, n_lookback_concepts * self.concept_emb_dim)
+        self.lookback_emb_plus  = _make_concept_emb(mid_dim, n_lookback_concepts)
+        self.lookback_emb_minus = _make_concept_emb(mid_dim, n_lookback_concepts)
 
         # ---- Forecast concept bottlenecks (full CEM) ----
         # K_sw separate PREDICTORS (one per sub-window). The two embedding
@@ -577,8 +638,8 @@ class ConceptBottleneckModel(nn.Module):
                 nn.Linear(_fc_input_dim, n_forecast_concepts)
                 for _ in range(n_fc_predictors)
             ])
-            self.forecast_emb_plus  = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
-            self.forecast_emb_minus = nn.Linear(_fc_input_dim, n_forecast_concepts * self.concept_emb_dim)
+            self.forecast_emb_plus  = _make_concept_emb(_fc_input_dim, n_forecast_concepts)
+            self.forecast_emb_minus = _make_concept_emb(_fc_input_dim, n_forecast_concepts)
         else:
             self.forecast_concept_predictors = nn.ModuleList()
             self.forecast_emb_plus  = None
@@ -594,13 +655,11 @@ class ConceptBottleneckModel(nn.Module):
                 nn.Linear(_fc_input_dim, self.n_lookback_subwindow_concepts)
                 for _ in range(self.n_lookback_subwindows)
             ])
-            self.lookback_sw_emb_plus  = nn.Linear(
-                _fc_input_dim,
-                self.n_lookback_subwindow_concepts * self.concept_emb_dim,
+            self.lookback_sw_emb_plus  = _make_concept_emb(
+                _fc_input_dim, self.n_lookback_subwindow_concepts,
             )
-            self.lookback_sw_emb_minus = nn.Linear(
-                _fc_input_dim,
-                self.n_lookback_subwindow_concepts * self.concept_emb_dim,
+            self.lookback_sw_emb_minus = _make_concept_emb(
+                _fc_input_dim, self.n_lookback_subwindow_concepts,
             )
         else:
             self.lookback_sw_concept_predictors = nn.ModuleList()
@@ -619,11 +678,11 @@ class ConceptBottleneckModel(nn.Module):
             self.global_forecast_concept_predictor = nn.Linear(
                 mid_dim, self.n_global_forecast_concepts,
             )
-            self.global_forecast_emb_plus  = nn.Linear(
-                mid_dim, self.n_global_forecast_concepts * self.concept_emb_dim,
+            self.global_forecast_emb_plus  = _make_concept_emb(
+                mid_dim, self.n_global_forecast_concepts,
             )
-            self.global_forecast_emb_minus = nn.Linear(
-                mid_dim, self.n_global_forecast_concepts * self.concept_emb_dim,
+            self.global_forecast_emb_minus = _make_concept_emb(
+                mid_dim, self.n_global_forecast_concepts,
             )
 
         # ---- Sub-window id embedding ----
@@ -675,11 +734,35 @@ class ConceptBottleneckModel(nn.Module):
                 f"randint_p must be in [0, 1], got {self.randint_p}"
             )
 
-        # ---- No residual channel (STRICT CBM) ----
-        # There is no residual pathway from the encoder to the sub-decoder.
-        # The residual_proj / residual_list machinery that used to exist here
-        # has been removed entirely. See the "residual_dim was removed"
-        # comment at the top of __init__.
+        # ---- Optional hybrid residual channel (Option 1) ----
+        # A small learned bypass from the encoder(s) to the sub-decoder that
+        # carries the continuous level/scale the (near-binary) concepts cannot.
+        #   residual_lb : Linear(mid_dim -> r) on z_global  -> shared across
+        #                 sub-windows (the recent PM2.5 level).
+        #   residual_fc : Linear(mid_dim -> r) on z_per_sw[k] -> per forecast
+        #                 sub-window (that block's covariate magnitudes);
+        #                 future_aware only.
+        # Penalized in the loss (alpha_residual_reg * ||residual||^2) and
+        # zeroable at eval (disable_residual) for the concept-only forecast.
+        self.residual_dim = int(residual_dim)
+        if self.residual_dim > 0:
+            self.residual_lb_proj = nn.Linear(mid_dim, self.residual_dim)
+            if self._forecast_side_active:
+                self.residual_fc_proj = nn.Linear(mid_dim, self.residual_dim)
+            else:
+                self.residual_fc_proj = None
+        else:
+            self.residual_lb_proj = None
+            self.residual_fc_proj = None
+        # Residual contribution to the decoder input width:
+        #   future_aware : lb residual + per-sw fc residual = 2 * r
+        #   lookback_only: lb residual only               =     r
+        if self.residual_dim > 0:
+            residual_in_dim = (2 * self.residual_dim
+                               if self._forecast_side_active
+                               else self.residual_dim)
+        else:
+            residual_in_dim = 0
 
         # ---- Sub-window context BiGRU (sequence-aware refinement) ----
         # Each forecast sub-window has its own concept context fc_ctx[k] of
@@ -750,7 +833,7 @@ class ConceptBottleneckModel(nn.Module):
         #
         # Output: T_sw forecast values. decoder_depth = number of Linear layers per block.
         dec_in_dim  = (lb_ctx_dim + fc_ctx_dim + sw_gru_out_dim + gfc_ctx_dim
-                       + sub_window_id_dim)
+                       + sub_window_id_dim + residual_in_dim)
         if decoder_depth < 1:
             raise ValueError(f"decoder_depth must be >= 1, got {decoder_depth}")
         if decoder_n_blocks < 1:
@@ -1254,10 +1337,27 @@ class ConceptBottleneckModel(nn.Module):
                 # sequence summary.
                 sw_enhanced_lookback_shared = lb_enhanced.mean(dim=1)      # (B, 2*sw_gru_hidden)
 
-        # (Residual channel removed -- this is a strict CBM.
-        #  ``disable_residual`` is retained as a no-op arg so old callers /
-        #  concept-only-MAE eval code paths don't error, but there is no
-        #  residual pathway left to disable.)
+        # 3c) Optional hybrid residual channel (Option 1). Small learned bypass
+        # carrying the continuous level/scale the concepts can't encode.
+        #   res_lb      : (B, r) from z_global, shared across sub-windows.
+        #   res_fc_list : list of (B, r), one per forecast sub-window (from
+        #                 z_per_sw[k]); None in lookback_only mode.
+        # disable_residual zeroes them (concept-only forecast) while keeping the
+        # decoder-input width fixed. The (non-zeroed) magnitudes are returned as
+        # "residual" for the trainer's L2 penalty.
+        res_lb, res_fc_list = None, None
+        residual_for_penalty: list[torch.Tensor] = []
+        if self.residual_dim > 0:
+            res_lb = self.residual_lb_proj(z_global)                     # (B, r)
+            residual_for_penalty.append(res_lb)
+            if self._forecast_side_active and self.residual_fc_proj is not None:
+                res_fc_list = [self.residual_fc_proj(z_per_sw[k])
+                               for k in range(self.n_subwindows)]         # N x (B, r)
+                residual_for_penalty.extend(res_fc_list)
+            if disable_residual:
+                res_lb = torch.zeros_like(res_lb)
+                if res_fc_list is not None:
+                    res_fc_list = [torch.zeros_like(r) for r in res_fc_list]
 
         # 4) Shared sub-decoder, parameterized by sub-window id.
         sub_forecasts = []
@@ -1272,12 +1372,17 @@ class ConceptBottleneckModel(nn.Module):
                 if self.n_global_forecast_concepts > 0:
                     parts.append(gfc_ctx)
                 parts.append(sw_emb)
+                if self.residual_dim > 0:
+                    parts.append(res_lb)             # shared lookback-level residual
+                    parts.append(res_fc_list[k])     # per-sub-window forecast residual
             else:
                 # lookback_only: dec_in = lb_ctx + (shared LB-BiGRU summary) + sw_emb
                 parts = [lb_ctx]
                 if sw_enhanced_lookback_shared is not None:
                     parts.append(sw_enhanced_lookback_shared)
                 parts.append(sw_emb)
+                if self.residual_dim > 0:
+                    parts.append(res_lb)             # lookback-level residual
             dec_in = torch.cat(parts, dim=-1)
             # ---- Residual sub-decoder stack (NHiTS-style) ----
             # Each block produces a signed delta forecast; the deltas sum
@@ -1312,5 +1417,8 @@ class ConceptBottleneckModel(nn.Module):
             # Shapes: (B, N_lb_sw, K_lb_sw). Empty tensor in future_aware mode.
             "lb_sw_logits": lb_sw_logits,
             "lb_sw_acts":   lb_sw_acts,
-            # (residual removed -- strict CBM, no bypass to regularize)
+            # Hybrid residual channel magnitudes (Option 1) for L2 penalty.
+            # (B, r * n_residual_projs); empty tensor when residual_dim == 0.
+            "residual": (torch.cat([r.reshape(B, -1) for r in residual_for_penalty], dim=-1)
+                         if residual_for_penalty else x.new_zeros((B, 0))),
         }

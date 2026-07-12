@@ -361,6 +361,10 @@ def build_window_label_tables(
     single_forecast_bottleneck: bool = False,
     min_pos_rate: float = 0.0,
     max_pos_rate: float = 1.0,
+    cap_lb: int = 0,
+    cap_fc: int = 0,
+    cap_gfc: int = 0,
+    cap_lb_sw: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
            list[dict], list[dict], list[dict], list[dict]]:
     """Top-level helper used by ``train_cbm.py``.
@@ -388,6 +392,26 @@ def build_window_label_tables(
         concepts_path, only_ok=only_ok,
         min_pos_rate=min_pos_rate, max_pos_rate=max_pos_rate,
     )
+
+    # Optional hard caps on the number of concepts per bottleneck. Truncates
+    # the FIRST `cap` accepted concepts (deterministic, and identical across
+    # train/val/test because it reads the same JSON in the same order, so the
+    # label-table shapes stay consistent). Used for the capacity / leakage
+    # experiment: if collapsing each bottleneck to 2-3 concepts barely changes
+    # forecast MAE, the decoder is shortcutting through the ± embeddings rather
+    # than genuinely routing information through the concepts. cap <= 0 = no cap.
+    def _cap(tag: str, accepted: list, fns: list, cap: int):
+        if cap and cap > 0 and len(accepted) > cap:
+            print(f"  [cap] {tag}: keeping first {cap} of {len(accepted)} "
+                  f"concepts (capacity/leak experiment).")
+            return accepted[:cap], fns[:cap]
+        return accepted, fns
+
+    lb_accepted,    lb_fns    = _cap("lookback",           lb_accepted,    lb_fns,    cap_lb)
+    fc_accepted,    fc_fns    = _cap("forecast",           fc_accepted,    fc_fns,    cap_fc)
+    gfc_accepted,   gfc_fns   = _cap("forecast-global",    gfc_accepted,   gfc_fns,   cap_gfc)
+    lb_sw_accepted, lb_sw_fns = _cap("lookback-subwindow", lb_sw_accepted, lb_sw_fns, cap_lb_sw)
+
     if (not lb_accepted and not lb_sw_accepted
             and not fc_accepted and not gfc_accepted):
         raise RuntimeError(f"No OK concepts loaded from {concepts_path}.")
