@@ -1204,6 +1204,31 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  total trainable params: {n_params/1e6:.2f} M")
 
+    # ----- Config self-check: verify the requested switches are ACTUALLY live -----
+    # Inspects the built modules (not just the args) so the printout reflects
+    # what the model will really do, and hard-fails if a flag silently no-op'd.
+    emb_is_static = type(model.lookback_emb_plus).__name__ == "_StaticConceptEmb"
+    if args.static_concept_emb and not emb_is_static:
+        raise RuntimeError("static_concept_emb requested but embedding heads are "
+                           f"{type(model.lookback_emb_plus).__name__}, not _StaticConceptEmb.")
+    if (not args.static_concept_emb) and emb_is_static:
+        raise RuntimeError("static_concept_emb NOT requested but embedding heads are static.")
+    print(f"  [config] concept embeddings : "
+          f"{'STATIC (input-independent)' if emb_is_static else 'input-conditional CEM'}"
+          f"  (concept_emb_dim d={model.concept_emb_dim})")
+
+    res_active = getattr(model, "residual_dim", 0) > 0 and model.residual_lb_proj is not None
+    if (args.residual_dim > 0) != res_active:
+        raise RuntimeError(f"residual mismatch: --residual_dim={args.residual_dim} but "
+                           f"residual_active={res_active}.")
+    if res_active:
+        fc_res = (model.residual_fc_proj is not None)
+        print(f"  [config] residual channel  : ON  (dim r={model.residual_dim}; "
+              f"lookback residual=yes, forecast-SW residual={'yes' if fc_res else 'no'}; "
+              f"alpha_residual_reg={args.alpha_residual_reg})")
+    else:
+        print(f"  [config] residual channel  : OFF (strict CBM)")
+
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
     )
