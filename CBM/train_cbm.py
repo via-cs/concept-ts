@@ -371,6 +371,17 @@ def get_args():
                         "=> concepts drive the forecast (activation-channel leak "
                         "contained); near-zero degradation => the decoder "
                         "bypasses activations via e+/e-. Needs --test_segments_path.")
+    p.add_argument("--residual_case_study", type=int, default=3,
+                   help="Number of test windows to plot in the residual case "
+                        "study (ground-truth vs concept-only vs full forecast "
+                        "curves, one panel each, saved to "
+                        "<checkpoint_dir>/residual_case_study.png). Windows are "
+                        "auto-picked to span the concept-only-vs-full gap. "
+                        "0 disables. Only meaningful when --residual_dim > 0.")
+    p.add_argument("--case_study_windows", type=str, default="",
+                   help="Optional comma-separated test-window indices to force "
+                        "in the residual case study (overrides the auto-pick), "
+                        "e.g. '100,2500,6000'.")
     p.add_argument("--interp_cases",   type=int, default=6,
                    help="Number of GOOD (low-MAE) test windows to render as "
                         "per-case interpretability figures (continuous-feature "
@@ -1015,6 +1026,90 @@ def _save_interpretability_cases(
 
 
 # ---------------------------------------------------------------------------
+# Residual case study: ground-truth vs concept-only vs full forecast curves
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def _save_residual_case_study(out_dir, model, test_data, test_loader, device,
+                              tgt_scale, tgt_mean, output_length,
+                              n_cases=3, window_ids=None, base_year=2013):
+    """Overlay, per chosen test window, three de-z-scored curves:
+       ground-truth, CONCEPT-ONLY forecast (residual zeroed), and FULL
+       forecast (with residual). Saves one figure with n_cases panels.
+
+    Windows are chosen to span the concept-only-vs-full gap (largest / median /
+    smallest residual contribution) so the panels show where the residual
+    matters a lot vs. little -- unless explicit ``window_ids`` are given.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import torch
+
+    os.makedirs(out_dir, exist_ok=True)
+    model.eval()
+
+    # One pass: collect full + concept-only forecasts and ground truth (z-space).
+    full_l, co_l, gt_l = [], [], []
+    for batch in test_loader:
+        x, y = batch[0].to(device), batch[1]
+        full_l.append(model(x)["y_hat"][:, :, 0].cpu())
+        co_l.append(model(x, disable_residual=True)["y_hat"][:, :, 0].cpu())
+        gt_l.append(y[:, :, 0])
+    # de-z-score to raw µg/m³ (values need + mean).
+    full = torch.cat(full_l).numpy() * tgt_scale + tgt_mean       # (N, H)
+    co   = torch.cat(co_l).numpy()   * tgt_scale + tgt_mean
+    gt   = torch.cat(gt_l).numpy()   * tgt_scale + tgt_mean
+    N, H = full.shape
+
+    if window_ids:
+        picks = [w for w in window_ids if 0 <= w < N][:n_cases]
+    else:
+        gap = np.abs(co - full).mean(axis=1)                      # residual contribution/window
+        order = np.argsort(-gap)                                   # largest gap first
+        cand = [order[0], order[len(order) // 2], order[-1]]      # large / median / small
+        seen, picks = set(), []
+        for w in cand:
+            if int(w) not in seen:
+                picks.append(int(w)); seen.add(int(w))
+        picks = picks[:n_cases]
+    if not picks:
+        print("  [case_study] no windows to plot.")
+        return
+
+    fig, axes = plt.subplots(len(picks), 1, figsize=(11, 3.3 * len(picks)), squeeze=False)
+    axes = axes[:, 0]
+    hours = np.arange(H)
+    for ax, w in zip(axes, picks):
+        ax.plot(hours, gt[w],   color="#2ca02c", lw=2.4, label="ground truth")
+        ax.plot(hours, full[w], color="#d62728", lw=1.9, label="full model (+ residual)")
+        ax.plot(hours, co[w],   color="#1f77b4", lw=1.9, ls="--", label="concept-only (residual off)")
+        # Season / date from the window's own calendar columns (cols: year,
+        # month, day, hour). Forecast window starts at index input_length.
+        try:
+            xw, _ = test_data[w]
+            xw = xw if isinstance(xw, torch.Tensor) else torch.as_tensor(xw)
+            L_in = int(getattr(test_data, "input_length", xw.shape[0] - H))
+            ts = _window_timestamps(xw, base_year=base_year)
+            season = _season_from_month(int(xw[L_in, 1].item()))
+            ttl_time = f"{season}  |  {_fmt_ts(ts[-H])} → {_fmt_ts(ts[-1])}"
+        except Exception:
+            ttl_time = ""
+        mae_full = float(np.abs(gt[w] - full[w]).mean())
+        mae_co   = float(np.abs(gt[w] - co[w]).mean())
+        ax.set_title(f"test window {w}   {ttl_time}\n"
+                     f"full MAE {mae_full:.1f} µg/m³   vs   concept-only MAE {mae_co:.1f} µg/m³",
+                     fontsize=10)
+        ax.set_xlabel("forecast hour"); ax.set_ylabel("PM2.5 (µg/m³)")
+        ax.legend(fontsize=8, loc="best"); ax.margins(x=0.01)
+    fig.tight_layout()
+    fpath = os.path.join(out_dir, "residual_case_study.png")
+    fig.savefig(fpath, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [case_study] saved {fpath}  (windows {picks})")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1458,6 +1553,30 @@ def main():
             print(f"    per-window MAE = {mae_here:.4f}")
 
     # ----- Interpretability case figures (good forecasts) -----
+    # ----- Residual case study: GT vs concept-only vs full forecast curves -----
+    if args.residual_case_study > 0:
+        if args.residual_dim > 0:
+            print(f"\n── Residual case study: {args.residual_case_study} test windows "
+                  f"(ground-truth / concept-only / full) ──")
+            win_ids = [int(s) for s in args.case_study_windows.split(",") if s.strip()] \
+                      if args.case_study_windows.strip() else None
+            _save_residual_case_study(
+                out_dir       = args.checkpoint_dir,
+                model         = model,
+                test_data     = test_data,
+                test_loader   = test_loader,
+                device        = device,
+                tgt_scale     = tgt_scale,
+                tgt_mean      = float(test_data.ans_type.mean_[0]),
+                output_length = args.output_length,
+                n_cases       = args.residual_case_study,
+                window_ids    = win_ids,
+                base_year     = args.interp_base_year,
+            )
+        else:
+            print("\n  (residual case study skipped: needs --residual_dim > 0 so "
+                  "concept-only and full forecasts differ.)")
+
     if args.interp_cases > 0:
         print(f"\n── Interpretability figures: {args.interp_cases} good test windows ──")
         _save_interpretability_cases(
