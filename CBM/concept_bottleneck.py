@@ -1055,9 +1055,34 @@ class ConceptBottleneckModel(nn.Module):
         mask = torch.bernoulli(torch.full_like(acts, float(self.randint_p)))
         return mask * labels.to(acts.dtype) + (1.0 - mask) * acts
 
+    def _apply_concept_override(self, ac: torch.Tensor,
+                                concept_override: dict | None,
+                                layer: str) -> torch.Tensor:
+        """DETERMINISTICALLY force specific concepts' activations (analysis only).
+
+        ``concept_override`` (or None) maps a bottleneck key to
+        {concept_index: forced_value}, e.g. {"fc": {3: 1.0}}. Applied to the
+        (B, K) activation tensor of the named ``layer`` BEFORE the CEM ±
+        embedding mixing. Default None => no-op, so training is unaffected.
+        For the per-sub-window forecast bottleneck this is called once per
+        sub-window, so an "fc" override forces the concept at EVERY sub-window
+        (whole-horizon intervention). Used by CBM/analyze_concepts.py for
+        causal-effect and counterfactual experiments; never used in training.
+        """
+        if not concept_override:
+            return ac
+        spec = concept_override.get(layer)
+        if not spec:
+            return ac
+        ac = ac.clone()
+        for idx, val in spec.items():
+            ac[:, int(idx)] = float(val)
+        return ac
+
     def forward(self, x: torch.Tensor, disable_residual: bool = False,
                 concept_labels: dict | None = None,
-                intervention: str | None = None) -> dict:
+                intervention: str | None = None,
+                concept_override: dict | None = None) -> dict:
         """Forward pass.
 
         Args
@@ -1167,6 +1192,7 @@ class ConceptBottleneckModel(nn.Module):
         # The decoder receives concat(ĉ_0, ..., ĉ_{K_lb-1}) in R^{K_lb * d}.
         lb_logits = self.lookback_concept_predictor(z_global)  # (B, K_lb)
         lb_acts   = torch.sigmoid(lb_logits)                   # (B, K_lb)
+        lb_acts   = self._apply_concept_override(lb_acts, concept_override, "lb")
         lb_eplus  = self.lookback_emb_plus(z_global).reshape(B,
                         self.n_lookback_concepts, self.concept_emb_dim)
         lb_eminus = self.lookback_emb_minus(z_global).reshape(B,
@@ -1187,6 +1213,7 @@ class ConceptBottleneckModel(nn.Module):
         if self._forecast_side_active and self.n_global_forecast_concepts > 0:
             gfc_logits = self.global_forecast_concept_predictor(z_global_forecast)   # (B, K_gfc)
             gfc_acts   = torch.sigmoid(gfc_logits)
+            gfc_acts   = self._apply_concept_override(gfc_acts, concept_override, "gfc")
             g_ep = self.global_forecast_emb_plus(z_global_forecast).reshape(
                 B, self.n_global_forecast_concepts, self.concept_emb_dim,
             )
@@ -1218,6 +1245,7 @@ class ConceptBottleneckModel(nn.Module):
             for k in range(self.n_lookback_subwindows):
                 lg = self.lookback_sw_concept_predictors[k](z_per_lb_sw[k])    # (B, K_lb_sw)
                 ac = torch.sigmoid(lg)                                          # (B, K_lb_sw)
+                ac = self._apply_concept_override(ac, concept_override, "lb_sw")
                 ep = self.lookback_sw_emb_plus(z_per_lb_sw[k]).reshape(
                     B, self.n_lookback_subwindow_concepts, self.concept_emb_dim,
                 )
@@ -1254,6 +1282,7 @@ class ConceptBottleneckModel(nn.Module):
             # context is reused for every sub-window's decoding.
             lg = self.forecast_concept_predictors[0](z_global_forecast)  # (B, K_fc)
             ac = torch.sigmoid(lg)
+            ac = self._apply_concept_override(ac, concept_override, "fc")
             ep = self.forecast_emb_plus(z_global_forecast).reshape(B,
                         self.n_forecast_concepts, self.concept_emb_dim)
             em = self.forecast_emb_minus(z_global_forecast).reshape(B,
@@ -1292,6 +1321,7 @@ class ConceptBottleneckModel(nn.Module):
             for k in range(self.n_subwindows):
                 lg = self.forecast_concept_predictors[k](z_per_sw[k])    # (B, K_fc)
                 ac = torch.sigmoid(lg)                                    # (B, K_fc)
+                ac = self._apply_concept_override(ac, concept_override, "fc")
                 ep = self.forecast_emb_plus(z_per_sw[k]).reshape(B,
                             self.n_forecast_concepts, self.concept_emb_dim)
                 em = self.forecast_emb_minus(z_per_sw[k]).reshape(B,
