@@ -288,48 +288,83 @@ def plot_effects(effects, out_dir, top_k):
 
 
 # ---------------------------------------------------------------------------
-# (3) causal-effect similarity heatmap
+# (3) causal-effect similarity heatmaps
 # ---------------------------------------------------------------------------
-def plot_similarity(E, names, effects, out_dir):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _cluster_order(S, fallback_key):
+    """Row/col order from hierarchical clustering on distance 1 - S."""
     import numpy as np
-
-    # Pearson correlation of effect curves across concepts.
-    Ez = E - E.mean(axis=1, keepdims=True)
-    norm = np.linalg.norm(Ez, axis=1, keepdims=True)
-    norm[norm == 0] = 1.0
-    S = (Ez / norm) @ (Ez / norm).T                              # (C, C) in [-1,1]
-
-    # Order rows/cols by hierarchical clustering if scipy is available.
     try:
         from scipy.cluster.hierarchy import linkage, leaves_list
         from scipy.spatial.distance import squareform
         D = 1.0 - S
         np.fill_diagonal(D, 0.0)
-        D = (D + D.T) / 2.0
-        order = leaves_list(linkage(squareform(D, checks=False), method="average"))
+        D = np.clip((D + D.T) / 2.0, 0.0, 2.0)
+        return leaves_list(linkage(squareform(D, checks=False), method="average"))
     except Exception:
-        order = np.argsort(-E.mean(axis=1))                      # fallback: by mean effect
+        return np.argsort(-fallback_key)
 
-    So = S[np.ix_(order, order)]
+
+def _draw_similarity(S, names, effects, order, out_path, title, cbar_label):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    So = S[order][:, order]                                       # reorder rows + cols
     cats = [effects[j]["category"] for j in order]
-    cols, cmap = _cat_colors(cats)
-
+    cols, _ = _cat_colors(cats)
     fig, ax = plt.subplots(figsize=(11, 10))
     im = ax.imshow(So, cmap="RdBu_r", vmin=-1, vmax=1)
     ax.set_xticks(range(len(names))); ax.set_yticks(range(len(names)))
     ax.set_xticklabels([names[j] for j in order], fontsize=5, rotation=90)
     ax.set_yticklabels([names[j] for j in order], fontsize=5)
-    # category color strip
     for k, c in enumerate(cols):
         ax.add_patch(plt.Rectangle((k - 0.5, -1.5), 1, 1, color=c, clip_on=False))
-    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="effect-curve correlation")
-    ax.set_title("Causal-effect similarity between concepts\n"
-                 "(Pearson corr of effect curves; clustered; top strip = category)")
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, "effect_similarity_heatmap.png"),
-                                    dpi=130, bbox_inches="tight"); plt.close(fig)
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label=cbar_label)
+    ax.set_title(title)
+    fig.tight_layout(); fig.savefig(out_path, dpi=130, bbox_inches="tight"); plt.close(fig)
+
+
+def plot_similarity(E, names, effects, out_dir):
+    """Two complementary similarity heatmaps from the causal effect curves E (C, H):
+
+    1. SIGNED (primary, "semantic"): cosine of the RAW (un-centered) effect
+       curves. Positive => the two concepts push the forecast the SAME
+       direction with a similar temporal profile (both raise / both lower);
+       negative => antagonists (one raises, one lowers). This is what you want
+       for "similar concepts contribute the same way."
+    2. SHAPE (supplementary): Pearson corr (mean-centered) -- ignores direction,
+       compares only the temporal shape. Useful to see when two concepts share
+       a profile but push opposite ways (that's the summer-vs-winter case).
+    """
+    import numpy as np
+
+    # --- SIGNED: cosine of un-centered curves (keeps sign + shape) ---
+    n_raw = np.linalg.norm(E, axis=1, keepdims=True); n_raw[n_raw == 0] = 1.0
+    S_signed = (E / n_raw) @ (E / n_raw).T                       # (C, C) in [-1,1]
+
+    # --- SHAPE: Pearson (mean-centered) ---
+    Ez = E - E.mean(axis=1, keepdims=True)
+    n_z = np.linalg.norm(Ez, axis=1, keepdims=True); n_z[n_z == 0] = 1.0
+    S_shape = (Ez / n_z) @ (Ez / n_z).T
+
+    mean_signed = E.mean(axis=1)
+    order_signed = _cluster_order(S_signed, mean_signed)
+    order_shape  = _cluster_order(S_shape,  mean_signed)
+
+    _draw_similarity(
+        S_signed, names, effects, order_signed,
+        os.path.join(out_dir, "effect_similarity_signed_heatmap.png"),
+        "Causal-effect similarity (SIGNED) between concepts\n"
+        "(cosine of raw effect curves: +1 = same direction & shape, -1 = antagonist; "
+        "clustered; top strip = category)",
+        "signed effect-curve cosine",
+    )
+    _draw_similarity(
+        S_shape, names, effects, order_shape,
+        os.path.join(out_dir, "effect_similarity_shape_heatmap.png"),
+        "Causal-effect similarity (SHAPE only) between concepts\n"
+        "(Pearson corr; direction removed; clustered; top strip = category)",
+        "effect-curve correlation (shape)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +461,9 @@ def main():
 
     print(f"\nDone. Figures in {args.out_dir}:")
     for f in ("causal_effect_curves.png", "causal_effect_heatmap.png",
-              "concept_importance.png", "effect_similarity_heatmap.png",
+              "concept_importance.png",
+              "effect_similarity_signed_heatmap.png",  # SIGNED (semantic): same-direction concepts cluster
+              "effect_similarity_shape_heatmap.png",   # SHAPE only (Pearson)
               "counterfactual_sweep.png"):
         print(f"  - {f}")
 
