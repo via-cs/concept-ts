@@ -85,6 +85,19 @@ C_LB   = "#0f766e"   # lookback concept header (teal)
 C_FC   = "#b45309"   # forecast-sw concept header (amber)
 C_GFC  = "#6d28d9"   # global-forecast concept header (violet)
 
+# Compact axis labels for the thin covariate strips in #1/#4.
+FRIENDLY = {"TEMP": "Temp\n(°C)", "PRES": "Press\n(hPa)", "DEWP": "Dew pt\n(°C)",
+            "RAIN": "Precip\n(mm)", "WSPM": "Wind\n(m/s)", "PM10": "PM10", "O3": "O3",
+            "NO2": "NO2", "SO2": "SO2", "CO": "CO"}
+# Keyword groups used to auto-pick "important" concepts to sweep in #2.
+SWEEP_GROUPS = {
+    "temperature": ["temp", "hot", "cold", "warming", "cooling", "heat", "winter", "summer"],
+    "humidity":    ["humid", "dewp", "dew", "rain"],
+    "pollutant":   ["pm10", "pm25", "pm2", "_co", "co_", "no2", "so2", "o3", "ozone",
+                    "pollut", "carryover"],
+    "wind":        ["wind", "calm", "stagn", "windy"],
+}
+
 
 # ---------------------------------------------------------------------------
 # small helpers
@@ -214,6 +227,7 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
 
     x, _ = test_data[w]
     x = x if isinstance(x, torch.Tensor) else torch.as_tensor(x)
@@ -222,43 +236,52 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
     season = _season(int(x[L, 1].item()))
     mae = float(np.abs(gt[w] - yh[w]).mean()) * scale
 
-    feats = [f for f in args.features.split(",") if f.strip() in FEATCOL][:3]
+    # ALL requested covariates as THIN strips (readable trend/shape).
+    feats = [f for f in args.features.split(",") if f.strip() in FEATCOL]
     nrow = 1 + len(feats)
 
-    fig = plt.figure(figsize=(14, 2.2 + 1.7 * nrow))
-    gs = fig.add_gridspec(nrow, 2, width_ratios=[2.35, 1.0],
-                          height_ratios=[1.7] + [1.0] * len(feats),
-                          hspace=0.45, wspace=0.14)
+    fig = plt.figure(figsize=(14, 3.0 + 0.95 * len(feats)))
+    gs = fig.add_gridspec(nrow, 2, width_ratios=[2.4, 1.0],
+                          height_ratios=[2.4] + [0.5] * len(feats),
+                          hspace=0.30, wspace=0.16)
 
     t_full = np.arange(L + H)
     t_fc = np.arange(L, L + H)
 
-    # ---- PM2.5 main panel ----
+    # ---- PM2.5 main panel (tall) ----
     ax = fig.add_subplot(gs[0, 0])
     pm_lb = x[:L, PM25_COL].numpy() * scale + mean
     gt_r = gt[w] * scale + mean
     yh_r = yh[w] * scale + mean
-    ax.plot(np.arange(L), pm_lb, color="#555555", lw=1.6, label="PM2.5 lookback")
-    ax.plot(t_fc, gt_r, color=C_GT, lw=2.4, label="ground truth")
+    ax.plot(np.arange(L), pm_lb, color="#555555", lw=1.7, label="PM2.5 lookback")
+    ax.plot(t_fc, gt_r, color=C_GT, lw=2.5, label="ground truth")
     ax.plot(t_fc, yh_r, color=C_FULL, lw=2.0, ls="--", label="model forecast")
     ax.axvline(L, color="k", lw=1.0, ls=":", alpha=0.7)
     ax.set_ylabel("PM2.5 (µg/m³)", fontsize=10)
-    ax.set_title("PM2.5", fontsize=11, fontweight="bold", loc="left")
-    ax.legend(fontsize=8, loc="upper left", framealpha=0.9)
-    ax.margins(x=0.01); ax.grid(alpha=0.25)
+    ax.set_title("PM2.5 (target)", fontsize=12, fontweight="bold", loc="left")
+    ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
+    ax.margins(x=0.01); ax.grid(alpha=0.25); ax.tick_params(labelbottom=False)
 
-    # ---- covariate panels ----
+    # ---- thin covariate strips (all in one figure) ----
     for i, f in enumerate(feats):
-        axc = fig.add_subplot(gs[i + 1, 0])
-        axc.plot(t_full, x[:, FEATCOL[f]].numpy(), color=C_COV, lw=1.4)
-        axc.axvline(L, color="k", lw=1.0, ls=":", alpha=0.7)
-        axc.set_title(f, fontsize=10, fontweight="bold", loc="left")
-        axc.margins(x=0.01); axc.grid(alpha=0.25)
+        axc = fig.add_subplot(gs[i + 1, 0], sharex=ax)
+        axc.plot(t_full, x[:, FEATCOL[f]].numpy(), color=C_COV, lw=1.15)
+        axc.axvline(L, color="k", lw=0.9, ls=":", alpha=0.7)
+        axc.set_ylabel(FRIENDLY.get(f, f), fontsize=8, rotation=0, ha="right", va="center", labelpad=26)
+        axc.yaxis.set_major_locator(MaxNLocator(3)); axc.tick_params(labelsize=7)
+        axc.margins(x=0.01); axc.grid(alpha=0.18)
         if i == len(feats) - 1:
-            axc.set_xlabel("hours from window start (dotted line = forecast start)", fontsize=9)
+            axc.set_xlabel("hours from window start   (dotted line = forecast start)", fontsize=9)
+        else:
+            axc.tick_params(labelbottom=False)
 
-    # ---- concept panel (top-K per bottleneck) ----
+    # ---- right column: period box + top-K concepts per bottleneck ----
     axt = fig.add_subplot(gs[:, 1]); axt.axis("off")
+    period = (f"Forecast window\n {_fmt(ts[L])}\n   →  {_fmt(ts[-1])}\n"
+              f"Lookback start\n {_fmt(ts[0])}\nSeason:  {season}")
+    axt.text(0.0, 0.998, period, fontsize=8.5, family="monospace", va="top",
+             transform=axt.transAxes,
+             bbox=dict(boxstyle="round,pad=0.5", fc="#f4f4f4", ec="#bbbbbb"))
     k = args.top_concepts
     blocks = [
         ("LOOKBACK concepts (history)", C_LB, _top(lb_acts[w], metas["lb"], k)),
@@ -267,24 +290,22 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
         ("GLOBAL-FORECAST concepts (whole horizon)", C_GFC,
          _top(gfc_acts[w], metas["gfc"], k) if gfc_acts.shape[1] else []),
     ]
-    y0 = 0.995
+    y0 = 0.80
     for title, col, rows in blocks:
-        axt.text(0.0, y0, title, fontsize=10, fontweight="bold", color=col,
+        axt.text(0.0, y0, title, fontsize=9.5, fontweight="bold", color=col,
                  transform=axt.transAxes, va="top")
-        y0 -= 0.045
+        y0 -= 0.038
         for p, name in rows:
-            axt.text(0.02, y0, f"{p:4.2f}", fontsize=9, family="monospace",
+            axt.text(0.02, y0, f"{p:4.2f}", fontsize=8.5, family="monospace",
                      color="#111", transform=axt.transAxes, va="top")
-            axt.text(0.16, y0, name, fontsize=8.5, transform=axt.transAxes, va="top")
-            y0 -= 0.033
-        y0 -= 0.028
+            axt.text(0.16, y0, name, fontsize=8, transform=axt.transAxes, va="top")
+            y0 -= 0.029
+        y0 -= 0.024
 
     ttl_col = C_FULL if tag == "worst" else "#111"
-    fig.suptitle(
-        f"{'FAILURE CASE' if tag == 'worst' else 'CASE STUDY'} — test window {w}   "
-        f"({season};  forecast {_fmt(ts[L])} → {_fmt(ts[-1])})\n"
-        f"forecast MAE = {mae:.1f} µg/m³",
-        fontsize=13, fontweight="bold", color=ttl_col, y=1.0)
+    fig.suptitle(f"{'FAILURE CASE' if tag == 'worst' else 'CASE STUDY'}"
+                 f"   ·   {season}   ·   forecast MAE = {mae:.1f} µg/m³",
+                 fontsize=13, fontweight="bold", color=ttl_col, y=0.995)
     fig.savefig(os.path.join(args.out_dir, f"case{'4_worst' if tag == 'worst' else '1_best'}_w{w}.png"),
                 dpi=140, bbox_inches="tight")
     plt.close(fig)
@@ -292,75 +313,125 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
 
 
 # ---------------------------------------------------------------------------
-# #2  concept probability sweep + flip table
+# #2  concept probability sweeps (several important concepts) + flip table
 # ---------------------------------------------------------------------------
+def _select_nonoverlap(order, n, gap):
+    """Pick n windows from `order` keeping index gaps >= `gap` (so the chosen
+    cases don't overlap in time / aren't near-duplicate slices)."""
+    picked = []
+    for w in order:
+        w = int(w)
+        if all(abs(w - p) >= gap for p in picked):
+            picked.append(w)
+            if len(picked) >= n:
+                break
+    return picked
+
+
+def _pick_sweep_targets(metas, act_win, n, override):
+    """Return up to n (layer, idx, name) concepts to sweep. Either an explicit
+    --sweep_concepts list ('layer:name' or 'name'), or one representative
+    (highest mean activation) per SWEEP_GROUPS keyword group (temperature /
+    humidity / pollutant / wind)."""
+    if override.strip():
+        out = []
+        for tok in override.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            layer, name = (tok.split(":", 1) if ":" in tok else ("fc", tok))
+            hits = [i for i, c in enumerate(metas.get(layer, [])) if c.get("name") == name]
+            if hits:
+                out.append((layer, hits[0], name))
+            else:
+                print(f"  [2] warn: sweep concept {tok!r} not found; skipping.")
+        return out[:n]
+    picked, used = [], set()
+    for _grp, kws in SWEEP_GROUPS.items():
+        best, bestval = None, -1.0
+        for layer in ("fc", "gfc", "lb"):
+            meta, a = metas[layer], act_win[layer]
+            if a.shape[1] == 0:
+                continue
+            for i, c in enumerate(meta):
+                if (layer, i) in used:
+                    continue
+                nm = c.get("name", "").lower()
+                if any(kw in nm for kw in kws):
+                    val = float(a[:, i].mean())
+                    if val > bestval:
+                        bestval, best = val, (layer, i, c.get("name", f"{layer}{i}"))
+        if best:
+            picked.append(best); used.add((best[0], best[1]))
+        if len(picked) >= n:
+            break
+    return picked[:n]
+
+
 @torch.no_grad()
-def concept_sweep(model, test_data, device, metas, fc_acts_mean, best_windows,
+def concept_sweep(model, test_data, device, metas, lb_acts, fc_mean, gfc_acts, gt,
                   scale, mean, args, disable_residual):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     H = args.output_length
-    # target concept
-    layer = args.sweep_layer
-    if args.sweep_concept:
-        idxs = [i for i, c in enumerate(metas[layer]) if c.get("name") == args.sweep_concept]
-        if not idxs:
-            raise ValueError(f"--sweep_concept {args.sweep_concept!r} not in layer {layer}.")
-        tgt = idxs[0]
-    else:
-        # most-activated forecast concept on the anchor window
-        tgt = int(np.argmax(fc_acts_mean[best_windows[0]])) if fc_acts_mean.shape[1] else 0
-        layer = "fc"
-    tgt_name = metas[layer][tgt].get("name", f"{layer}{tgt}")
+    act_win = {"lb": lb_acts, "fc": fc_mean, "gfc": gfc_acts}
+    targets = _pick_sweep_targets(metas, act_win, args.n_sweeps, args.sweep_concepts)
+    if not targets:
+        print("  [2] no sweep targets found (check --sweep_concepts / concept names).")
+        return
     sweep = [float(s) for s in args.sweep_vals.split(",") if s.strip()]
-
-    # sweep on the two anchor windows (or first two best)
-    wins = best_windows[:2] if len(best_windows) >= 2 else best_windows
-    fig, axes = plt.subplots(1, len(wins), figsize=(7.5 * len(wins), 4.6), squeeze=False)
-    axes = axes[0]
     cmap = plt.get_cmap("viridis")
-    for ax, w in zip(axes, wins):
-        x, y = test_data[w]
-        gt_r = y[:, 0].numpy() * scale + mean
-        ax.plot(np.arange(H), gt_r, color="k", lw=2.6, label="ground truth", zorder=6)
-        for si, sv in enumerate(sweep):
-            yh = model(x.unsqueeze(0).to(device), disable_residual=disable_residual,
-                       concept_override={layer: {tgt: sv}})["y_hat"][0, :, 0]
-            yh = yh.cpu().numpy() * scale + mean
-            ax.plot(np.arange(H), yh, color=cmap(si / max(1, len(sweep) - 1)),
-                    lw=1.7, label=f"p={sv:g}")
-        ax.set_title(f"window {w}  (GT mean {gt_r.mean():.0f} µg/m³)", fontsize=10)
-        ax.set_xlabel("forecast hour"); ax.set_ylabel("PM2.5 (µg/m³)")
-        ax.legend(fontsize=8, loc="best"); ax.grid(alpha=0.25)
-    fig.suptitle(f"Counterfactual concept sweep — [{layer}] {tgt_name}\n"
-                 "(force the concept's activation from 0 → 1 over the whole horizon)",
-                 fontsize=12, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(os.path.join(args.out_dir, "case2_sweep.png"), dpi=140, bbox_inches="tight")
-    plt.close(fig)
 
-    # flip table on the anchor window: flip each of its top-3 activated concepts to 0.
-    w0 = best_windows[0]
-    x0, y0 = test_data[w0]
+    # Same clean vs polluted anchor windows for every concept -> comparable panels.
+    lvl = (gt * scale + mean).mean(axis=1)
+    clean_w, poll_w = int(np.argmin(lvl)), int(np.argmax(lvl))
+    wins = [(clean_w, "clean"), (poll_w, "polluted")]
+
+    for (layer, ti, tname) in targets:
+        fig, axes = plt.subplots(1, 2, figsize=(15, 4.6), squeeze=False)
+        for ax, (w, tt) in zip(axes[0], wins):
+            x, y = test_data[w]
+            gt_r = y[:, 0].numpy() * scale + mean
+            ax.plot(np.arange(H), gt_r, color="k", lw=2.6, label="ground truth", zorder=6)
+            for si, sv in enumerate(sweep):
+                yh = model(x.unsqueeze(0).to(device), disable_residual=disable_residual,
+                           concept_override={layer: {ti: sv}})["y_hat"][0, :, 0]
+                yh = yh.cpu().numpy() * scale + mean
+                ax.plot(np.arange(H), yh, color=cmap(si / max(1, len(sweep) - 1)),
+                        lw=1.7, label=f"p={sv:g}")
+            ax.set_title(f"{tt} window  (GT mean {gt_r.mean():.0f} µg/m³)", fontsize=10)
+            ax.set_xlabel("forecast hour"); ax.set_ylabel("PM2.5 (µg/m³)")
+            ax.legend(fontsize=8, loc="best"); ax.grid(alpha=0.25)
+        fig.suptitle(f"Counterfactual concept sweep — [{layer}] {tname}\n"
+                     "(force the concept's activation 0 → 1 over the whole horizon)",
+                     fontsize=12, fontweight="bold")
+        fig.tight_layout()
+        safe = str(tname).replace("/", "_")
+        fig.savefig(os.path.join(args.out_dir, f"case2_sweep_{layer}_{safe}.png"),
+                    dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  [2] swept [{layer}] {tname}  -> case2_sweep_{layer}_{safe}.png")
+
+    # ---- flip table: on the polluted window, flip its top-3 forecast concepts to 0 ----
+    x0, y0 = test_data[poll_w]
     gt0 = y0[:, 0].numpy() * scale + mean
     base = model(x0.unsqueeze(0).to(device), disable_residual=disable_residual)["y_hat"][0, :, 0].cpu().numpy() * scale + mean
     base_mae = float(np.abs(gt0 - base).mean())
-    # flip each of the anchor window's top-3 activated forecast concepts to 0.
-    top_fc = np.argsort(-fc_acts_mean[w0])[:3] if fc_acts_mean.shape[1] else []
+    top_fc = np.argsort(-fc_mean[poll_w])[:3] if fc_mean.shape[1] else []
     with open(os.path.join(args.out_dir, "case2_flip_table.csv"), "w", newline="") as fcsv:
         wr = csv.writer(fcsv)
-        wr.writerow(["window", "concept", "base_activation", "base_MAE", "flipped_MAE(→0)",
-                     "Δmean_forecast(µg/m³)"])
+        wr.writerow(["window", "concept", "base_activation", "base_MAE",
+                     "flipped_MAE(->0)", "delta_mean_forecast_ugm3"])
         for j in top_fc:
             yh = model(x0.unsqueeze(0).to(device), disable_residual=disable_residual,
                        concept_override={"fc": {int(j): 0.0}})["y_hat"][0, :, 0].cpu().numpy() * scale + mean
-            wr.writerow([w0, metas["fc"][int(j)].get("name", f"fc{j}"),
-                         f"{fc_acts_mean[w0][int(j)]:.3f}", f"{base_mae:.2f}",
+            wr.writerow([poll_w, metas["fc"][int(j)].get("name", f"fc{j}"),
+                         f"{fc_mean[poll_w][int(j)]:.3f}", f"{base_mae:.2f}",
                          f"{float(np.abs(gt0 - yh).mean()):.2f}",
                          f"{float((yh - base).mean()):+.2f}"])
-    print(f"  [2] swept [{layer}] {tgt_name} on windows {list(wins)}; flip table -> case2_flip_table.csv")
+    print("  [2] flip table -> case2_flip_table.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -496,13 +567,22 @@ def get_args():
     p.add_argument("--cap_lb_sw_concepts", type=int, default=0)
     # case-study knobs
     p.add_argument("--disable_residual", action="store_true")
-    p.add_argument("--features", type=str, default="TEMP,WSPM,PM10",
-                   help="Up to 3 covariates to show in #1/#4 (besides PM2.5).")
+    p.add_argument("--features", type=str, default="TEMP,PRES,DEWP,RAIN,WSPM",
+                   help="Covariates shown as THIN strips in #1/#4 (besides the "
+                        "tall PM2.5 panel). Default: the 5 continuous drivers.")
     p.add_argument("--top_concepts", type=int, default=7)
     p.add_argument("--n_case1", type=int, default=3, help="# best-MAE windows for #1.")
     p.add_argument("--n_case4", type=int, default=3, help="# worst-MAE windows for #4.")
-    p.add_argument("--sweep_concept", type=str, default="")
-    p.add_argument("--sweep_layer", type=str, default="fc", choices=["lb", "fc", "gfc"])
+    p.add_argument("--min_window_gap", type=int, default=0,
+                   help="Min index gap between chosen case windows so they don't "
+                        "overlap in time. 0 => auto (input_length + output_length, "
+                        "i.e. fully disjoint windows).")
+    p.add_argument("--n_sweeps", type=int, default=4,
+                   help="# of concept-sweep figures in #2 (one per important concept).")
+    p.add_argument("--sweep_concepts", type=str, default="",
+                   help="Comma list of concepts to sweep, 'layer:name' or 'name' "
+                        "(layer defaults fc), e.g. 'fc:is_warming_block,gfc:is_forecast_very_humid'. "
+                        "Empty => auto-pick one per keyword group (temperature/humidity/pollutant/wind).")
     p.add_argument("--sweep_vals", type=str, default="0,0.25,0.5,0.75,1.0")
     p.add_argument("--fidelity_topk", type=int, default=20)
     p.add_argument("--fidelity_panels", type=int, default=4,
@@ -529,15 +609,17 @@ def main():
     yh, gt, lb_acts, fc_full, gfc_acts = collect(model, test_data, device, dr)
     fc_mean = fc_full.mean(axis=1) if fc_full.ndim == 3 and fc_full.shape[2] else np.zeros((len(gt), 0))
     per_mae = np.abs(gt - yh).mean(axis=1)                        # z-scored per-window MAE
-    best = list(np.argsort(per_mae)[:args.n_case1])
-    worst = list(np.argsort(-per_mae)[:args.n_case4])
+    gap = args.min_window_gap if args.min_window_gap > 0 else (args.input_length + args.output_length)
+    best = _select_nonoverlap(np.argsort(per_mae), args.n_case1, gap)
+    worst = _select_nonoverlap(np.argsort(-per_mae), args.n_case4, gap)
+    print(f"  non-overlapping (gap≥{gap}) best windows {best}; worst {worst}")
 
     print("── #1 Single-window walkthroughs (best) ──")
     for w in best:
         plot_window(int(w), test_data, yh, gt, lb_acts, fc_mean, gfc_acts, metas, scale, mean, args, "best")
 
-    print("── #2 Concept probability sweep ──")
-    concept_sweep(model, test_data, device, metas, fc_mean, best, scale, mean, args, dr)
+    print("── #2 Concept probability sweeps (important concepts) ──")
+    concept_sweep(model, test_data, device, metas, lb_acts, fc_mean, gfc_acts, gt, scale, mean, args, dr)
 
     if labels is not None:
         print("── #3 Concept fidelity (precision@K) ──")
