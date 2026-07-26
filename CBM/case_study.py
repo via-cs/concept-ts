@@ -128,7 +128,8 @@ def _fmt(ts):
 
 def _top(acts_1d, meta, k):
     order = np.argsort(-acts_1d)[:k]
-    return [(float(acts_1d[j]), meta[j].get("name", f"c{j}")) for j in order]
+    return [(float(acts_1d[j]), meta[j].get("name", f"c{j}"),
+             meta[j].get("description", "")) for j in order]
 
 
 # ---------------------------------------------------------------------------
@@ -222,12 +223,13 @@ def collect(model, test_data, device, disable_residual, chunk=128):
 # ---------------------------------------------------------------------------
 # #1 / #4  single-window walkthrough figure
 # ---------------------------------------------------------------------------
-def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
+def plot_window(w, test_data, yh, gt, lb_acts, fc_full, gfc_acts, metas,
                 scale, mean, args, tag):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
+    import textwrap
 
     x, _ = test_data[w]
     x = x if isinstance(x, torch.Tensor) else torch.as_tensor(x)
@@ -236,37 +238,64 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
     season = _season(int(x[L, 1].item()))
     mae = float(np.abs(gt[w] - yh[w]).mean()) * scale
 
+    gt_r = gt[w] * scale + mean
+    yh_r = yh[w] * scale + mean
+
+    # ---- choose ONE forecast sub-window to spotlight (concepts shown for it) --
+    Nsw = fc_full.shape[1] if fc_full.ndim == 3 and fc_full.shape[2] else 0
+    sw_len = max(1, H // Nsw) if Nsw else H
+    if Nsw:
+        if args.focus_subwindow >= 0:
+            k_sw = min(args.focus_subwindow, Nsw - 1)
+        else:                              # auto: sub-window holding the GT peak
+            k_sw = int(np.argmax(gt_r)) // sw_len
+            k_sw = min(k_sw, Nsw - 1)
+        sw_a, sw_b = L + k_sw * sw_len, L + (k_sw + 1) * sw_len   # x-range (incl L offset)
+    else:
+        k_sw, sw_a, sw_b = -1, None, None
+
     # ALL requested covariates as THIN strips (readable trend/shape).
     feats = [f for f in args.features.split(",") if f.strip() in FEATCOL]
     nrow = 1 + len(feats)
 
-    fig = plt.figure(figsize=(14, 3.0 + 0.95 * len(feats)))
-    gs = fig.add_gridspec(nrow, 2, width_ratios=[2.4, 1.0],
+    fig = plt.figure(figsize=(14.5, 3.0 + 0.95 * len(feats)))
+    gs = fig.add_gridspec(nrow, 2, width_ratios=[2.15, 1.25],
                           height_ratios=[2.4] + [0.5] * len(feats),
-                          hspace=0.30, wspace=0.16)
+                          hspace=0.30, wspace=0.14)
 
     t_full = np.arange(L + H)
     t_fc = np.arange(L, L + H)
 
+    def _mark_subwindow(a, top_label=False):
+        """Two red dotted verticals + light shade for the chosen sub-window."""
+        if sw_a is None:
+            return
+        a.axvspan(sw_a, sw_b, color="red", alpha=0.06, zorder=0)
+        for xv in (sw_a, sw_b):
+            a.axvline(xv, color="red", lw=1.3, ls=(0, (3, 3)), alpha=0.9, zorder=3)
+        if top_label:
+            a.text((sw_a + sw_b) / 2, 0.97, f"sub-window {k_sw}", color="red",
+                   fontsize=8.5, ha="center", va="top", transform=a.get_xaxis_transform())
+
     # ---- PM2.5 main panel (tall) ----
     ax = fig.add_subplot(gs[0, 0])
     pm_lb = x[:L, PM25_COL].numpy() * scale + mean
-    gt_r = gt[w] * scale + mean
-    yh_r = yh[w] * scale + mean
     ax.plot(np.arange(L), pm_lb, color="#555555", lw=1.7, label="PM2.5 lookback")
     ax.plot(t_fc, gt_r, color=C_GT, lw=2.5, label="ground truth")
     ax.plot(t_fc, yh_r, color=C_FULL, lw=2.0, ls="--", label="model forecast")
     ax.axvline(L, color="k", lw=1.0, ls=":", alpha=0.7)
+    _mark_subwindow(ax, top_label=True)
     ax.set_ylabel("PM2.5 (µg/m³)", fontsize=10)
     ax.set_title("PM2.5 (target)", fontsize=12, fontweight="bold", loc="left")
     ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
     ax.margins(x=0.01); ax.grid(alpha=0.25); ax.tick_params(labelbottom=False)
 
-    # ---- thin covariate strips (all in one figure) ----
+    # ---- thin covariate strips (all in one figure, x-aligned with PM2.5) ----
     for i, f in enumerate(feats):
         axc = fig.add_subplot(gs[i + 1, 0], sharex=ax)
         axc.plot(t_full, x[:, FEATCOL[f]].numpy(), color=C_COV, lw=1.15)
         axc.axvline(L, color="k", lw=0.9, ls=":", alpha=0.7)
+        _mark_subwindow(axc)
         axc.set_ylabel(FRIENDLY.get(f, f), fontsize=8, rotation=0, ha="right", va="center", labelpad=26)
         axc.yaxis.set_major_locator(MaxNLocator(3)); axc.tick_params(labelsize=7)
         axc.margins(x=0.01); axc.grid(alpha=0.18)
@@ -275,32 +304,46 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_acts_mean, gfc_acts, metas,
         else:
             axc.tick_params(labelbottom=False)
 
-    # ---- right column: period box + top-K concepts per bottleneck ----
+    # ---- right column: period box + top-K concepts (+ descriptions) ----
     axt = fig.add_subplot(gs[:, 1]); axt.axis("off")
+    if k_sw >= 0:
+        sw_lo, sw_hi = ts[sw_a], ts[min(sw_b - 1, len(ts) - 1)]
+        sw_line = f"Spotlight sub-window {k_sw}\n {_fmt(sw_lo)}\n   →  {_fmt(sw_hi)}\n"
+    else:
+        sw_line = ""
     period = (f"Forecast window\n {_fmt(ts[L])}\n   →  {_fmt(ts[-1])}\n"
-              f"Lookback start\n {_fmt(ts[0])}\nSeason:  {season}")
-    axt.text(0.0, 0.998, period, fontsize=8.5, family="monospace", va="top",
+              f"Lookback start\n {_fmt(ts[0])}\nSeason:  {season}\n" + sw_line)
+    axt.text(0.0, 0.999, period, fontsize=8.2, family="monospace", va="top",
              transform=axt.transAxes,
              bbox=dict(boxstyle="round,pad=0.5", fc="#f4f4f4", ec="#bbbbbb"))
     k = args.top_concepts
+    fc_rows = (_top(fc_full[w, k_sw], metas["fc"], k) if k_sw >= 0 else [])
+    fc_title = (f"FORECAST concepts · sub-win {k_sw} (h {k_sw*sw_len}–{(k_sw+1)*sw_len-1})"
+                if k_sw >= 0 else "FORECAST sub-window concepts")
     blocks = [
         ("LOOKBACK concepts (history)", C_LB, _top(lb_acts[w], metas["lb"], k)),
-        (f"FORECAST sub-window concepts (mean over {args.n_subwindows})", C_FC,
-         _top(fc_acts_mean[w], metas["fc"], k) if fc_acts_mean.shape[1] else []),
+        (fc_title, C_FC, fc_rows),
         ("GLOBAL-FORECAST concepts (whole horizon)", C_GFC,
          _top(gfc_acts[w], metas["gfc"], k) if gfc_acts.shape[1] else []),
     ]
-    y0 = 0.80
+    y0 = 0.775
     for title, col, rows in blocks:
-        axt.text(0.0, y0, title, fontsize=9.5, fontweight="bold", color=col,
-                 transform=axt.transAxes, va="top")
-        y0 -= 0.038
-        for p, name in rows:
-            axt.text(0.02, y0, f"{p:4.2f}", fontsize=8.5, family="monospace",
+        wrapped = textwrap.fill(title, 44)
+        axt.text(0.0, y0, wrapped, fontsize=9.0, fontweight="bold",
+                 color=col, transform=axt.transAxes, va="top")
+        y0 -= 0.027 * (1 + wrapped.count("\n"))
+        for p, name, desc in rows:
+            axt.text(0.02, y0, f"{p:4.2f}", fontsize=8.3, family="monospace",
                      color="#111", transform=axt.transAxes, va="top")
-            axt.text(0.16, y0, name, fontsize=8, transform=axt.transAxes, va="top")
-            y0 -= 0.029
-        y0 -= 0.024
+            axt.text(0.15, y0, name, fontsize=8.3, transform=axt.transAxes, va="top")
+            y0 -= 0.021
+            if desc:
+                dshort = textwrap.shorten(str(desc), width=62, placeholder="…")
+                axt.text(0.15, y0, f"({dshort})", fontsize=6.7, color="#666",
+                         style="italic", transform=axt.transAxes, va="top")
+                y0 -= 0.0175
+            y0 -= 0.004
+        y0 -= 0.006
 
     ttl_col = C_FULL if tag == "worst" else "#111"
     fig.suptitle(f"{'FAILURE CASE' if tag == 'worst' else 'CASE STUDY'}"
@@ -570,7 +613,13 @@ def get_args():
     p.add_argument("--features", type=str, default="TEMP,PRES,DEWP,RAIN,WSPM",
                    help="Covariates shown as THIN strips in #1/#4 (besides the "
                         "tall PM2.5 panel). Default: the 5 continuous drivers.")
-    p.add_argument("--top_concepts", type=int, default=7)
+    p.add_argument("--top_concepts", type=int, default=5,
+                   help="# top concepts listed per bottleneck in #1/#4. Each is "
+                        "shown with its description, so ~5 keeps the panel clean.")
+    p.add_argument("--focus_subwindow", type=int, default=-1,
+                   help="Which forecast sub-window to spotlight in #1/#4 (its "
+                        "concepts are listed, and it is marked with red verticals). "
+                        "-1 => auto (sub-window containing the ground-truth PM2.5 peak).")
     p.add_argument("--n_case1", type=int, default=3, help="# best-MAE windows for #1.")
     p.add_argument("--n_case4", type=int, default=3, help="# worst-MAE windows for #4.")
     p.add_argument("--min_window_gap", type=int, default=0,
@@ -616,7 +665,7 @@ def main():
 
     print("── #1 Single-window walkthroughs (best) ──")
     for w in best:
-        plot_window(int(w), test_data, yh, gt, lb_acts, fc_mean, gfc_acts, metas, scale, mean, args, "best")
+        plot_window(int(w), test_data, yh, gt, lb_acts, fc_full, gfc_acts, metas, scale, mean, args, "best")
 
     print("── #2 Concept probability sweeps (important concepts) ──")
     concept_sweep(model, test_data, device, metas, lb_acts, fc_mean, gfc_acts, gt, scale, mean, args, dr)
@@ -629,7 +678,7 @@ def main():
 
     print("── #4 Failure analysis (worst) ──")
     for w in worst:
-        plot_window(int(w), test_data, yh, gt, lb_acts, fc_mean, gfc_acts, metas, scale, mean, args, "worst")
+        plot_window(int(w), test_data, yh, gt, lb_acts, fc_full, gfc_acts, metas, scale, mean, args, "worst")
 
     print(f"\nDone. Figures/tables in {args.out_dir}")
 
