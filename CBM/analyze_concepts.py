@@ -288,83 +288,71 @@ def plot_effects(effects, out_dir, top_k):
 
 
 # ---------------------------------------------------------------------------
-# (3) causal-effect similarity heatmaps
+# (3) signed-effect similarity heatmap (direction + magnitude, shape ignored)
 # ---------------------------------------------------------------------------
-def _cluster_order(S, fallback_key):
-    """Row/col order from hierarchical clustering on distance 1 - S."""
-    import numpy as np
-    try:
-        from scipy.cluster.hierarchy import linkage, leaves_list
-        from scipy.spatial.distance import squareform
-        D = 1.0 - S
-        np.fill_diagonal(D, 0.0)
-        D = np.clip((D + D.T) / 2.0, 0.0, 2.0)
-        return leaves_list(linkage(squareform(D, checks=False), method="average"))
-    except Exception:
-        return np.argsort(-fallback_key)
+def plot_similarity(E, names, effects, out_dir):
+    """Similarity from each concept's SCALAR signed causal effect (direction +
+    magnitude), NOT the temporal shape.
 
+    Every concept i is reduced to a single number
 
-def _draw_similarity(S, names, effects, order, out_path, title, cbar_label):
+        v_i = mean_t  E[i, t]        (average causal Δ-forecast, µg/m³)
+
+    whose SIGN says whether forcing the concept ON raises (+) or lowers (-)
+    PM2.5, and whose |value| says HOW STRONGLY it moves the forecast. Two
+    concepts are similar only if these scalars are close -- i.e. they push the
+    forecast the same direction AND by a similar amount. Temporal shape plays
+    no role. Similarity is
+
+        S_ij = 1 - |v_i - v_j| / range(v)   in [0, 1]
+
+    so S=1 on the diagonal, S->1 for same-direction/same-magnitude pairs, and
+    S->0 for opposite-direction or very-different-magnitude pairs.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    So = S[order][:, order]                                       # reorder rows + cols
-    cats = [effects[j]["category"] for j in order]
-    cols, _ = _cat_colors(cats)
-    fig, ax = plt.subplots(figsize=(11, 10))
-    im = ax.imshow(So, cmap="RdBu_r", vmin=-1, vmax=1)
-    ax.set_xticks(range(len(names))); ax.set_yticks(range(len(names)))
-    ax.set_xticklabels([names[j] for j in order], fontsize=5, rotation=90)
-    ax.set_yticklabels([names[j] for j in order], fontsize=5)
-    for k, c in enumerate(cols):
-        ax.add_patch(plt.Rectangle((k - 0.5, -1.5), 1, 1, color=c, clip_on=False))
-    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label=cbar_label)
-    ax.set_title(title)
-    fig.tight_layout(); fig.savefig(out_path, dpi=130, bbox_inches="tight"); plt.close(fig)
-
-
-def plot_similarity(E, names, effects, out_dir):
-    """Two complementary similarity heatmaps from the causal effect curves E (C, H):
-
-    1. SIGNED (primary, "semantic"): cosine of the RAW (un-centered) effect
-       curves. Positive => the two concepts push the forecast the SAME
-       direction with a similar temporal profile (both raise / both lower);
-       negative => antagonists (one raises, one lowers). This is what you want
-       for "similar concepts contribute the same way."
-    2. SHAPE (supplementary): Pearson corr (mean-centered) -- ignores direction,
-       compares only the temporal shape. Useful to see when two concepts share
-       a profile but push opposite ways (that's the summer-vs-winter case).
-    """
     import numpy as np
 
-    # --- SIGNED: cosine of un-centered curves (keeps sign + shape) ---
-    n_raw = np.linalg.norm(E, axis=1, keepdims=True); n_raw[n_raw == 0] = 1.0
-    S_signed = (E / n_raw) @ (E / n_raw).T                       # (C, C) in [-1,1]
+    v = E.mean(axis=1)                                           # (C,) signed effect µg/m³
+    rng = float(v.max() - v.min()) or 1.0
+    D = np.abs(v[:, None] - v[None, :])                          # pairwise |Δ signed effect|
+    S = 1.0 - D / rng                                            # (C, C) in [0, 1]
 
-    # --- SHAPE: Pearson (mean-centered) ---
-    Ez = E - E.mean(axis=1, keepdims=True)
-    n_z = np.linalg.norm(Ez, axis=1, keepdims=True); n_z[n_z == 0] = 1.0
-    S_shape = (Ez / n_z) @ (Ez / n_z).T
+    order = np.argsort(-v)                                       # strongest raisers -> strongest lowerers
+    So = S[order][:, order]
+    labels = [f"{names[j]}  ({v[j]:+.1f})" for j in order]
 
-    mean_signed = E.mean(axis=1)
-    order_signed = _cluster_order(S_signed, mean_signed)
-    order_shape  = _cluster_order(S_shape,  mean_signed)
+    # ---- similarity heatmap (sorted by signed effect) ----
+    fig, ax = plt.subplots(figsize=(11, 10))
+    im = ax.imshow(So, cmap="viridis", vmin=0.0, vmax=1.0)
+    ax.set_xticks(range(len(labels))); ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=5, rotation=90)
+    ax.set_yticklabels(labels, fontsize=5)
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02,
+                 label="signed-effect similarity  (1 = same direction & magnitude)")
+    ax.set_title("Concept similarity from SCALAR signed causal effect\n"
+                 f"(v = mean Δ-forecast µg/m³ per concept; range {v.min():+.1f}…{v.max():+.1f}; "
+                 "shape ignored; sorted by v, tick = concept (v))")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "effect_similarity_signed_heatmap.png"),
+                dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
-    _draw_similarity(
-        S_signed, names, effects, order_signed,
-        os.path.join(out_dir, "effect_similarity_signed_heatmap.png"),
-        "Causal-effect similarity (SIGNED) between concepts\n"
-        "(cosine of raw effect curves: +1 = same direction & shape, -1 = antagonist; "
-        "clustered; top strip = category)",
-        "signed effect-curve cosine",
-    )
-    _draw_similarity(
-        S_shape, names, effects, order_shape,
-        os.path.join(out_dir, "effect_similarity_shape_heatmap.png"),
-        "Causal-effect similarity (SHAPE only) between concepts\n"
-        "(Pearson corr; direction removed; clustered; top strip = category)",
-        "effect-curve correlation (shape)",
-    )
+    # ---- companion: the signed-effect strength itself (direction + magnitude) ----
+    fig, ax = plt.subplots(figsize=(9, max(4, 0.24 * len(v))))
+    cols = ["#c0392b" if v[j] >= 0 else "#2471a3" for j in order]   # red raises, blue lowers
+    ax.barh(range(len(v)), v[order], color=cols)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_yticks(range(len(v))); ax.set_yticklabels([names[j] for j in order], fontsize=6)
+    ax.invert_yaxis()
+    ax.set_xlabel("signed causal effect  v = mean Δ-forecast PM2.5 (µg/m³)")
+    ax.set_title("Per-concept signed effect (direction + magnitude)\n"
+                 "red = raises PM2.5, blue = lowers; bar length = influence strength")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "signed_effect_strength.png"),
+                dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -462,8 +450,8 @@ def main():
     print(f"\nDone. Figures in {args.out_dir}:")
     for f in ("causal_effect_curves.png", "causal_effect_heatmap.png",
               "concept_importance.png",
-              "effect_similarity_signed_heatmap.png",  # SIGNED (semantic): same-direction concepts cluster
-              "effect_similarity_shape_heatmap.png",   # SHAPE only (Pearson)
+              "effect_similarity_signed_heatmap.png",  # scalar signed effect: direction + magnitude
+              "signed_effect_strength.png",            # per-concept signed effect (dir + magnitude)
               "counterfactual_sweep.png"):
         print(f"  - {f}")
 

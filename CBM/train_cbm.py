@@ -371,6 +371,11 @@ def get_args():
                         "=> concepts drive the forecast (activation-channel leak "
                         "contained); near-zero degradation => the decoder "
                         "bypasses activations via e+/e-. Needs --test_segments_path.")
+    p.add_argument("--auroc_report_k", type=int, default=5,
+                   help="After training, save a paper-ready table of the K "
+                        "lowest-AUROC (worst-predicted) concepts in EACH bottleneck, "
+                        "with binary accuracy@0.5, to <checkpoint_dir>/concept_auroc/ "
+                        "(CSV + Markdown + LaTeX). 0 to disable.")
     p.add_argument("--residual_case_study", type=int, default=3,
                    help="Number of test windows to plot in the residual case "
                         "study (ground-truth vs concept-only vs full forecast "
@@ -781,6 +786,83 @@ def _print_forecast_table(title: str,
         print(f"   [{c['id']:>2}] {c['name']:32s}                          "
               + "  ".join(per_sw))
     print(bar)
+
+
+def _lowest_auroc_summary(triples, out_dir, source, k=5):
+    """Paper table: the k WORST-predicted concepts (lowest AUROC) per bottleneck.
+
+    ``triples`` is a list of (bottleneck_name, logits, labels, meta). For each
+    bottleneck we compute one AUROC and one binary accuracy@0.5 per concept, then
+    keep the k concepts with the LOWEST AUROC. Accuracy@0.5 is the fraction of
+    inputs whose thresholded prediction (sigmoid(logit) >= 0.5 -> 1) matches the
+    ground-truth label. Forecast logits/labels may be 3-D (N, N_sw, K); they are
+    flattened over (window, sub-window) so each concept gets a single pooled
+    AUROC / accuracy. Concepts whose test labels are all-0 or all-1 have an
+    undefined AUROC and are excluded from the ranking. Writes CSV + Markdown +
+    LaTeX (ready for the paper) to ``out_dir``.
+    """
+    import os, csv
+    rows_all = []                                   # (bottleneck, rank, name, id, auroc, acc, pos)
+    for bname, logits, labels, meta in triples:
+        if logits is None or logits.numel() == 0 or len(meta) == 0:
+            continue
+        lg = logits.reshape(-1, logits.shape[-1])
+        la = labels.reshape(-1, labels.shape[-1])
+        aurocs = per_concept_auroc(lg, la)
+        accs   = per_concept_accuracy(lg, la)
+        pos    = la.float().mean(dim=0).tolist()
+        cand = [(i, aurocs[i], accs[i], pos[i]) for i in range(len(meta))
+                if aurocs[i] == aurocs[i]]          # drop NaN (degenerate labels)
+        cand.sort(key=lambda t: t[1])               # ascending AUROC = worst first
+        n_nan = len(meta) - len(cand)
+        for rank, (i, au, ac, pr) in enumerate(cand[:k], 1):
+            rows_all.append((bname, rank, meta[i].get("name", f"c{i}"),
+                             meta[i].get("id", i), au, ac, pr))
+        bar = "─" * 78
+        note = (f"  ({n_nan} concept(s) with degenerate labels excluded)" if n_nan else "")
+        print(f"\n  {k} LOWEST-AUROC {bname} concepts on {source}{note}")
+        print(bar)
+        print(f"   {'rank':>4}  {'name':34s}  {'AUROC':>6}  {'acc@0.5':>8}  {'pos%':>6}")
+        print(bar)
+        for rank, (i, au, ac, pr) in enumerate(cand[:k], 1):
+            print(f"   {rank:>4}  {meta[i].get('name', 'c'+str(i)):34s}  "
+                  f"{au:>6.3f}  {ac*100:>7.1f}%  {pr*100:>5.1f}%")
+        print(bar)
+
+    if not rows_all:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.join(out_dir, f"lowest_auroc_concepts_{source.lower()}")
+    with open(stem + ".csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["bottleneck", "rank", "concept", "concept_id",
+                    "auroc", "accuracy_at_0.5", "pos_rate"])
+        for b, rk, nm, cid, au, ac, pr in rows_all:
+            w.writerow([b, rk, nm, cid, f"{au:.4f}", f"{ac:.4f}", f"{pr:.4f}"])
+    with open(stem + ".md", "w") as f:
+        f.write(f"# {k} lowest-AUROC concepts per bottleneck ({source})\n\n")
+        f.write("| Bottleneck | Concept | AUROC | Acc@0.5 | Pos. rate |\n")
+        f.write("|---|---|---|---|---|\n")
+        for b, rk, nm, cid, au, ac, pr in rows_all:
+            f.write(f"| {b} | {nm} | {au:.3f} | {ac*100:.1f}% | {pr*100:.1f}% |\n")
+    with open(stem + ".tex", "w") as f:
+        f.write("\\begin{table}[t]\n\\centering\n")
+        f.write("\\caption{The five worst-predicted concepts (lowest AUROC) in each "
+                "concept bottleneck on the test set. Accuracy is the binary "
+                "concept-prediction accuracy at a 0.5 probability threshold.}\n")
+        f.write("\\label{tab:lowest_auroc}\n")
+        f.write("\\begin{tabular}{llcc}\n\\toprule\n")
+        f.write("Bottleneck & Concept & AUROC & Acc@0.5 (\\%) \\\\\n\\midrule\n")
+        prev = None
+        for b, rk, nm, cid, au, ac, pr in rows_all:
+            if prev is not None and b != prev:
+                f.write("\\midrule\n")
+            bcell = b if b != prev else ""
+            nm_esc = str(nm).replace("_", "\\_")
+            f.write(f"{bcell} & \\texttt{{{nm_esc}}} & {au:.3f} & {ac*100:.1f} \\\\\n")
+            prev = b
+        f.write("\\bottomrule\n\\end{tabular}\n\\end{table}\n")
+    print(f"\n  Saved lowest-AUROC paper tables -> {stem}.{{csv,md,tex}}")
 
 
 # ---------------------------------------------------------------------------
@@ -1473,6 +1555,17 @@ def main():
                 "GLOBAL-FORECAST concepts on TEST (one rule per whole forecast window)",
                 t_gfc_lg, t_gfc_la, gfc_meta,
             )
+        if args.auroc_report_k > 0:
+            fc_name = ("Forecast (global bottleneck)" if args.single_forecast_bottleneck
+                       else "Forecast sub-window")
+            print("\n── Paper table: lowest-AUROC concepts per bottleneck (TEST) ──")
+            _lowest_auroc_summary(
+                [("Lookback",        t_lb_lg,  t_lb_la,  lb_meta),
+                 (fc_name,           t_fc_lg,  t_fc_la,  fc_meta),
+                 ("Forecast global", t_gfc_lg, t_gfc_la, gfc_meta)],
+                os.path.join(args.checkpoint_dir, "concept_auroc"),
+                "TEST", k=args.auroc_report_k,
+            )
     else:
         print("\n── Per-concept stats: TEST labels not provided, falling back to TRAIN ──")
         print("    Pass --test_segments_path to get the REAL test-set tables.")
@@ -1507,6 +1600,17 @@ def main():
             _print_lookback_table(
                 "GLOBAL-FORECAST concepts on TRAIN (fallback)",
                 tr_gfc_lg, tr_gfc_la, gfc_meta,
+            )
+        if args.auroc_report_k > 0:
+            fc_name = ("Forecast (global bottleneck)" if args.single_forecast_bottleneck
+                       else "Forecast sub-window")
+            print("\n── Paper table: lowest-AUROC concepts per bottleneck (TRAIN fallback) ──")
+            _lowest_auroc_summary(
+                [("Lookback",        tr_lb_lg,  tr_lb_la,  lb_meta),
+                 (fc_name,           tr_fc_lg,  tr_fc_la,  fc_meta),
+                 ("Forecast global", tr_gfc_lg, tr_gfc_la, gfc_meta)],
+                os.path.join(args.checkpoint_dir, "concept_auroc"),
+                "TRAIN", k=args.auroc_report_k,
             )
 
     # ----- Case studies -----
