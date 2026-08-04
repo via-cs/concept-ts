@@ -34,6 +34,8 @@ code (embedding_learning.py, prototype_learning.py, build_llm_init.py,
 extract_top_k.py, etc.) needs zero changes.
 """
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -133,15 +135,34 @@ class MixerEmbedding_Learning(nn.Module):
 
 
 # --------------------------------------------------------------------------
-# Mode switch — flip ONE of these four lines.
-# ADAPTER_MODE below is derived automatically from your choice.
+# Encoder selection — RUNTIME switch via the PROTO_ENCODER environment var.
+#
+#   PROTO_ENCODER unset / "conv"  -> ConvEmbedding_Learning   (Mode A, DEFAULT)
+#                 "conv_adapter"  -> ConvEmbedding_WithAdapter (Mode B)
+#                 "mixer"         -> MixerEmbedding_Learning   (Mode C, original ProtoTS)
+#                 "ts2vec"        -> TS2VecEmbedding_Learning  (Mode D)
+#
+# The DEFAULT is "conv", so any process that does NOT set the env var — the
+# CBM new model, every existing ProtoLLM-prototype run — resolves to exactly
+# the same encoder as before and is byte-for-byte unchanged. The ProtoTS
+# baseline sets PROTO_ENCODER=mixer to select the original ProtoTS encoder,
+# so nothing here needs to be edited by hand.
 # --------------------------------------------------------------------------
-Embedding_Learning = ConvEmbedding_Learning        # Mode A: no adapter (default)
-# Embedding_Learning = ConvEmbedding_WithAdapter   # Mode B: matching_head adapter
-# Embedding_Learning = MixerEmbedding_Learning     # Mode C: original ProtoTS
-# Embedding_Learning = TS2VecEmbedding_Learning    # Mode D: TS2Vec contrastive encoder
+_ENCODER_CHOICES = {
+    "conv":         ConvEmbedding_Learning,
+    "conv_adapter": ConvEmbedding_WithAdapter,
+    "mixer":        MixerEmbedding_Learning,
+    "ts2vec":       TS2VecEmbedding_Learning,
+}
+_ENCODER_NAME = os.environ.get("PROTO_ENCODER", "conv").lower()
+if _ENCODER_NAME not in _ENCODER_CHOICES:
+    raise ValueError(
+        f"PROTO_ENCODER={_ENCODER_NAME!r} not recognized; "
+        f"expected one of {list(_ENCODER_CHOICES)}."
+    )
+Embedding_Learning = _ENCODER_CHOICES[_ENCODER_NAME]
 
-# Derived adapter mode — do not edit; flip the alias above instead.
+# Derived adapter mode — set automatically from the selected encoder.
 # TS2Vec returns the same (B, output_length, mid_dim) per-timestep shape as
 # Mixer, so it pairs with the patch_embedding adapter for prototype routing.
 _ADAPTER_BY_ENCODER = {
@@ -151,3 +172,8 @@ _ADAPTER_BY_ENCODER = {
     TS2VecEmbedding_Learning:  "patch_embedding",
 }
 ADAPTER_MODE = _ADAPTER_BY_ENCODER[Embedding_Learning]
+
+# Checkpoint filename tag: empty for the default conv encoder (so existing
+# checkpoint names are preserved) and "_<name>" otherwise, so ProtoTS (mixer)
+# checkpoints never collide with the conv ones.
+ENCODER_CKPT_TAG = "" if _ENCODER_NAME == "conv" else f"_{_ENCODER_NAME}"

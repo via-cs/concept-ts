@@ -54,7 +54,7 @@ USE_LAST_YEAR_SPLIT = False
 #                  calendar columns: year (0-4), month (1-12), day (1-31),
 #                  hour (0-23).
 # ---------------------------------------------------------------------------
-DATASET = "PRSA"
+DATASET = os.environ.get("PROTO_DATASET", "PRSA")   # default PRSA (CBM-safe); ProtoTS sets PROTO_DATASET=LOF
 
 if DATASET == "LOF":
     TARGET_COLUMN = "load"

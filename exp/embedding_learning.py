@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model.embedding import Embedding_Learning
+from model.embedding import Embedding_Learning, ENCODER_CKPT_TAG
 from dataloader.dataloader import LOF_Dataset
 from exp.cluster_supervision import (
     ClusterLoss,
@@ -200,7 +200,7 @@ def main():
         f"L{args.num_layer}_"
         f"D{args.dropout}_"
         f"EMB{args.embed_dim}_"
-        f"BDP{args.bottle_dim_p}.pth"
+        f"BDP{args.bottle_dim_p}{ENCODER_CKPT_TAG}.pth"
     )
     os.makedirs("./checkpoint/embedding_learning", exist_ok=True)
     checkpoint_path = os.path.join("./checkpoint/embedding_learning", filename)

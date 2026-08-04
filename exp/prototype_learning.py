@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model.embedding import Embedding_Learning
+from model.embedding import Embedding_Learning, ENCODER_CKPT_TAG
 from model.prototype import Prototype
 from dataloader.dataloader import LOF_Dataset
 
@@ -77,6 +77,13 @@ def get_args():
                         help='Skip training; evaluate the freshly initialized '
                              'prototype layer on the test set and exit.')
 
+    parser.add_argument('--entropy_weight', type=float, default=1e-3,
+                        help='Weight of the routing-score entropy regularizer in '
+                             'train_loss (original ProtoTS default = 1e-3). Set to '
+                             '1e-2 to run the "x10" experiment. The value is folded '
+                             'into the prototype checkpoint filename so runs with '
+                             'different weights do not overwrite each other.')
+
     return parser.parse_args()
 
 
@@ -87,7 +94,7 @@ def set_seed(seed: int = 0) -> None:
     np.random.seed(seed)
     random.seed(seed)
 
-def train_loss(pred, ans, score, anchor_term=None):
+def train_loss(pred, ans, score, anchor_term=None, entropy_weight=1e-3):
     """Forecasting loss + entropy reg + (optional) hybrid anchor term.
 
     The anchor term is the weighted MSE between current layer-0
@@ -105,7 +112,7 @@ def train_loss(pred, ans, score, anchor_term=None):
     ls += nn.L1Loss()(pred[-1], ans)
 
     entropy = -torch.sum(score * torch.log(score + 1e-8), dim=-1)
-    ls += (1e-3) * torch.mean(entropy)
+    ls += entropy_weight * torch.mean(entropy)
 
     if USE_LOAD_BALANCING:
         # Switch-Transformer-style load-balancing: penalise concentration of
@@ -171,6 +178,7 @@ def train_loop(
     checkpoint_path_model, checkpoint_path_prototype,
     init_weight_path, device,
     anchor_lambda_emb=0.0, anchor_lambda_val=0.0, anchor_decay=1.0,
+    entropy_weight=1e-3,
 ):
     if os.path.exists(init_weight_path):
         init_value = torch.load(init_weight_path, map_location=device).float().to(device)
@@ -225,6 +233,7 @@ def train_loop(
                 ans.to(device),
                 all_score[0],
                 anchor_term=anchor_term,
+                entropy_weight=entropy_weight,
             )
 
             optimizer.zero_grad()
@@ -314,16 +323,20 @@ def main():
         f"IL{args.input_length}_"
         f"L{args.num_layer}_"
         f"D{args.dropout}_"
-        f"EMB{args.embed_dim}.pth"
+        f"EMB{args.embed_dim}"
+        f"{ENCODER_CKPT_TAG}_"
+        f"EW{args.entropy_weight:g}.pth"
     )
     model_path = os.path.join("./checkpoint/prototype_learning", model_filename)
-    
+
     prototype_filename = (
         f"{os.path.splitext(os.path.basename(args.dataset))[0]}_"
         f"OL{args.output_length}_"
         f"IL{args.input_length}_"
         f"PN{args.prototype_num}_"
-        f"SR{args.split_ratio}.pth"
+        f"SR{args.split_ratio}"
+        f"{ENCODER_CKPT_TAG}_"
+        f"EW{args.entropy_weight:g}.pth"
     )
     prototype_path = os.path.join("./checkpoint/prototype_learning", prototype_filename)
     
@@ -457,6 +470,7 @@ def main():
         anchor_lambda_emb=args.anchor_lambda_emb,
         anchor_lambda_val=args.anchor_lambda_val,
         anchor_decay=args.anchor_decay,
+        entropy_weight=args.entropy_weight,
     )
 
 

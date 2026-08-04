@@ -10,7 +10,7 @@ from layer.rev_norm import Rev_in
 # per-channel embedder at the Riverside PM2.5 schema. Keep in sync with the
 # ``DATASET`` constant in ``dataloader/dataloader.py``.
 # ---------------------------------------------------------------------------
-DATASET = "PRSA"
+DATASET = os.environ.get("PROTO_DATASET", "PRSA")   # default PRSA (CBM-safe); ProtoTS sets PROTO_DATASET=LOF
 
 if DATASET == "LOF":
     # 23-column LOF / ProtoTS schema (target = "load", last column).

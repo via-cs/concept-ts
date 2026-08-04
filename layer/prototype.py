@@ -114,10 +114,14 @@ class Prototype_Layer(nn.Module):
         #                        returns (B, D); used directly.
         # ------------------------------------------------------------------
         if self.adapter_mode == "patch_embedding":
+            # NOTE: bias=True to match the ORIGINAL ProtoTS patch_embedding
+            # (the ProtoLLM refactor had used bias=False). Only affects the
+            # patch_embedding adapter, i.e. the Mixer/ProtoTS + TS2Vec paths —
+            # the CBM and the default conv ("none") path never build this.
             self.patch_embedding = nn.Sequential(
-                nn.Linear(self.input_length, self.input_length * 2, bias=False),
+                nn.Linear(self.input_length, self.input_length * 2),
                 nn.ReLU(),
-                nn.Linear(self.input_length * 2, self.prototype_dim, bias=False)
+                nn.Linear(self.input_length * 2, self.prototype_dim)
             )
         elif self.adapter_mode == "matching_head":
             self.matching_head = nn.Linear(self.prototype_dim,
