@@ -49,8 +49,16 @@ except Exception:                                       # pragma: no cover
     StandardScaler = None
 
 
-TARGET = "PM2.5"
-CAT_COLS = ("year", "month", "day", "hour")
+# Schema (target + categorical cols) from the single source of truth
+# (dataset_config), selected by PROTO_DATASET (default "PRSA" → unchanged).
+try:
+    from dataset_config import D as _DSCFG
+except ModuleNotFoundError:                       # pragma: no cover
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from dataset_config import D as _DSCFG
+TARGET   = _DSCFG["target"]
+CAT_COLS = tuple(_DSCFG["cat_cols"])
 # TSL 'timeF' embedding wants normalized continuous values around 0.
 # We use the standard convention: x / period - 0.5  -> roughly [-0.5, 0.5].
 _CAT_PERIOD = {"year": 5, "month": 12, "day": 31, "hour": 24}

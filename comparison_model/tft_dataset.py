@@ -51,8 +51,16 @@ except Exception:                                       # pragma: no cover
     StandardScaler = None
 
 
-TARGET = "PM2.5"
-CAT_COLS = ("year", "month", "day", "hour")
+# Schema (target + categorical cols) from the single source of truth
+# (dataset_config), selected by PROTO_DATASET (default "PRSA" → unchanged).
+try:
+    from dataset_config import D as _DSCFG
+except ModuleNotFoundError:                       # pragma: no cover
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from dataset_config import D as _DSCFG
+TARGET   = _DSCFG["target"]
+CAT_COLS = tuple(_DSCFG["cat_cols"])
 # 1-indexed columns (month, day) shifted into 0..vocab-1 to make embedding lookup
 # safe. year is already 0..4, hour is already 0..23.
 _CAT_OFFSET = {"year": 0, "month": -1, "day": -1, "hour": 0}

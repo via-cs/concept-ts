@@ -66,6 +66,9 @@ sys.path.insert(0, str(_ROOT))
 from CBM.concept_bottleneck import ConceptBottleneckModel
 from CBM.concept_labels import build_window_label_tables
 from dataloader.dataloader import LOF_Dataset
+from dataset_config import D as DCFG          # schema (PROTO_DATASET, default PRSA)
+
+_TGT_UNIT = DCFG["unit"]                       # target unit label for reports
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +147,9 @@ def get_args():
     p.add_argument("--batch_size",     type=int, default=16)
     p.add_argument("--input_length",   type=int, default=96 * 4)
     p.add_argument("--output_length",  type=int, default=96)
-    p.add_argument("--input_dim",      type=int, default=23)
+    p.add_argument("--input_dim",      type=int, default=DCFG["input_dim"],
+                   help="#input channels incl. target. Defaults from dataset_config "
+                        "(PRSA=15, LOF=23) per the PROTO_DATASET env var.")
     p.add_argument("--output_dim",     type=int, default=1)
     p.add_argument("--num_layer",      type=int, default=4)
     p.add_argument("--dropout",        type=float, default=0.5)
@@ -673,7 +678,7 @@ def _print_leakage_diagnostic(diag: dict) -> None:
     print("   (only concept ACTIVATIONS are intervened; e+/e- embeddings untouched)")
     bar = "─" * 68
     print(bar)
-    print(f"   {'regime':10s}  {'MAE z':>9}  {'MAE µg/m³':>10}  {'Δ vs baseline µg/m³':>20}")
+    print(f"   {'regime':10s}  {'MAE z':>9}  {'MAE '+_TGT_UNIT:>10}  {'Δ vs baseline '+_TGT_UNIT:>20}")
     print(bar)
     for name in ("baseline", "oracle", "flip", "random"):
         d = diag[name]
@@ -684,8 +689,8 @@ def _print_leakage_diagnostic(diag: dict) -> None:
     flip_deg = diag["flip"]["raw"] - base
     rand_deg = diag["random"]["raw"] - base
     rel = (flip_deg / max(1e-9, base)) * 100
-    print(f"   flip degradation  = {flip_deg:+.3f} µg/m³  ({rel:+.1f}% vs baseline)")
-    print(f"   random degradation= {rand_deg:+.3f} µg/m³")
+    print(f"   flip degradation  = {flip_deg:+.3f} {_TGT_UNIT}  ({rel:+.1f}% vs baseline)")
+    print(f"   random degradation= {rand_deg:+.3f} {_TGT_UNIT}")
     # Heuristic read (guidance only; the user should judge in context).
     if flip_deg < 0.02 * base:
         print("   ⚠ LEAK LIKELY: flipping concepts barely changes the forecast, "
@@ -879,7 +884,7 @@ _PRSA_CONT_COLS  = [
     (4,  "PM10"), (5,  "SO2"),  (6,  "NO2"),  (7,  "CO"),   (8,  "O3"),
     (9,  "TEMP"), (10, "PRES"), (11, "DEWP"), (12, "RAIN"), (13, "WSPM"),
 ]
-_PRSA_PM25_COL   = 14
+_PRSA_PM25_COL   = DCFG["input_dim"] - 1     # target = last column (PRSA 14, LOF 22)
 
 
 def _season_from_month(m: int) -> str:
@@ -1367,6 +1372,13 @@ def main():
         single_forecast_bottleneck = args.single_forecast_bottleneck,
         use_rev_in   = 1,
         norm_type    = "B",
+        # ---- schema-general time-of-day encoding (from dataset_config) ------
+        # PRSA: hour col 3, 24-h period, clamp 23 (== old defaults).
+        # LOF : combined hour*4+minute/15 index, 96-step period, clamp 95.
+        calendar_hour_channel = DCFG["hour_channel"],
+        tod_channels          = DCFG["tod_channels"],
+        tod_period            = DCFG["tod_period"],
+        tod_max               = DCFG["tod_max"],
         # ---- Attention-weighted temporal pool + CEM RandInt ----------------
         # Two structural fixes for CEM leakage / sequence-invariance issues:
         # * attn_pool_hidden: width of the attention MLP that REPLACES the
@@ -1494,9 +1506,9 @@ def main():
     tgt_scale = float(test_data.ans_type.scale_[0])
     test_mse_raw = test_mse * (tgt_scale ** 2)
     test_mae_raw = test_mae * tgt_scale
-    print(f"  test MSE      = {test_mse_raw:.4f}  (full model, RAW µg/m³, "
+    print(f"  test MSE      = {test_mse_raw:.4f}  (full model, RAW {_TGT_UNIT}, "
           f"RMSE = {test_mse_raw ** 0.5:.4f})")
-    print(f"  test MAE      = {test_mae_raw:.4f}  (full model, RAW µg/m³)")
+    print(f"  test MAE      = {test_mae_raw:.4f}  (full model, RAW {_TGT_UNIT})")
 
     # (Concept-only-MAE reporting removed: the model is now strict CBM, so
     #  the full MAE reported above IS the concept-only MAE by construction.
@@ -1509,8 +1521,8 @@ def main():
         gap = co_mae - test_mae
         rel = (gap / max(1e-9, test_mae)) * 100
         print(f"  test MAE      = {co_mae:.6f}  (CONCEPT-ONLY, residual zeroed, z-scored)")
-        print(f"  test MAE      = {co_mae_raw:.4f}  (CONCEPT-ONLY, residual zeroed, RAW µg/m³)")
-        print(f"  residual gain = {gap*tgt_scale:+.4f} µg/m³  ({rel:+.1f}% of MAE); "
+        print(f"  test MAE      = {co_mae_raw:.4f}  (CONCEPT-ONLY, residual zeroed, RAW {_TGT_UNIT})")
+        print(f"  residual gain = {gap*tgt_scale:+.4f} {_TGT_UNIT}  ({rel:+.1f}% of MAE); "
               f"concepts alone reach {(test_mae/max(1e-9,co_mae))*100:.1f}% of concept-only MAE.")
     else:
         print(f"  (strict CBM: residual_dim=0, so the MAE above IS the "

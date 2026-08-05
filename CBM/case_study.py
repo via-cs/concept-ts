@@ -69,13 +69,14 @@ if str(_ROOT) not in sys.path:
 from CBM.concept_bottleneck import ConceptBottleneckModel
 from CBM.concept_labels import build_window_label_tables
 from dataloader.dataloader import LOF_Dataset
+from dataset_config import D as DCFG          # schema (PROTO_DATASET, default PRSA)
 
-
-# PRSA Aotizhongxin column layout of the (T, C) window tensor.
-FEATCOL = {"year": 0, "month": 1, "day": 2, "hour": 3, "PM10": 4, "SO2": 5,
-           "NO2": 6, "CO": 7, "O3": 8, "TEMP": 9, "PRES": 10, "DEWP": 11,
-           "RAIN": 12, "WSPM": 13, "PM2.5": 14}
-PM25_COL = 14
+# Plottable continuous covariates (name -> column index) and target metadata,
+# from the single source of truth. PRSA reproduces the old constants exactly.
+FEATCOL   = dict(DCFG["case_feats"])
+PM25_COL  = DCFG["input_dim"] - 1             # target = last column
+_TGT_NAME = DCFG["target"]                    # "PM2.5" | "load"
+_UNIT     = DCFG["unit"]                       # "µg/m³" | "MW"
 
 # Colors (colorblind-friendly, print-safe).
 C_GT   = "#2ca02c"   # ground truth (green)
@@ -109,6 +110,12 @@ def _season(m):
 
 
 def _timestamps(x, base_year):
+    # LOF (base_year is None) has no plain year/month/day/hour columns, so fall
+    # back to a synthetic monotonic axis stepped by the dataset resolution.
+    if base_year is None:
+        step = int(DCFG.get("step_minutes", 60))
+        t0 = datetime(2000, 1, 1)
+        return [t0 + timedelta(minutes=step * i) for i in range(x.shape[0])]
     yr = x[:, 0].round().long().tolist(); mo = x[:, 1].round().long().tolist()
     dy = x[:, 2].round().long().tolist(); hr = x[:, 3].round().long().tolist()
     out = []
@@ -177,6 +184,9 @@ def build(args, device):
         single_forecast_bottleneck=args.single_forecast_bottleneck,
         use_rev_in=1, norm_type="B", attn_pool_hidden=args.attn_pool_hidden,
         randint_p=args.randint_p,
+        # schema-general time-of-day encoding (must match training)
+        calendar_hour_channel=DCFG["hour_channel"], tod_channels=DCFG["tod_channels"],
+        tod_period=DCFG["tod_period"], tod_max=DCFG["tod_max"],
     ).to(device)
     model.load_state_dict(torch.load(os.path.join(args.checkpoint_dir, args.checkpoint_name),
                                      map_location=device))
@@ -280,13 +290,13 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_full, gfc_acts, metas,
     # ---- PM2.5 main panel (tall) ----
     ax = fig.add_subplot(gs[0, 0])
     pm_lb = x[:L, PM25_COL].numpy() * scale + mean
-    ax.plot(np.arange(L), pm_lb, color="#555555", lw=1.7, label="PM2.5 lookback")
+    ax.plot(np.arange(L), pm_lb, color="#555555", lw=1.7, label=f"{_TGT_NAME} lookback")
     ax.plot(t_fc, gt_r, color=C_GT, lw=2.5, label="ground truth")
     ax.plot(t_fc, yh_r, color=C_FULL, lw=2.0, ls="--", label="model forecast")
     ax.axvline(L, color="k", lw=1.0, ls=":", alpha=0.7)
     _mark_subwindow(ax, top_label=True)
-    ax.set_ylabel("PM2.5 (µg/m³)", fontsize=10)
-    ax.set_title("PM2.5 (target)", fontsize=12, fontweight="bold", loc="left")
+    ax.set_ylabel(f"{_TGT_NAME} ({_UNIT})", fontsize=10)
+    ax.set_title(f"{_TGT_NAME} (target)", fontsize=12, fontweight="bold", loc="left")
     ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
     ax.margins(x=0.01); ax.grid(alpha=0.25); ax.tick_params(labelbottom=False)
 
@@ -347,12 +357,12 @@ def plot_window(w, test_data, yh, gt, lb_acts, fc_full, gfc_acts, metas,
 
     ttl_col = C_FULL if tag == "worst" else "#111"
     fig.suptitle(f"{'FAILURE CASE' if tag == 'worst' else 'CASE STUDY'}"
-                 f"   ·   {season}   ·   forecast MAE = {mae:.1f} µg/m³",
+                 f"   ·   {season}   ·   forecast MAE = {mae:.1f} {_UNIT}",
                  fontsize=13, fontweight="bold", color=ttl_col, y=0.995)
     fig.savefig(os.path.join(args.out_dir, f"case{'4_worst' if tag == 'worst' else '1_best'}_w{w}.png"),
                 dpi=140, bbox_inches="tight")
     plt.close(fig)
-    print(f"  [{tag}] window {w}: MAE {mae:.1f} µg/m³ ({season})")
+    print(f"  [{tag}] window {w}: MAE {mae:.1f} {_UNIT} ({season})")
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +454,8 @@ def concept_sweep(model, test_data, device, metas, lb_acts, fc_mean, gfc_acts, g
                 yh = yh.cpu().numpy() * scale + mean
                 ax.plot(np.arange(H), yh, color=cmap(si / max(1, len(sweep) - 1)),
                         lw=1.7, label=f"p={sv:g}")
-            ax.set_title(f"{tt} window  (GT mean {gt_r.mean():.0f} µg/m³)", fontsize=10)
-            ax.set_xlabel("forecast hour"); ax.set_ylabel("PM2.5 (µg/m³)")
+            ax.set_title(f"{tt} window  (GT mean {gt_r.mean():.0f} {_UNIT})", fontsize=10)
+            ax.set_xlabel("forecast hour"); ax.set_ylabel(f"{_TGT_NAME} ({_UNIT})")
             ax.legend(fontsize=8, loc="best"); ax.grid(alpha=0.25)
         fig.suptitle(f"Counterfactual concept sweep — [{layer}] {tname}\n"
                      "(force the concept's activation 0 → 1 over the whole horizon)",
@@ -580,7 +590,7 @@ def get_args():
     # architecture (MUST match training)
     p.add_argument("--input_length", type=int, default=96)
     p.add_argument("--output_length", type=int, default=96)
-    p.add_argument("--input_dim", type=int, default=15)
+    p.add_argument("--input_dim", type=int, default=DCFG["input_dim"])
     p.add_argument("--output_dim", type=int, default=1)
     p.add_argument("--num_layer", type=int, default=4)
     p.add_argument("--dropout", type=float, default=0.5)
@@ -610,9 +620,10 @@ def get_args():
     p.add_argument("--cap_lb_sw_concepts", type=int, default=0)
     # case-study knobs
     p.add_argument("--disable_residual", action="store_true")
-    p.add_argument("--features", type=str, default="TEMP,PRES,DEWP,RAIN,WSPM",
+    p.add_argument("--features", type=str, default=",".join(DCFG["case_feats"].keys()),
                    help="Covariates shown as THIN strips in #1/#4 (besides the "
-                        "tall PM2.5 panel). Default: the 5 continuous drivers.")
+                        "tall target panel). Default: the dataset's continuous drivers "
+                        "(from dataset_config, per PROTO_DATASET).")
     p.add_argument("--top_concepts", type=int, default=5,
                    help="# top concepts listed per bottleneck in #1/#4. Each is "
                         "shown with its description, so ~5 keeps the panel clean.")
@@ -636,7 +647,9 @@ def get_args():
     p.add_argument("--fidelity_topk", type=int, default=20)
     p.add_argument("--fidelity_panels", type=int, default=4,
                    help="# concepts (highest lift) to draw a raw-feature panel for in #3.")
-    p.add_argument("--base_year", type=int, default=2013)
+    p.add_argument("--base_year", type=int, default=DCFG["base_year"],
+                   help="Calendar base year for timestamps (PRSA=2013). None for "
+                        "LOF → case studies use a synthetic step-indexed time axis.")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 

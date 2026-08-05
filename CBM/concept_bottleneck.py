@@ -109,8 +109,9 @@ from model.embedding import Embedding_Learning
 # ---------------------------------------------------------------------------
 # Sinusoidal hour-of-day encoding
 # ---------------------------------------------------------------------------
-def _sinusoidal_hour_encoding(hours: torch.Tensor, dim: int) -> torch.Tensor:
-    """Deterministic sinusoidal encoding of hour-of-day (0..23).
+def _sinusoidal_hour_encoding(hours: torch.Tensor, dim: int,
+                              base_period: float = 24.0) -> torch.Tensor:
+    """Deterministic sinusoidal encoding of a cyclical time-of-day index.
 
     Produces sin/cos pairs at ``dim//2`` different periods, giving a rich,
     fixed representation of the hour. This is the recommended way to encode
@@ -136,17 +137,10 @@ def _sinusoidal_hour_encoding(hours: torch.Tensor, dim: int) -> torch.Tensor:
     if dim % 2 != 0:
         raise ValueError(f"dim must be even (sin+cos pairs), got {dim}")
     n_freqs = dim // 2
-    # Use the smallest n_freqs periods from [24, 12, 6, 3, 2, ...] -- if dim
-    # is bigger than 8 we extend geometrically.
-    default_periods = [24.0, 12.0, 6.0, 3.0]
-    if n_freqs <= len(default_periods):
-        periods = default_periods[:n_freqs]
-    else:
-        # Extend by halving beyond period 3 (rarely needed).
-        periods = default_periods + [
-            3.0 / (2 ** (i - len(default_periods) + 1))
-            for i in range(len(default_periods), n_freqs)
-        ]
+    # Harmonics of ``base_period`` obtained by successive halving:
+    #   PRSA (base 24, 1h/step)  -> [24, 12, 6, 3]  (daily, half, quarter, 3h)
+    #   LOF  (base 96, 15min/step) -> [96, 48, 24, 12]  (daily, half, quarter, eighth)
+    periods = [base_period / (2 ** i) for i in range(n_freqs)]
     periods_t = torch.tensor(
         periods, device=hours.device, dtype=torch.float32,
     )                                                       # (n_freqs,)
@@ -436,6 +430,18 @@ class ConceptBottleneckModel(nn.Module):
         # enough resolution for hour-of-day concepts. Only used when
         # ``calendar_hour_channel >= 0``.
         hour_encoding_dim: int = 8,
+        # ---- time-of-day index (schema-general) ----------------------------
+        # ``tod_channels`` describes how to build the cyclical time-of-day
+        # index from the input columns: a list of (channel_index, multiplier)
+        # whose weighted sum is the index. PRSA has a single hour column
+        # (0-23): [(3, 1.0)]. LOF is 15-min, so the index combines hour and
+        # minute into 0-95: [(6, 4.0), (7, 1/15)]. ``tod_period`` is the base
+        # sinusoid period (24 for PRSA, 96 for LOF) and ``tod_max`` clamps the
+        # index (23 / 95). If ``tod_channels`` is None it defaults to
+        # [(calendar_hour_channel, 1.0)] with period 24 / max 23 (PRSA).
+        tod_channels=None,
+        tod_period: float = 24.0,
+        tod_max: int = 23,
         # ---- Attention-weighted temporal pool ------------------------------
         # Replaces the sequence-destroying ``mean(dim=1)`` pool that used to
         # feed the concept predictors. Each pooled tensor (LOOKBACK global,
@@ -697,6 +703,14 @@ class ConceptBottleneckModel(nn.Module):
         self.calendar_hour_channel = int(calendar_hour_channel)
         # self.hour_encoding_dim is already set above where the forecast
         # concept predictors were built with input dim mid_dim + hour_enc_dim.
+        # Time-of-day index spec (schema-general). Defaults reproduce PRSA:
+        # a single hour column, 24-hour period, clamp 0-23.
+        self.tod_channels = (
+            list(tod_channels) if tod_channels is not None
+            else [(int(calendar_hour_channel), 1.0)]
+        )
+        self.tod_period = float(tod_period)
+        self.tod_max = int(tod_max)
 
         # ---- Attention-weighted temporal pools ----
         # One pool per temporal-scale × experiment-mode combination:
@@ -1156,12 +1170,13 @@ class ConceptBottleneckModel(nn.Module):
                 sw_start_idx = base_offset + torch.arange(
                     n_sw_, device=x.device,
                 ) * sw_len_                                                    # (N,)
-                start_hours = (
-                    x[:, sw_start_idx, self.calendar_hour_channel]
-                    .long().clamp(0, 23)
-                )                                                              # (B, N)
+                _tod = None
+                for _ch, _mult in self.tod_channels:
+                    _v = x[:, sw_start_idx, _ch] * _mult
+                    _tod = _v if _tod is None else _tod + _v
+                start_hours = _tod.round().clamp(0, self.tod_max)              # (B, N)
                 sw_hour_vecs = _sinusoidal_hour_encoding(
-                    start_hours, self.hour_encoding_dim,
+                    start_hours, self.hour_encoding_dim, base_period=self.tod_period,
                 )                                                              # (B, N, hour_enc_dim)
                 z_per_sw = [
                     torch.cat([z_per_sw[k], sw_hour_vecs[:, k, :]], dim=-1)
@@ -1174,12 +1189,13 @@ class ConceptBottleneckModel(nn.Module):
                 lb_sw_start_idx = torch.arange(
                     n_lb_sw_, device=x.device,
                 ) * lb_sw_len_                                                  # (N_lb_sw,)
-                lb_start_hours = (
-                    x[:, lb_sw_start_idx, self.calendar_hour_channel]
-                    .long().clamp(0, 23)
-                )                                                              # (B, N_lb_sw)
+                _tod = None
+                for _ch, _mult in self.tod_channels:
+                    _v = x[:, lb_sw_start_idx, _ch] * _mult
+                    _tod = _v if _tod is None else _tod + _v
+                lb_start_hours = _tod.round().clamp(0, self.tod_max)           # (B, N_lb_sw)
                 lb_sw_hour_vecs = _sinusoidal_hour_encoding(
-                    lb_start_hours, self.hour_encoding_dim,
+                    lb_start_hours, self.hour_encoding_dim, base_period=self.tod_period,
                 )                                                              # (B, N_lb_sw, hour_enc_dim)
                 z_per_lb_sw = [
                     torch.cat([z_per_lb_sw[k], lb_sw_hour_vecs[:, k, :]], dim=-1)

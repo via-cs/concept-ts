@@ -10,52 +10,13 @@ from layer.rev_norm import Rev_in
 # per-channel embedder at the Riverside PM2.5 schema. Keep in sync with the
 # ``DATASET`` constant in ``dataloader/dataloader.py``.
 # ---------------------------------------------------------------------------
-DATASET = os.environ.get("PROTO_DATASET", "PRSA")   # default PRSA (CBM-safe); ProtoTS sets PROTO_DATASET=LOF
+# Categorical-column layout comes from the single source of truth
+# (dataset_config), selected by PROTO_DATASET (default "PRSA" → unchanged).
+from dataset_config import D as _DSCFG
 
-if DATASET == "LOF":
-    # 23-column LOF / ProtoTS schema (target = "load", last column).
-    #   0:lunar_year   1:lunar_month  2:lunar_day  3:solar_year  4:solar_month
-    #   5:solar_day    6:month(=hour) 7:minute     8-15:continuous weather
-    #  16:is_special_workday  17:is_special_holiday  18:is_holiday
-    #  19:is_workday  20:day_of_week  21:pricing  22:load
-    _CLASS_FEATURE_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20]
-    _CLASS_FEATURE_NUM_CLASSES = [
-        6, 13, 32, 6, 13,
-        32, 25, 61, 0, 0,
-        0, 0, 0, 0, 0,
-        0, 2, 2, 2, 2,
-        7, 0, 0,
-    ]
-elif DATASET == "PRSA":
-    # 15-column Beijing PRSA schema (target = "PM2.5", last column).
-    # See dataset/PRSA_data/Aotizhongxin.csv; cleaning steps documented in
-    # convolution_encoder/channel_embedding.py.
-    _CLASS_FEATURE_INDICES = [0, 1, 2, 3]
-    _CLASS_FEATURE_NUM_CLASSES = [
-        5, 13, 32, 24,     # 0-3   year, month, day, hour
-        0, 0, 0, 0, 0,     # 4-8   PM10, SO2, NO2, CO, O3
-        0, 0, 0, 0, 0,     # 9-13  TEMP, PRES, DEWP, RAIN, WSPM
-        0,                  # 14    PM2.5 (target)
-    ]
-elif DATASET == "AirQuality":
-    # 17-column Riverside schema (target = "pm25_poc_3", last column).
-    #   0:wind_spd_res     1:temp_outdoor   2:rel_humidity  3:solar_radiation
-    #   4:uv_radiation     5:baro_pressure  6:sp            7:skt
-    #   8:blh              9:tp            (all continuous so far)
-    #  10:month (1-12)    11:day (1-31)   12:hour (0-23)   13:day_of_week (0-6)
-    #  14:is_weekend      15:is_weekday   16:pm25_poc_3 (target, continuous)
-    _CLASS_FEATURE_INDICES = [10, 11, 12, 13, 14, 15]
-    _CLASS_FEATURE_NUM_CLASSES = [
-        0, 0, 0, 0, 0,     # 0-4   wind_spd_res, temp_outdoor, rel_humidity, solar_radiation, uv_radiation
-        0, 0, 0, 0, 0,     # 5-9   baro_pressure, sp, skt, blh, tp
-        13, 32, 24, 7, 2,  # 10-14 month, day, hour, day_of_week, is_weekend
-        2, 0,              # 15-16 is_weekday, pm25_poc_3 (target)
-    ]
-else:
-    raise ValueError(
-        f"Unknown DATASET={DATASET!r} in layer.channel_embedding. "
-        f"Expected 'LOF' | 'AirQuality' | 'PRSA'."
-    )
+DATASET                    = _DSCFG["name"]
+_CLASS_FEATURE_INDICES     = _DSCFG["class_feature_indices"]
+_CLASS_FEATURE_NUM_CLASSES = _DSCFG["class_feature_num_classes"]
 
 
 class channel_embedding(nn.ModuleList):

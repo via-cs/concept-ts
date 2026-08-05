@@ -62,6 +62,7 @@ if str(_ROOT) not in sys.path:
 from CBM.concept_bottleneck import ConceptBottleneckModel
 from CBM.concept_labels import build_window_label_tables
 from dataloader.dataloader import LOF_Dataset
+from dataset_config import D as DCFG          # schema (PROTO_DATASET, default PRSA)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ def get_args():
     # --- architecture (MUST match training) ---
     p.add_argument("--input_length",   type=int, default=96)
     p.add_argument("--output_length",  type=int, default=96)
-    p.add_argument("--input_dim",      type=int, default=15)
+    p.add_argument("--input_dim",      type=int, default=DCFG["input_dim"])
     p.add_argument("--output_dim",     type=int, default=1)
     p.add_argument("--num_layer",      type=int, default=4)
     p.add_argument("--dropout",        type=float, default=0.5)
@@ -183,6 +184,9 @@ def build(args, device):
         single_forecast_bottleneck=args.single_forecast_bottleneck,
         use_rev_in=1, norm_type="B",
         attn_pool_hidden=args.attn_pool_hidden, randint_p=args.randint_p,
+        # schema-general time-of-day encoding (must match training)
+        calendar_hour_channel=DCFG["hour_channel"], tod_channels=DCFG["tod_channels"],
+        tod_period=DCFG["tod_period"], tod_max=DCFG["tod_max"],
     ).to(device)
 
     ckpt = os.path.join(args.checkpoint_dir, args.checkpoint_name)

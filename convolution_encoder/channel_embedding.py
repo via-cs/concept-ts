@@ -31,57 +31,13 @@ from layer.rev_norm import Rev_in
 # used by ``nn.Embedding(num_classes, embed_dim)`` for that column index.
 # Continuous columns get 0 (the Linear(1, embed_dim) path runs instead).
 # ---------------------------------------------------------------------------
-DATASET = "PRSA"
+# Categorical-column layout comes from the single source of truth
+# (dataset_config), selected by PROTO_DATASET (default "PRSA" → unchanged).
+from dataset_config import D as _DSCFG
 
-if DATASET == "LOF":
-    # 23-column LOF / ProtoTS schema (target = "load", last column).
-    #   0:lunar_year   1:lunar_month  2:lunar_day  3:solar_year  4:solar_month
-    #   5:solar_day    6:month(=hour) 7:minute     8-15:continuous weather
-    #  16:is_special_workday  17:is_special_holiday  18:is_holiday
-    #  19:is_workday  20:day_of_week  21:pricing  22:load
-    _CLASS_FEATURE_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20]
-    _CLASS_FEATURE_NUM_CLASSES = [
-        6, 13, 32, 6, 13,
-        32, 25, 61, 0, 0,
-        0, 0, 0, 0, 0,
-        0, 2, 2, 2, 2,
-        7, 0, 0,
-    ]
-elif DATASET == "AirQuality":
-    # 17-column Riverside schema (target = "pm25_poc_3", last column).
-    #   0:wind_spd_res     1:temp_outdoor   2:rel_humidity  3:solar_radiation
-    #   4:uv_radiation     5:baro_pressure  6:sp            7:skt
-    #   8:blh              9:tp            (all continuous so far)
-    #  10:month (1-12)    11:day (1-31)   12:hour (0-23)   13:day_of_week (0-6)
-    #  14:is_weekend      15:is_weekday   16:pm25_poc_3 (target, continuous)
-    _CLASS_FEATURE_INDICES = [10, 11, 12, 13, 14, 15]
-    _CLASS_FEATURE_NUM_CLASSES = [
-        0, 0, 0, 0, 0,     # 0-4   wind_spd_res, temp_outdoor, rel_humidity, solar_radiation, uv_radiation
-        0, 0, 0, 0, 0,     # 5-9   baro_pressure, sp, skt, blh, tp
-        13, 32, 24, 7, 2,  # 10-14 month, day, hour, day_of_week, is_weekend
-        2, 0,              # 15-16 is_weekday, pm25_poc_3 (target)
-    ]
-elif DATASET == "PRSA":
-    # 15-column Beijing PRSA schema (target = "PM2.5", last column).
-    # Source: dataset/PRSA_data/Aotizhongxin.csv (cleaned by
-    # preprocessing/clean_prsa.py: drop No/wd/station, linear-interpolate
-    # missing values, normalize year to 0-indexed).
-    #   0:year (0-4)   1:month (1-12)   2:day (1-31)   3:hour (0-23)
-    #   4:PM10         5:SO2            6:NO2          7:CO       8:O3
-    #   9:TEMP        10:PRES          11:DEWP        12:RAIN    13:WSPM
-    #  14:PM2.5 (target, continuous)
-    _CLASS_FEATURE_INDICES = [0, 1, 2, 3]
-    _CLASS_FEATURE_NUM_CLASSES = [
-        5, 13, 32, 24,     # 0-3   year, month, day, hour
-        0, 0, 0, 0, 0,     # 4-8   PM10, SO2, NO2, CO, O3 (continuous)
-        0, 0, 0, 0, 0,     # 9-13  TEMP, PRES, DEWP, RAIN, WSPM (continuous)
-        0,                  # 14    PM2.5 (target, continuous)
-    ]
-else:
-    raise ValueError(
-        f"Unknown DATASET={DATASET!r} in convolution_encoder.channel_embedding. "
-        f"Expected 'LOF' | 'AirQuality' | 'PRSA'."
-    )
+DATASET                    = _DSCFG["name"]
+_CLASS_FEATURE_INDICES     = _DSCFG["class_feature_indices"]
+_CLASS_FEATURE_NUM_CLASSES = _DSCFG["class_feature_num_classes"]
 
 
 class PerChannelEmbedding(nn.Module):

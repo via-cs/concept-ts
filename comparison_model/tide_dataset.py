@@ -33,7 +33,15 @@ except Exception:  # pragma: no cover - sklearn should be present in the env
     StandardScaler = None
 
 
-TARGET = "PM2.5"
+# Target column from the single source of truth (dataset_config), selected by
+# PROTO_DATASET (default "PRSA" → unchanged).
+try:
+    from dataset_config import D as _DSCFG
+except ModuleNotFoundError:                       # pragma: no cover
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from dataset_config import D as _DSCFG
+TARGET = _DSCFG["target"]
 
 
 class _NumpyStandardScaler:

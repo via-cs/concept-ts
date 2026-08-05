@@ -54,21 +54,13 @@ USE_LAST_YEAR_SPLIT = False
 #                  calendar columns: year (0-4), month (1-12), day (1-31),
 #                  hour (0-23).
 # ---------------------------------------------------------------------------
-DATASET = os.environ.get("PROTO_DATASET", "PRSA")   # default PRSA (CBM-safe); ProtoTS sets PROTO_DATASET=LOF
+# Schema constants come from the single source of truth (dataset_config),
+# selected by the PROTO_DATASET env var (default "PRSA" → unchanged).
+from dataset_config import D as _DSCFG
 
-if DATASET == "LOF":
-    TARGET_COLUMN = "load"
-    ROWS_PER_DAY  = 96               # 15-min resolution: 96 rows / day
-elif DATASET == "AirQuality":
-    TARGET_COLUMN = "pm25_poc_3"
-    ROWS_PER_DAY  = 24               # 1-hour resolution: 24 rows / day
-elif DATASET == "PRSA":
-    TARGET_COLUMN = "PM2.5"
-    ROWS_PER_DAY  = 24               # 1-hour resolution: 24 rows / day
-else:
-    raise ValueError(
-        f"Unknown DATASET={DATASET!r}. Expected 'LOF' | 'AirQuality' | 'PRSA'."
-    )
+DATASET       = _DSCFG["name"]
+TARGET_COLUMN = _DSCFG["target"]
+ROWS_PER_DAY  = _DSCFG["rows_per_day"]
 
 ROWS_PER_YEAR = 365 * ROWS_PER_DAY
 NUM_CHUNKS    = 24               # 24 bi-weekly chunks across the last year

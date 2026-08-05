@@ -35,7 +35,17 @@ Forecast rules see a SUB-WINDOW dict (one of the four blocks emitted by
     }
 """
 
-DATASET = "PRSA"
+# Schema id from the single source of truth (dataset_config), selected by
+# PROTO_DATASET (default "PRSA" → unchanged). Robust import so it works whether
+# imported as a package or via propose_concepts.py's sibling-path trick.
+try:
+    from dataset_config import D as _DSCFG
+except ModuleNotFoundError:                       # pragma: no cover
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
+        _os.path.dirname(_os.path.abspath(__file__)))))
+    from dataset_config import D as _DSCFG
+DATASET = _DSCFG["name"]
 
 
 LOF_BLOCK = {

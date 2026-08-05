@@ -31,7 +31,11 @@ import pandas as pd
 # CHANNEL_META describes per-column type + a one-line semantic description
 # used by the LLM concept proposer.
 # ---------------------------------------------------------------------------
-DATASET = "PRSA"
+# Schema id comes from the single source of truth (dataset_config), selected by
+# PROTO_DATASET (default "PRSA" → unchanged). The per-schema CHANNEL_META /
+# target / calendar branches below all key off this DATASET value.
+from dataset_config import D as _DSCFG
+DATASET = _DSCFG["name"]
 
 if DATASET == "LOF":
     CHANNEL_META = {
