@@ -63,11 +63,12 @@ TARGET   = _DSCFG["target"]
 CAT_COLS = tuple(_DSCFG["cat_cols"])
 # 1-indexed columns (month, day) shifted into 0..vocab-1 to make embedding lookup
 # safe. year is already 0..4, hour is already 0..23.
-_CAT_OFFSET = {"year": 0, "month": -1, "day": -1, "hour": 0}
-# Cardinality = max possible value AFTER offset + 1. We use the *theoretical*
-# maxima rather than what we happen to observe in the train slice, so val/test
-# never index past the embedding table even on unusual months/days.
-_CAT_CARD = {"year": 5, "month": 12, "day": 31, "hour": 24}
+# Embedding-table offsets/cardinalities from the single source of truth
+# (dataset_config). PRSA values are unchanged; LOF adds its calendar columns.
+# Cardinality = max possible value AFTER offset + 1, using theoretical maxima
+# so val/test never index past the table even on unusual months/days.
+_CAT_OFFSET = _DSCFG["cat_offset"]
+_CAT_CARD   = _DSCFG["cat_card"]
 
 
 class _NumpyStandardScaler:

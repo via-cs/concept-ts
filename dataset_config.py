@@ -53,6 +53,16 @@ _PRSA = dict(
     base_year=2013,
     step_minutes=60,
     cat_cols=("year", "month", "day", "hour"),
+    # Encoder-decoder transformers (Informer/Autoformer/FEDformer) feed a small
+    # fixed set of calendar time-features as x_mark (TSL 'timeF', freq='h' → 4).
+    # For PRSA this is exactly cat_cols, so behavior is unchanged. Anything NOT
+    # in mark_cols flows to the models as a REAL covariate instead.
+    mark_cols=("year", "month", "day", "hour"),
+    mark_period={"year": 5, "month": 12, "day": 31, "hour": 24},
+    # TFT embedding tables: cardinality (table size) + offset (shift value→0).
+    # PRSA values kept EXACTLY as the old tft_dataset constants (unchanged).
+    cat_card={"year": 5, "month": 12, "day": 31, "hour": 24},
+    cat_offset={"year": 0, "month": -1, "day": -1, "hour": 0},
     class_feature_indices=[0, 1, 2, 3],
     class_feature_num_classes=[
         5, 13, 32, 24,     # 0-3   year, month, day, hour
@@ -111,6 +121,27 @@ _LOF = dict(
         "solar_day", "month", "minute", "is_special_workday", "is_special_holiday",
         "is_holiday", "is_workday", "day_of_week",
     ),
+    # 4 calendar time-features for the encoder-decoder transformers' x_mark
+    # (freq='h' → 4): hour-of-day (the 'month' column is 0-23 hour), month,
+    # day, weekday. Holiday/workday flags and lunar dates flow as REAL
+    # covariates instead, so no load-relevant signal is lost.
+    mark_cols=("month", "solar_month", "solar_day", "day_of_week"),
+    mark_period={"month": 24, "solar_month": 12, "solar_day": 31, "day_of_week": 7},
+    # TFT embedding tables: raw-value indexing (offset 0) with generous table
+    # sizes (== the channel-embedder cardinalities); a defensive clamp protects
+    # against any out-of-range value.
+    cat_card={
+        "lunar_year": 6, "lunar_month": 13, "lunar_day": 32, "solar_year": 6,
+        "solar_month": 13, "solar_day": 32, "month": 25, "minute": 61,
+        "is_special_workday": 2, "is_special_holiday": 2, "is_holiday": 2,
+        "is_workday": 2, "day_of_week": 7,
+    },
+    cat_offset={
+        "lunar_year": 0, "lunar_month": 0, "lunar_day": 0, "solar_year": 0,
+        "solar_month": 0, "solar_day": 0, "month": 0, "minute": 0,
+        "is_special_workday": 0, "is_special_holiday": 0, "is_holiday": 0,
+        "is_workday": 0, "day_of_week": 0,
+    },
     class_feature_indices=[0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20],
     class_feature_num_classes=[
         6, 13, 32, 6, 13,      # 0-4
@@ -175,6 +206,12 @@ _AIRQUALITY = dict(
     base_year=None,
     step_minutes=60,
     cat_cols=("month", "day", "hour", "day_of_week", "is_weekend", "is_weekday"),
+    mark_cols=("month", "day", "hour", "day_of_week"),
+    mark_period={"month": 12, "day": 31, "hour": 24, "day_of_week": 7},
+    cat_card={"month": 13, "day": 32, "hour": 24, "day_of_week": 7,
+              "is_weekend": 2, "is_weekday": 2},
+    cat_offset={"month": 0, "day": 0, "hour": 0, "day_of_week": 0,
+                "is_weekend": 0, "is_weekday": 0},
     class_feature_indices=[10, 11, 12, 13, 14, 15],
     class_feature_num_classes=[
         0, 0, 0, 0, 0,

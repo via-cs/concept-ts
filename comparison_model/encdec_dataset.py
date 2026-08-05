@@ -58,10 +58,14 @@ except ModuleNotFoundError:                       # pragma: no cover
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from dataset_config import D as _DSCFG
 TARGET   = _DSCFG["target"]
-CAT_COLS = tuple(_DSCFG["cat_cols"])
+# x_mark = a SMALL fixed set of calendar time-features (TSL 'timeF', freq='h'
+# → 4 features). Everything else — including holiday/workday flags and lunar
+# dates on LOF — is treated as a REAL covariate, so no known-future signal is
+# dropped. For PRSA mark_cols == cat_cols, so behavior is unchanged.
+MARK_COLS = tuple(_DSCFG["mark_cols"])
 # TSL 'timeF' embedding wants normalized continuous values around 0.
 # We use the standard convention: x / period - 0.5  -> roughly [-0.5, 0.5].
-_CAT_PERIOD = {"year": 5, "month": 12, "day": 31, "hour": 24}
+_MARK_PERIOD = _DSCFG["mark_period"]
 
 
 class _NumpyStandardScaler:
@@ -98,22 +102,23 @@ class PRSA_EncDec_Dataset(Dataset):
         df = pd.read_csv(csv_path)
         if TARGET not in df.columns:
             raise KeyError(f"{TARGET!r} not found in {csv_path}; cols={list(df.columns)}")
-        for c in CAT_COLS:
+        for c in MARK_COLS:
             if c not in df.columns:
                 raise KeyError(
-                    f"Calendar column {c!r} missing from {csv_path}. This "
-                    f"adapter is hard-coded for the cleaned Aotizhongxin schema."
+                    f"Calendar (mark) column {c!r} missing from {csv_path}; "
+                    f"columns = {list(df.columns)}"
                 )
 
-        real_df = df.drop(columns=[TARGET, *CAT_COLS]).select_dtypes(include=[np.number])
+        real_df = df.drop(columns=[TARGET, *MARK_COLS]).select_dtypes(include=[np.number])
         self.real_cols = list(real_df.columns)
-        # 10 real covariates: PM10, SO2, NO2, CO, O3, TEMP, PRES, DEWP, RAIN, WSPM
+        # Real covariates = every numeric column except the target and the 4
+        # calendar mark columns (PRSA: 10 weather/pollutant channels).
         real = real_df.values.astype(np.float32)             # (N, R)
         tgt = df[[TARGET]].values.astype(np.float32)         # (N, 1)
 
         # Normalized calendar features ([-0.5, 0.5] approx) for TSL 'timeF' embed.
         marks = np.stack(
-            [df[c].values.astype(np.float32) / _CAT_PERIOD[c] - 0.5 for c in CAT_COLS],
+            [df[c].values.astype(np.float32) / _MARK_PERIOD[c] - 0.5 for c in MARK_COLS],
             axis=1,
         )                                                     # (N, 4)
 
