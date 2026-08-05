@@ -163,6 +163,61 @@ resolution that is {subwindow_hours} hours per sub-window.""",
     "function": "def matches(sub_seg):\\n    rh = sub_seg.get('stats', {{}}).get('Relative_humidity', {{}}).get('mean')\\n    return rh is not None and rh > 70"
   }}
 ]""",
+
+    "example_lookback_sub_window_concepts": """[
+  {{
+    "id": 0,
+    "name": "is_lookback_morning_rush_block",
+    "description": "Lookback sub-window starts in the morning rush hours (7-10).",
+    "category": "time_of_day",
+    "function": "def matches(sub_seg):\\n    h = sub_seg.get('time_context', {{}}).get('start', {{}}).get('hour')\\n    return h is not None and 7 <= h <= 10"
+  }},
+  {{
+    "id": 1,
+    "name": "is_lookback_high_load_block",
+    "description": "Lookback sub-window load mean above 3500 MW -- a high-demand chunk of recent history. This concept CAN reference load because the lookback is OBSERVED (unlike forecast concepts, which must not reference the target).",
+    "category": "load_regime",
+    "function": "def matches(sub_seg):\\n    l = sub_seg.get('stats', {{}}).get('load', {{}}).get('mean')\\n    return l is not None and l > 3500"
+  }},
+  {{
+    "id": 2,
+    "name": "is_lookback_cold_block",
+    "description": "Lookback sub-window skin temperature mean below 0 deg C -- a cold, heating-driven chunk of recent history.",
+    "category": "weather_temperature",
+    "function": "def matches(sub_seg):\\n    t = sub_seg.get('stats', {{}}).get('Skin_temperature', {{}}).get('mean')\\n    return t is not None and t < 0"
+  }},
+  {{
+    "id": 3,
+    "name": "is_lookback_humid_block",
+    "description": "Lookback sub-window mean relative humidity above 70 percent.",
+    "category": "weather_other",
+    "function": "def matches(sub_seg):\\n    rh = sub_seg.get('stats', {{}}).get('Relative_humidity', {{}}).get('mean')\\n    return rh is not None and rh > 70"
+  }}
+]""",
+
+    "example_forecast_global_concepts": """[
+  {{
+    "id": 0,
+    "name": "is_forecast_has_hot_hour",
+    "description": "Maximum skin temperature over the WHOLE forecast exceeds 30 deg C -- the horizon contains at least one hot hour (cooling-driven demand). References a covariate, NOT the target load.",
+    "category": "aggregate",
+    "function": "def matches(sub_seg):\\n    m = sub_seg.get('stats', {{}}).get('Skin_temperature', {{}}).get('max')\\n    return m is not None and m > 30"
+  }},
+  {{
+    "id": 1,
+    "name": "is_forecast_temperature_rising",
+    "description": "Skin temperature in the SECOND HALF of the forecast is meaningfully higher than the FIRST HALF. Uses delta_half (robust to the daily cycle) rather than OLS slope (which averages to ~0 on cyclical data).",
+    "category": "trend",
+    "function": "def matches(sub_seg):\\n    d = sub_seg.get('stats', {{}}).get('Skin_temperature', {{}}).get('delta_half')\\n    return d is not None and d > 1.0"
+  }},
+  {{
+    "id": 2,
+    "name": "is_forecast_uniformly_humid",
+    "description": "Relative humidity across the whole forecast stays both high (mean > 70) AND uniform (std < 10) -- a persistently humid regime.",
+    "category": "persistence",
+    "function": "def matches(sub_seg):\\n    rh = sub_seg.get('stats', {{}}).get('Relative_humidity', {{}})\\n    m, s = rh.get('mean'), rh.get('std')\\n    return m is not None and s is not None and m > 70 and s < 10"
+  }}
+]""",
 }
 
 
