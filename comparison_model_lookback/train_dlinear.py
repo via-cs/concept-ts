@@ -42,7 +42,8 @@ def get_args():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=0.0)
     p.add_argument("--patience", type=int, default=5)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed. If omitted, a fresh random seed is drawn each run and printed (so runs differ but stay traceable).")
     # DLinear hyperparameters
     p.add_argument("--moving_avg", type=int, default=25,
                    help="Kernel size for series_decomp trend extraction.")
@@ -87,6 +88,9 @@ def main():
     args = get_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    if args.seed is None:
+        args.seed = random.randrange(2**31)
+    print(f"[seed] run seed = {args.seed}")
     set_seed(args.seed)
 
     print("\n── Loading data (STRICT lookback-only) ──")

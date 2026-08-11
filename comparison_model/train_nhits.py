@@ -51,7 +51,8 @@ def get_args():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--patience", type=int, default=8)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed. If omitted, a fresh random seed is drawn each run and printed (so runs differ but stay traceable).")
     # NHITSx hyperparameters
     p.add_argument("--pool_kernels", type=int, nargs="+", default=[24, 12, 1],
                    help="One per stack. Decreasing recommended. For "
@@ -98,6 +99,9 @@ def main():
     args = get_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    if args.seed is None:
+        args.seed = random.randrange(2**31)
+    print(f"[seed] run seed = {args.seed}")
     set_seed(args.seed)
 
     print("\n── Loading data ──")

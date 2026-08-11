@@ -67,7 +67,8 @@ def get_args():
                    help="Path to Aotizhongxin.csv.")
     p.add_argument("--lookback_len", type=int, default=96)
     p.add_argument("--pred_len", type=int, default=96)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed. If omitted, a fresh random seed is drawn each run and printed (so runs differ but stay traceable).")
     # Random Forest hyperparameters
     #
     # Defaults tuned for pred_len=96. sklearn's multi-output RF computes split
@@ -123,6 +124,9 @@ def _parse_max_features(raw):
 
 def main():
     args = get_args()
+    if args.seed is None:
+        args.seed = random.randrange(2**31)
+    print(f"[seed] run seed = {args.seed}")
     set_seed(args.seed)
 
     try:

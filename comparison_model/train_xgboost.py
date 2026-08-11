@@ -82,7 +82,8 @@ def get_args():
     p.add_argument("--dataset", type=str, required=True)
     p.add_argument("--lookback_len", type=int, default=96)
     p.add_argument("--pred_len", type=int, default=96)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed. If omitted, a fresh random seed is drawn each run and printed (so runs differ but stay traceable).")
     # XGBoost hyperparameters
     p.add_argument("--n_estimators", type=int, default=100,
                    help="Boosting rounds per output regressor.")
@@ -117,6 +118,9 @@ def set_seed(seed=0):
 
 def main():
     args = get_args()
+    if args.seed is None:
+        args.seed = random.randrange(2**31)
+    print(f"[seed] run seed = {args.seed}")
     set_seed(args.seed)
 
     try:

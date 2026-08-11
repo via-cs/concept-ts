@@ -294,7 +294,8 @@ def get_args():
                    help="Early-stopping patience: stop if val MAE has not "
                         "improved for this many epochs. Default 5. Set to 0 "
                         "to disable early stopping (run all --epoch epochs).")
-    p.add_argument("--seed",           type=int,   default=0)
+    p.add_argument("--seed",           type=int,   default=None,
+                   help="Random seed. If omitted, a fresh random seed is drawn each run and printed.")
 
     p.add_argument("--alpha_forecast",         type=float, default=1.0,
                    help="Weight on L1 forecast loss. Default 1.0 — equal to the "
@@ -1205,6 +1206,9 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.environ["device"] = device
     print(f"Using device: {device}")
+    if args.seed is None:
+        args.seed = random.randrange(2**31)
+    print(f"[seed] run seed = {args.seed}")
     set_seed(args.seed)
 
     # ----- Datasets -----
