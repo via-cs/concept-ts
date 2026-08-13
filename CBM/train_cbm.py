@@ -369,6 +369,16 @@ def get_args():
     p.add_argument("--cap_lb_sw_concepts", type=int, default=0,
                    help="Hard cap on LOOKBACK-sub-window concepts (0 = no cap; "
                         "lookback_only mode).")
+    # ---- Bottleneck ablation: forbid a whole concept bottleneck (force K=0) ----
+    p.add_argument("--disable_lb", action="store_true",
+                   help="Ablation: forbid the LOOKBACK concept bottleneck "
+                        "(force its concept count to 0).")
+    p.add_argument("--disable_fc", action="store_true",
+                   help="Ablation: forbid the FORECAST sub-window concept bottleneck.")
+    p.add_argument("--disable_gfc", action="store_true",
+                   help="Ablation: forbid the GLOBAL-FORECAST concept bottleneck.")
+    p.add_argument("--disable_lb_sw", action="store_true",
+                   help="Ablation: forbid the LOOKBACK sub-window concept bottleneck.")
     p.add_argument("--leak_diagnostic", type=int, default=1,
                    help="Run the concept-intervention leak diagnostic at test "
                         "time (1=on, 0=off). Re-evaluates test MAE with concept "
@@ -510,7 +520,11 @@ def train_one_epoch(model, loader, optimizer, device,
         out = model(x, concept_labels=concept_labels)
 
         loss_f   = l1_fn(out["y_hat"],     y)
-        loss_lb  = bce_fn(out["lb_logits"], lb_lab)
+        # Lookback BCE: guarded so --disable_lb (K_lb=0 → empty logits) doesn't NaN.
+        if out["lb_logits"].numel() > 0:
+            loss_lb = bce_fn(out["lb_logits"], lb_lab)
+        else:
+            loss_lb = torch.zeros((), device=device)
         # Forecast-side BCEs: skipped when the forecast side is disabled
         # (experiment_mode='lookback_only' -> both fc_logits and gfc_logits
         # are empty tensors from the model).
@@ -1242,6 +1256,28 @@ def main():
         cap_gfc=args.cap_gfc_concepts,
         cap_lb_sw=args.cap_lb_sw_concepts,
     )
+    # ---- Bottleneck ablation: slice the disabled bottlenecks to 0 concepts.
+    # Slicing the last axis to width 0 forces K=0 for that bottleneck; the model
+    # builds it empty and the (already-guarded) BCE losses skip it. Applied to
+    # train AND val/test labels so their widths stay consistent.
+    def _ablate_bottlenecks(lb, fc, gfc, lb_sw):
+        if args.disable_lb:    lb    = lb[..., :0]
+        if args.disable_fc:    fc    = fc[..., :0]
+        if args.disable_gfc:   gfc   = gfc[..., :0]
+        if args.disable_lb_sw: lb_sw = lb_sw[..., :0]
+        return lb, fc, gfc, lb_sw
+
+    lb_train, fc_train, gfc_train, lb_sw_train = _ablate_bottlenecks(
+        lb_train, fc_train, gfc_train, lb_sw_train)
+    if args.disable_lb:    lb_meta    = []
+    if args.disable_fc:    fc_meta    = []
+    if args.disable_gfc:   gfc_meta   = []
+    if args.disable_lb_sw: lb_sw_meta = []
+    for _lbl, _flag in (("LOOKBACK", args.disable_lb), ("FORECAST sub-window", args.disable_fc),
+                        ("GLOBAL-FORECAST", args.disable_gfc), ("LOOKBACK sub-window", args.disable_lb_sw)):
+        if _flag:
+            print(f"  [ablation] {_lbl} concept bottleneck DISABLED (forced K=0)")
+
     K_lb  = lb_train.shape[1]
     K_gfc = gfc_train.shape[1]
     K_lb_sw          = lb_sw_train.shape[2] if lb_sw_train.ndim == 3 else 0
@@ -1327,6 +1363,10 @@ def main():
     (lb_test, fc_test, gfc_test, lb_sw_test, test_labels_real) = _load_split_labels(
         "test", args.test_segments_path, len(test_data),
     )
+    # Ablate val/test the SAME way as train so all label widths match the model's
+    # K (otherwise a disabled bottleneck's eval labels would be full-width).
+    lb_val,  fc_val,  gfc_val,  lb_sw_val  = _ablate_bottlenecks(lb_val,  fc_val,  gfc_val,  lb_sw_val)
+    lb_test, fc_test, gfc_test, lb_sw_test = _ablate_bottlenecks(lb_test, fc_test, gfc_test, lb_sw_test)
 
     _mask_future = (args.experiment_mode == "lookback_only")
     train_ds = CBMDataset(train_data, lb_train, fc_train, gfc_train, lb_sw_train,
