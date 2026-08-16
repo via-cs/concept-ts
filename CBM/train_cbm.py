@@ -1330,6 +1330,10 @@ def main():
             cap_gfc=args.cap_gfc_concepts,
             cap_lb_sw=args.cap_lb_sw_concepts,
         )
+        # Ablate the SAME bottlenecks as train BEFORE the width checks, so a
+        # disabled bottleneck's val/test labels are 0-width (matching K=0) and
+        # the checks compare ablated-vs-ablated. (Fixes --disable_gfc/--disable_fc.)
+        lb, fc, gfc, lb_sw = _ablate_bottlenecks(lb, fc, gfc, lb_sw)
         # Shape match check.
         if args.single_forecast_bottleneck:
             if fc.shape[1] != K_fc:
@@ -1363,10 +1367,8 @@ def main():
     (lb_test, fc_test, gfc_test, lb_sw_test, test_labels_real) = _load_split_labels(
         "test", args.test_segments_path, len(test_data),
     )
-    # Ablate val/test the SAME way as train so all label widths match the model's
-    # K (otherwise a disabled bottleneck's eval labels would be full-width).
-    lb_val,  fc_val,  gfc_val,  lb_sw_val  = _ablate_bottlenecks(lb_val,  fc_val,  gfc_val,  lb_sw_val)
-    lb_test, fc_test, gfc_test, lb_sw_test = _ablate_bottlenecks(lb_test, fc_test, gfc_test, lb_sw_test)
+    # (val/test bottleneck ablation is applied inside _load_split_labels, before
+    #  its width checks, so all label widths already match the model's K.)
 
     _mask_future = (args.experiment_mode == "lookback_only")
     train_ds = CBMDataset(train_data, lb_train, fc_train, gfc_train, lb_sw_train,
