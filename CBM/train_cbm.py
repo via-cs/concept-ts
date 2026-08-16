@@ -379,6 +379,13 @@ def get_args():
                    help="Ablation: forbid the GLOBAL-FORECAST concept bottleneck.")
     p.add_argument("--disable_lb_sw", action="store_true",
                    help="Ablation: forbid the LOOKBACK sub-window concept bottleneck.")
+    p.add_argument("--test_bottleneck_ablation", type=int, default=0,
+                   help="After training, run a TEST-TIME knockout ablation on the "
+                        "trained model: re-run the test set with each concept "
+                        "bottleneck (lb / fc / gfc) disabled one at a time — its "
+                        "activations forced to their per-concept MEAN so its context "
+                        "carries no per-window info — and print each test MAE + Δ. "
+                        "1=on, 0=off. (Measures reliance; no retraining.)")
     p.add_argument("--leak_diagnostic", type=int, default=1,
                    help="Run the concept-intervention leak diagnostic at test "
                         "time (1=on, 0=off). Re-evaluates test MAE with concept "
@@ -624,6 +631,32 @@ def evaluate(model, loader, device):
             torch.cat(all_gfc_lg),   torch.cat(all_gfc_la),
             torch.cat(all_yh),       torch.cat(all_yt),
             torch.cat(all_lb_sw_lg), torch.cat(all_lb_sw_la))
+
+
+@torch.no_grad()
+def _test_bottleneck_ablation(model, loader, device, tgt_scale, overrides):
+    """Test-time KNOCKOUT ablation on the trained model.
+
+    ``overrides`` maps a mode name to a ``concept_override`` dict (or None for
+    the baseline). For each mode, the test set is re-run with that override in
+    effect — forcing a whole bottleneck's activations to fixed (per-concept
+    mean) values so its CEM context becomes input-independent, i.e. the
+    bottleneck carries no per-window information. Returns
+    ``{mode: {"z": mae_z, "raw": mae_z * tgt_scale}}``. No retraining; the
+    residual channel is left exactly as trained.
+    """
+    model.eval()
+    out = {}
+    for name, ov in overrides.items():
+        mae_sum, denom = 0.0, 0
+        for batch in loader:
+            x, y = batch[0].to(device), batch[1].to(device)
+            y_hat = model(x, concept_override=ov)["y_hat"]
+            mae_sum += (y_hat - y).abs().sum().item()
+            denom   += y.numel()
+        mz = mae_sum / max(1, denom)
+        out[name] = {"z": mz, "raw": mz * tgt_scale}
+    return out
 
 
 @torch.no_grad()
@@ -1555,6 +1588,37 @@ def main():
     print(f"  test MSE      = {test_mse_raw:.4f}  (full model, RAW {_TGT_UNIT}, "
           f"RMSE = {test_mse_raw ** 0.5:.4f})")
     print(f"  test MAE      = {test_mae_raw:.4f}  (full model, RAW {_TGT_UNIT})")
+
+    # ----- Test-time bottleneck knockout ablation (per-concept mean) -----
+    if args.test_bottleneck_ablation:
+        def _mean_ov(layer, logits):
+            # per-concept mean activation over windows (and sub-windows for fc);
+            # None when the bottleneck is empty/disabled.
+            if logits.numel() == 0 or logits.shape[-1] == 0:
+                return None
+            a = torch.sigmoid(logits).reshape(-1, logits.shape[-1]).mean(dim=0)   # (K,)
+            return {layer: {i: float(a[i]) for i in range(a.shape[0])}}
+        overrides = {"baseline": None}
+        for _name, _lg, _lyr in (("disable_lb", t_lb_lg, "lb"),
+                                 ("disable_fc", t_fc_lg, "fc"),
+                                 ("disable_gfc", t_gfc_lg, "gfc")):
+            ov = _mean_ov(_lyr, _lg)
+            if ov is not None:
+                overrides[_name] = ov
+        res = _test_bottleneck_ablation(model, test_loader, device, tgt_scale, overrides)
+        base = res["baseline"]["raw"]
+        print("\n── Test-time bottleneck knockout ablation (per-concept mean) ──")
+        bar = "─" * 64
+        print(bar)
+        print(f"   {'mode':13s}  {'MAE z':>9}  {'MAE '+_TGT_UNIT:>12}  {'Δ vs base':>11}")
+        print(bar)
+        for name, m in res.items():
+            d = "  —" if name == "baseline" else f"{m['raw'] - base:+.3f}"
+            print(f"   {name:13s}  {m['z']:>9.4f}  {m['raw']:>12.3f}  {d:>11}")
+        print(bar)
+        print("   (knockout = force that bottleneck's activations to their per-concept")
+        print("    test-set mean, so its context is input-independent. Measures how much")
+        print("    the TRAINED model relies on it; residual left as trained.)")
 
     # (Concept-only-MAE reporting removed: the model is now strict CBM, so
     #  the full MAE reported above IS the concept-only MAE by construction.
