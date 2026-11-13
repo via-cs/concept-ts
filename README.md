@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ```
 
 ## 🚀 Usage
-1. To run the data preprocessing and statistical extraction, use this command (n_subwindows denotes how many sub-windows you want to have for the forecast horizon):
+1. To run the data preprocessing and statistical extraction, use this command:
 
 ```bash
 python preprocessing/data_preprocessing.py \
@@ -27,6 +27,8 @@ python preprocessing/data_preprocessing.py \
     --input_length 96 --output_length 96 \
     --stride 6 --n_subwindows 24
 ```
+
+n_subwindows denotes how many sub-windows you want to have for the forecast horizon; stride controls the stride between segments that are used to do statistical extraction (lower the stride, higher the concept proposal quality, but longer the data preprocessing time).
 
 2. To run the LLM concept proposal pipeline, import your Claude API:
 
@@ -54,7 +56,7 @@ Wrote validated concepts -> CBM/output/concepts_validated_20260818_064924.json
 ```bash
 python CBM/train_cbm.py \
     --dataset            ./dataset/PRSA_Data/Aotizhongxin.csv \
-    --concepts_path      ./CBM/output/concepts_validated_20260811_134044.json \
+    --concepts_path      ./CBM/output/concepts_validated_20260818_064924.json \
     --segments_path      ./preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments.json \
     --val_segments_path  ./preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments_vali.json \
     --test_segments_path ./preprocessing/output/Aotizhongxin/Aotizhongxin_full_segments_test.json \
