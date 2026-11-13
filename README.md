@@ -9,9 +9,6 @@ This repository contains the official implementation for the **BigData2026** pap
 **ConceptTS** is a multivariate forecasting model that adapts Concept Bottleneck Models (CBM) to provide human-understandable interpretability without scarificing prediction accuracy, guided by LLM which automatically does concept proposal and labeling.
 
 
-
-![Overview](./figs/overview.jpg)
-
 ## 🛠️ Installation
 
 To set up the environment and install all dependencies, run:
