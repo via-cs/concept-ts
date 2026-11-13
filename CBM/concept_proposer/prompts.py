@@ -1,31 +1,100 @@
+# ============================================================================
+# PROMPT v2 (post-BigData-2026-submission cleanup)
+# ============================================================================
+# The v1 prompt is preserved as prompts_v1.py and is the exact text used to
+# generate the concept sets that back the paper's reported results. THIS file
+# (v2) contains documentation fixes and clarifications; behavior on
+# PRSA/hourly runs is essentially identical but LLM outputs will differ in
+# wording.
+#
+# Changes vs v1 (prompts_v1.py):
+#   * Architecture description: "1 + N concept bottlenecks" corrected to
+#     "2 + N in FUTURE-AWARE mode / 1 + N_lb_sw in LOOK-BACK-ONLY mode".
+#     The bulleted list now includes GLOBAL-FORECAST and LOOKBACK-SUB-WINDOW
+#     bottlenecks (previously missing).
+#   * "propose BOTH concept sets" changed to "propose ALL FOUR concept
+#     sets", matching the four-key JSON output format later in the prompt.
+#   * "shared vocabulary" claim clarified: the two modes share only the
+#     LOOKBACK bottleneck, not the sub-window concept vocabulary.
+#   * Added LOOKBACK-SUB-WINDOW to the "MAY reference PM2.5" allowlist in
+#     both the CRITICAL CONSTRAINT block and hard requirement 8 (the
+#     whole lookback history is observed, sub-window or not).
+#   * Removed forecast_stats and forecast_start / forecast_end from the
+#     LOOKBACK schema examples (LOF and PRSA). These fields are present
+#     in the segment dict but were never intended to be used by lookback
+#     concepts; keeping them in the schema confused readers.
+#   * Schema 2 header now lists LOOKBACK-SUB-WINDOW alongside FORECAST-
+#     SUB-WINDOW and FORECAST-GLOBAL (the same dict shape is used for
+#     all three).
+#   * Sub-window trend-rule guidance in PRSA_BLOCK now explicitly covers
+#     both FORECAST-SUB-WINDOW and LOOKBACK-SUB-WINDOW (both are short
+#     and should use delta_half rather than slope). The reference to
+#     "LOOKBACK concepts" that use slope is clarified to mean the
+#     whole-window LOOKBACK bottleneck only.
+#   * PRSA TARGET LEAKAGE WARNING: clarified that LOOKBACK-SUB-WINDOW
+#     concepts may reference PM2.5 (only FORECAST-SUB-WINDOW and
+#     FORECAST-GLOBAL are banned).
+#   * Closing "The trainer uses either..." paragraph moved earlier in the
+#     prompt (right after the bottleneck bullet list) so the reader
+#     understands the two-mode design before reading the constraints.
+#     The "LOOKBACK (global)" wording is replaced by "whole-history
+#     LOOKBACK" to avoid confusion with the GLOBAL-FORECAST bottleneck.
+#
+# Behavior notes:
+#   * PRSA/hourly runs: negligible change ({subwindow_length} and
+#     {subwindow_hours} are equal at 1-hour resolution).
+#   * Regenerating concepts with v2 will produce slightly different
+#     wording from the LLM; concept sets used for the paper live in the
+#     existing concepts_validated_*.json files and remain valid.
+# ============================================================================
+
 """
-Prompt template for the 1 + N concept-bottleneck CBM. The LLM is asked
-to return TWO sets of concepts in one JSON object:
+Prompt template for the multi-scale concept-bottleneck CBM. The LLM is
+asked to return FOUR sets of concepts in one JSON object:
 
-  lookback_concepts  : K_lb atomic predicates over a full segment dict.
-                       Used by the single LOOKBACK concept bottleneck.
+  lookback_concepts             : K_lb atomic predicates over a full
+                                  segment dict. Used by the single
+                                  whole-history LOOKBACK bottleneck.
 
-  forecast_concepts  : K_fc atomic predicates over a SUB-WINDOW dict
-                       (one of N=n_subwindows). Shared across the N
-                       forecast concept bottlenecks -- the rules define
-                       WHAT regimes exist, the per-sub-window activations
-                       capture WHEN each regime fires.
+  lookback_sub_window_concepts  : K_lb_sw atomic predicates over a
+                                  SUB-WINDOW dict from the LOOKBACK
+                                  history. Used by the N_lb_sw
+                                  LOOKBACK-SUB-WINDOW bottlenecks
+                                  (LOOK-BACK-ONLY training mode).
+
+  forecast_concepts             : K_fc atomic predicates over a
+                                  SUB-WINDOW dict from the FORECAST
+                                  horizon. Shared across the N
+                                  FORECAST-SUB-WINDOW bottlenecks --
+                                  the rules define WHAT regimes exist,
+                                  the per-sub-window activations
+                                  capture WHEN each regime fires
+                                  (FUTURE-AWARE training mode).
+
+  forecast_global_concepts      : K_gfc atomic predicates over a
+                                  WHOLE-forecast-horizon view. Used by
+                                  the single GLOBAL-FORECAST bottleneck
+                                  (FUTURE-AWARE training mode).
+
+Emitting all four in one call means one LLM run supports both
+experiment modes.
 
 Schema reminder for the LLM
 ---------------------------
 
-Lookback rules see the standard segment dict:
+Lookback rules see the standard segment dict (only the fields
+lookback concepts should USE are listed here; the dict may contain
+additional fields used elsewhere in the pipeline):
 
     seg = {
       "lookback_stats": {channel -> {mean, std, slope, ...} | {mode, ...}},
-      "forecast_stats": {channel -> ...},
       "cross_channel_stats": {...},
-      "time_context": {lookback_start{...}, lookback_end{...},
-                       forecast_start{...}, forecast_end{...}, season}
+      "time_context": {lookback_start{...}, lookback_end{...}, season}
     }
 
-Forecast rules see a SUB-WINDOW dict (one of the four blocks emitted by
-``preprocessing.data_preprocessing.build_subwindow_blocks``):
+Sub-window rules (FORECAST-SUB-WINDOW, FORECAST-GLOBAL, and
+LOOKBACK-SUB-WINDOW) see a SUB-WINDOW dict (one of the blocks
+emitted by ``preprocessing.data_preprocessing.build_subwindow_blocks``):
 
     sub_seg = {
       "subwindow_idx": int (0..N-1),
@@ -55,6 +124,8 @@ LOF_BLOCK = {
     ),
     "regime_label": "electricity-load",
 
+    # v2: removed forecast_stats and forecast_start/forecast_end -- both are
+    # present in the dict but LOOKBACK concepts should not read them.
     "lookback_schema_example": """```python
 {{
   "lookback_stats": {{
@@ -68,7 +139,6 @@ LOF_BLOCK = {
     }},
     # ... 23 channels total, same continuous/discrete split as schema docs
   }},
-  "forecast_stats": {{ ... same shape, computed over the {output_length}-step forecast window ... }},
   "cross_channel_stats": {{
     "load_corr_Skin_temperature": float,
     "load_corr_Relative_humidity": float,
@@ -81,8 +151,6 @@ LOF_BLOCK = {
   "time_context": {{
     "lookback_start": {{"solar_month": int, "solar_day": int, "hour": int, "minute": int}},
     "lookback_end":   {{...}},
-    "forecast_start": {{...}},
-    "forecast_end":   {{...}},
     "season": "spring" | "summer" | "autumn" | "winter"
   }}
 }}
@@ -233,6 +301,8 @@ PRSA_BLOCK = {
     ),
     "regime_label": "PM2.5 air-quality",
 
+    # v2: removed forecast_stats and forecast_start/forecast_end -- both are
+    # present in the segment dict but LOOKBACK concepts should not read them.
     "lookback_schema_example": """```python
 {{
   "lookback_stats": {{
@@ -241,7 +311,7 @@ PRSA_BLOCK = {
       "max": float, "range": float, "skewness": float,
       "kurtosis": float, "slope": float, "delta_half": float, "volume": float,
       # Frequency-domain features (ONLY present on lookback_stats for
-      # continuous channels; sub-windows and forecast_stats do NOT have them).
+      # continuous channels; sub-window stats do NOT have them).
       "fft_dom_period_h":  float,   # period (hours) of the strongest non-DC frequency
       "fft_dom_amp":       float,   # amplitude at that dominant period
       "fft_spec_entropy":  float,   # 0..1: 0 = strongly periodic, 1 = noisy / flat spectrum
@@ -260,7 +330,6 @@ PRSA_BLOCK = {
     #   continuous: PM10, SO2, NO2, CO, O3, TEMP, PRES, DEWP, RAIN, WSPM, PM2.5
     # Every continuous channel has BOTH the standard stats and the fft_* features.
   }},
-  "forecast_stats": {{ ... same continuous + discrete shape but WITHOUT fft_* fields ... }},
   "cross_channel_stats": {{
     "target_corr_PM10":  float,   # PM10 is the most-correlated pollutant
     "target_corr_WSPM":  float,   # wind speed (typically negative: wind disperses PM)
@@ -272,8 +341,6 @@ PRSA_BLOCK = {
   "time_context": {{
     "lookback_start": {{"month": int, "day": int, "hour": int}},
     "lookback_end":   {{...}},
-    "forecast_start": {{...}},
-    "forecast_end":   {{...}},
     "season": "spring" | "summer" | "autumn" | "winter"
   }}
 }}
@@ -292,6 +359,11 @@ NOTES:
   is strongly daily-periodic". A high ``fft_spec_entropy`` (close to 1) means
   "no clear periodicity, looks like noise or a slow trend".""",
 
+    # v2: TREND-DIRECTION RULES now explicitly cover LOOKBACK-SUB-WINDOW too
+    #     (both FORECAST-SUB-WINDOW and LOOKBACK-SUB-WINDOW are short and
+    #     should prefer delta_half over slope). TARGET LEAKAGE WARNING now
+    #     clarifies that only forecast-side concepts are banned from PM2.5;
+    #     LOOKBACK-SUB-WINDOW concepts MAY reference it.
     "subwindow_schema_example": """```python
 {{
   "subwindow_idx": int (0..N-1, where N = {n_subwindows}),
@@ -304,10 +376,12 @@ NOTES:
     "hour": {{
       "mode": int, "n_unique": int, "distribution": {{...}}
     }},
-    # 14 USABLE channels here: year, month, day, hour, PM10, SO2, NO2, CO, O3,
-    # TEMP, PRES, DEWP, RAIN, WSPM. PM2.5 IS THE PREDICTION TARGET and is
-    # UNKNOWN in the forecast window -- its stats are masked/unavailable, so a
-    # 'PM2.5' key here is NOT a valid input. Do NOT reference PM2.5.
+    # 14 USABLE channels for FORECAST-SUB-WINDOW concepts: year, month, day,
+    # hour, PM10, SO2, NO2, CO, O3, TEMP, PRES, DEWP, RAIN, WSPM. PM2.5 IS
+    # THE PREDICTION TARGET and is UNKNOWN in the forecast window -- for
+    # FORECAST-SUB-WINDOW and FORECAST-GLOBAL concepts, a 'PM2.5' key is
+    # NOT a valid input. LOOKBACK-SUB-WINDOW concepts, however, MAY use
+    # stats['PM2.5'] because the lookback history is observed.
   }},
   "time_context": {{
     "subwindow_idx": int,
@@ -324,32 +398,35 @@ each sub-window covers {subwindow_length} consecutive timesteps. At 1-hour
 resolution that is {subwindow_hours} hours per sub-window.
 
 *** TREND-DIRECTION RULES — USE delta_half, NOT slope, ON SUB-WINDOWS ***
-For any concept of the form "is X rising / falling in this block" or
-"is X trending up over the forecast", USE THE ``delta_half`` STAT, not
-``slope``.  Reason: PRSA sub-windows are {subwindow_hours} hours each.
-If this is a full daily cycle (24h) the OLS slope of cyclical data like
-TEMP/DEWP/wind/pollutants is systematically near zero (the sin/cos
-oscillation averages out of the linear-fit coefficient) -- a ``slope > 0.1``
-rule will basically never fire and the concept's AUROC will be terrible.
-``delta_half`` is mean(second half) - mean(first half); it captures direction
-even on cyclic-with-drift data. Use it as:
+For any concept of the form "is X rising / falling in this block" (whether
+FORECAST-SUB-WINDOW or LOOKBACK-SUB-WINDOW) or "is X trending up over the
+forecast", USE THE ``delta_half`` STAT, not ``slope``. Reason: PRSA
+sub-windows are {subwindow_hours} hours each. If this is a full daily cycle
+(24h) the OLS slope of cyclical data like TEMP/DEWP/wind/pollutants is
+systematically near zero (the sin/cos oscillation averages out of the
+linear-fit coefficient) -- a ``slope > 0.1`` rule will basically never fire
+and the concept's AUROC will be terrible. ``delta_half`` is mean(second half)
+- mean(first half); it captures direction even on cyclic-with-drift data.
+Use it as:
     ``stats['TEMP']['delta_half'] > 0.5``         -- "warmer in second half"
     ``stats['DEWP']['delta_half'] > 1.0``         -- "humidity rising in block"
     ``stats['WSPM']['delta_half'] < -0.3``        -- "wind falling in block"
-``slope`` is still fine for LOOKBACK concepts (96-hour windows have several
-days of drift dominating any one cycle) and for FORECAST-GLOBAL aggregate
-concepts on multi-day horizons. Use ``slope`` only when the window length
-is much longer than the dominant daily cycle.
+``slope`` is still fine for the whole-window LOOKBACK bottleneck (96-hour
+windows have several days of drift dominating any one cycle) and for
+FORECAST-GLOBAL aggregate concepts on multi-day horizons. Use ``slope`` only
+when the window length is much longer than the dominant daily cycle.
 
 *** TARGET LEAKAGE WARNING ***
-PM2.5 is what the model PREDICTS. In the FORECAST window (every sub-window AND
-the whole-forecast view used by global concepts) PM2.5 is unavailable to the
-model -- it is masked out of the inputs. A forecast or forecast-global concept
-that reads ``stats['PM2.5']`` would be defining a concept on the answer itself,
-which is circular and forbidden. FORECAST-SUB-WINDOW and FORECAST-GLOBAL
-concepts must be built ONLY from the known future drivers (meteorology: TEMP,
-PRES, DEWP, RAIN, WSPM; other pollutants: PM10, SO2, NO2, CO, O3; and calendar).
-ONLY lookback concepts may use PM2.5, because the history is observed.""",
+PM2.5 is what the model PREDICTS. In the FORECAST window (every forecast
+sub-window AND the whole-forecast view used by global concepts) PM2.5 is
+unavailable to the model -- it is masked out of the inputs. A forecast or
+forecast-global concept that reads ``stats['PM2.5']`` would be defining a
+concept on the answer itself, which is circular and forbidden.
+FORECAST-SUB-WINDOW and FORECAST-GLOBAL concepts must be built ONLY from
+the known future drivers (meteorology: TEMP, PRES, DEWP, RAIN, WSPM; other
+pollutants: PM10, SO2, NO2, CO, O3; and calendar). LOOKBACK and
+LOOKBACK-SUB-WINDOW concepts MAY use PM2.5 because the lookback history is
+observed.""",
 
     "example_lookback_concepts": """[
   {{
@@ -480,14 +557,28 @@ else:
 
 INITIAL_PROMPT = f"""You are a {_BLOCK['domain_description']}. You are helping design a CONCEPT BOTTLENECK MODEL for interpretable {_BLOCK['regime_label']} forecasting.
 
-The model uses **1 + N concept bottlenecks**:
+The model supports two training modes, both using a single shared whole-history LOOKBACK bottleneck but with different sub-window concept sets:
 
-  * 1 LOOKBACK bottleneck: K_lb concepts that summarise the history window.
-  * N FORECAST bottlenecks (one per forecast sub-window): K_fc shared concepts
-    applied at each sub-window. Same vocabulary, different activations per
-    sub-window.
+  * **FUTURE-AWARE mode** uses **2 + N bottlenecks**:
+    - 1 LOOKBACK bottleneck: K_lb concepts summarising the whole
+      history window.
+    - N FORECAST-SUB-WINDOW bottlenecks: K_fc concepts applied at each
+      of the N forecast sub-windows, sharing the same static concept
+      embeddings but with per-sub-window predictor heads (the same
+      concept can fire with different activations at different
+      sub-windows).
+    - 1 GLOBAL-FORECAST bottleneck: K_gfc concepts spanning the whole
+      forecast horizon as a single unit.
+  * **LOOK-BACK-ONLY mode** uses **1 + N_lb_sw bottlenecks**:
+    - 1 LOOKBACK bottleneck (same as above).
+    - N_lb_sw LOOKBACK-SUB-WINDOW bottlenecks: K_lb_sw concepts applied
+      at each of the N_lb_sw lookback sub-windows.
 
-You will propose BOTH concept sets in a single JSON response.
+You will propose ALL FOUR concept sets in a single JSON response. Each
+training run uses either the forecast side (in ``experiment_mode='future_aware'``)
+OR the lookback-sub-window side (in ``experiment_mode='lookback_only'``);
+the whole-history LOOKBACK set is always used. Emitting all four in one
+shot means one LLM run supports both experiment modes.
 
 ## Task Context
 
@@ -519,14 +610,16 @@ A lookback concept function `def matches(seg) -> bool` receives this dict:
 
 {_BLOCK['lookback_schema_example']}
 
-## Schema 2 — sub-window dict (for FORECAST and FORECAST_GLOBAL concepts)
+## Schema 2 — sub-window dict (for FORECAST-SUB-WINDOW, FORECAST-GLOBAL, and LOOKBACK-SUB-WINDOW concepts)
 
-A forecast concept function `def matches(sub_seg) -> bool` receives this dict.
-Per-sub-window forecast concepts get one such dict per sub-window (rule applied
-{{n_subwindows}} times). Global-forecast concepts get ONE such dict per segment
-whose ``stats`` and ``time_context`` cover the WHOLE {{output_length}}-step
-forecast window (i.e. ``stats`` is the segment's full ``forecast_stats`` and
-``time_context.start`` / ``end`` are the segment's ``forecast_start`` / ``end``):
+A sub-window concept function `def matches(sub_seg) -> bool` receives this
+dict. FORECAST-SUB-WINDOW and LOOKBACK-SUB-WINDOW concepts get one such
+dict per sub-window (rule applied {{n_subwindows}} times per segment for
+FORECAST-SUB-WINDOW, {{n_lookback_subwindows}} times for LOOKBACK-SUB-WINDOW).
+GLOBAL-FORECAST concepts get ONE such dict per segment whose ``stats`` and
+``time_context`` cover the WHOLE {{output_length}}-step forecast window
+(i.e. ``stats`` covers the entire forecast horizon and ``time_context.start``
+/ ``end`` are the segment's forecast-window endpoints):
 
 {_BLOCK['subwindow_schema_example']}
 
@@ -539,7 +632,8 @@ forecast window (i.e. ``stats`` is the segment's full ``forecast_stats`` and
 PM2.5 IS THE PREDICTION TARGET. The forecast window's PM2.5 values are what
 the model has to predict — they are MASKED / UNAVAILABLE at inference time.
 
-  - LOOKBACK concepts MAY reference PM2.5 (the history is observed).
+  - LOOKBACK and LOOKBACK-SUB-WINDOW concepts MAY reference PM2.5
+    (the lookback history is observed, sub-window or not).
   - FORECAST-SUB-WINDOW concepts MUST NOT REFERENCE PM2.5 IN ANY WAY.
   - FORECAST-GLOBAL concepts MUST NOT REFERENCE PM2.5 IN ANY WAY.
 
@@ -653,7 +747,7 @@ Propose FOUR concept sets:
       - "forecast has at least one humid hour" (better as sub-window "is_humid_block")
       - "temperature is rising during the forecast" (better as sub-window dynamics)
 
-Hard requirements for EVERY function (all three sets):
+Hard requirements for EVERY function (all four sets):
 
 1. Named exactly ``matches``. Single positional arg.
 2. **ATOMIC**: the body is ONE return statement evaluating a single boolean
@@ -663,11 +757,11 @@ Hard requirements for EVERY function (all three sets):
    ``False``, never raise.
 4. No imports. Standard Python only.
 5. Aim for **positive_rate in [5%, 60%]** across the {{total_segments}} segments
-   (for forecast rules this is computed across all segment*sub-window pairs).
+   (for sub-window rules this is computed across all segment*sub-window pairs).
 6. **Diversity** across categories: ``season``, ``time_of_day``, ``calendar``,
    ``weather_temperature``, ``weather_other``, ``weather_dynamics``,
    ``pollutant_chemistry``, ``cross_channel``, ``regime``,
-   ``frequency`` (FFT/periodicity-based, **lookback only**),
+   ``frequency`` (FFT/periodicity-based, **whole-history LOOKBACK only**),
    ``aggregate`` / ``threshold`` / ``persistence`` / ``trend`` (good fits for
    the FORECAST-GLOBAL set), ``misc``.
 7. **No compounds**. ``is_history_cold`` is good; ``is_history_cold_and_workday``
@@ -676,6 +770,8 @@ Hard requirements for EVERY function (all three sets):
    PM2.5 is the forecast target. It is OBSERVED in the lookback but
    UNKNOWN (masked) in the forecast window. Therefore:
      - LOOKBACK concepts MAY use ``lookback_stats['PM2.5']``.
+     - LOOKBACK-SUB-WINDOW concepts MAY use ``stats['PM2.5']`` (the
+       lookback history is observed at the sub-window level too).
      - FORECAST-SUB-WINDOW and FORECAST-GLOBAL concepts MUST NOT reference
        ``stats['PM2.5']`` in any way (no mean/max/min/std/slope/median/fft/
        threshold/comparison of PM2.5). A forecast-side rule that touches PM2.5
@@ -718,11 +814,6 @@ Return a single JSON object with this exact shape:
 IDs in each array run 0..K-1 independently (lookback ids start at 0,
 lookback-sub-window ids start at 0, forecast-sub-window ids start at 0,
 forecast-global ids start at 0).
-
-The trainer uses either the forecast side (in ``experiment_mode='future_aware'``)
-OR the lookback-sub-window side (in ``experiment_mode='lookback_only'``);
-the LOOKBACK (global) set is always used. Emitting all four in one shot means
-one LLM run supports both experiment modes.
 
 Return ONLY the JSON object. No prose before or after.
 """
